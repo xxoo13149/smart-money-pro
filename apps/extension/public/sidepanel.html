@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Labels Side Panel</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body class="sidepanel-shell">
+    <main class="sidepanel-app">
+      <header class="sidepanel-header">
+        <div>
+          <p class="sidepanel-eyebrow">Polymarket Smart Money</p>
+          <h1>右侧地址面板</h1>
+          <p class="sidepanel-subtitle">搜索地址库、查看重点摘要，并确认扩展状态是否为绿色正常。</p>
+        </div>
+        <span id="health-pill" class="health-pill" data-tone="neutral">未连接</span>
+      </header>
+
+      <section class="sidepanel-card">
+        <div class="status-row">
+          <div>
+            <div class="status-label">团队会话</div>
+            <strong id="member-label">未登录</strong>
+          </div>
+          <div>
+            <div class="status-label">同步状态</div>
+            <strong id="sync-label">等待连接</strong>
+          </div>
+        </div>
+
+        <div class="control-row">
+          <label class="toggle-field">
+            <input type="checkbox" id="toggle-enabled" />
+            <span>启用智能标注</span>
+          </label>
+          <button type="button" id="refresh-button" class="secondary-button">刷新状态</button>
+        </div>
+
+        <div class="search-block">
+          <label class="field-shell">
+            <span class="field-label">搜索地址或用户名</span>
+            <input
+              id="search-input"
+              class="field-input"
+              type="search"
+              placeholder="例如 LukeGamma / 0x81a6 / whale"
+            />
+          </label>
+          <p class="search-hint">支持地址、显示名、别名、策略摘要和标签搜索。</p>
+        </div>
+
+        <div id="results-meta" class="results-meta">输入内容后会实时搜索已收录地址。</div>
+        <ul id="results-list" class="results-list"></ul>
+      </section>
+
+      <section class="sidepanel-footer">
+        <button type="button" id="open-workbench-button" class="secondary-button">打开工作台</button>
+        <button type="button" id="open-polymarket-button" class="secondary-button">打开 Polymarket</button>
+      </section>
+    </main>
+
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

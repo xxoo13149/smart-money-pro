@@ -1,0 +1,28 @@
+name = "smart-money-edge"
+main = "src/index.ts"
+compatibility_date = "2026-04-07"
+routes = [{ pattern = "app.example.com", custom_domain = true }]
+
+[vars]
+ADMIN_BASE_URL = "https://admin.example.com"
+ADMIN_APPROVAL_OWNER_EMAIL = "owner@example.com"
+ADMIN_APPROVAL_SENDER_EMAIL = "noreply@example.com"
+ADMIN_APPROVAL_SENDER_NAME = "Smart Money Admin"
+PUBLIC_EXTENSION_BASE_URL = "https://app.example.com"
+POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
+POLYMARKET_DATA_URL = "https://data-api.polymarket.com"
+
+[[send_email]]
+name = "ADMIN_APPROVAL_EMAIL"
+destination_address = "owner@example.com"
+allowed_sender_addresses = ["noreply@example.com"]
+
+[[kv_namespaces]]
+binding = "SMART_MONEY_CACHE"
+id = "kv_namespace_id"
+preview_id = "kv_namespace_preview_id"
+
+[[d1_databases]]
+binding = "SMART_MONEY_DB"
+database_name = "smart-money-prod"
+database_id = "d1_database_id"

@@ -1,0 +1,11 @@
+{
+  "mode": __MODE__,
+  "backendBaseUrl": __BACKEND_BASE_URL__,
+  "adminBaseUrl": __ADMIN_BASE_URL__,
+  "allowBackendOverride": __ALLOW_BACKEND_OVERRIDE__,
+  "showDebugControls": __SHOW_DEBUG_CONTROLS__,
+  "enabledMarkets": ["polymarket.com"],
+  "extensionVersion": __EXTENSION_VERSION__,
+  "workbenchPath": __WORKBENCH_PATH__,
+  "privacyPolicyUrl": __PRIVACY_POLICY_URL__
+}

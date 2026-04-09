@@ -1,0 +1,30 @@
+{
+  "name": "@weather-smart-money/web",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "build:cloudflare": "opennextjs-cloudflare build",
+    "preview:cloudflare": "opennextjs-cloudflare preview",
+    "deploy": "npm run build:cloudflare && node ../../scripts/wrangler-cli.mjs deploy -c wrangler.jsonc",
+    "start": "next start",
+    "lint": "next typegen && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@weather-smart-money/core": "0.1.0",
+    "@weather-smart-money/data": "0.1.0",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.2024.0",
+    "@opennextjs/cloudflare": "^1.8.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.0.0"
+  }
+}

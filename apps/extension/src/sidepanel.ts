@@ -1,0 +1,487 @@
+interface PopupViewState {
+  runtimeConfig: {
+    mode: "dev" | "release";
+    backendBaseUrl: string;
+    adminBaseUrl: string;
+    workbenchPath: string;
+    showDebugControls: boolean;
+    privacyPolicyUrl?: string;
+  };
+  config: {
+    enabled: boolean;
+    debugMode: boolean;
+  };
+  auth: {
+    status: "connected" | "signed_out" | "expired";
+    isAuthenticated: boolean;
+    memberLabel?: string;
+    expiresAt?: string;
+    refreshExpiresAt?: string;
+  };
+  sync: {
+    lastSyncAt?: string;
+    lastError?: string;
+  };
+  runtime: {
+    status: "idle" | "bootstrap" | "wake" | "ready" | "degraded" | "disabled" | "signed_out";
+    detail?: string;
+    lastEventAt: string;
+    lastBootstrapAt?: string;
+    lastWakeAt?: string;
+    lastReadyAt?: string;
+    lastDegradedAt?: string;
+    lastHealthAt?: string;
+    lastHealthUploadAt?: string;
+    lastHealthUploadError?: string;
+    lastLabelsVersion?: string;
+  };
+}
+
+interface AddressSearchResult {
+  address: string;
+  normalizedAddress: string;
+  displayName: string;
+  alias?: string;
+  badges: Array<{ id: string; text: string; tone: string }>;
+  noteSnippet?: string;
+  watchlisted: boolean;
+  detailUrl: string;
+  updatedAt: string;
+  version: string;
+  bio?: string;
+  strategyFocus?: string;
+  teamNote?: string;
+}
+
+interface PageSurfaceState {
+  slug?: string;
+  marketSlug?: string;
+  surfaceKind?: "market-main-holders" | "feed-top-holders";
+  surfaceFound: boolean;
+  surfaceActive: boolean;
+  fallbackMode: boolean;
+  rowsDetected: number;
+  rowsAnnotated: number;
+  visibleAddressCount: number;
+  sourceStatus?: "live" | "stale" | "error";
+  labelsVersion?: string;
+  resolvedBy?: "event_slug" | "market_slug" | "next_data_event" | "error";
+  errorCode?: string;
+  language?: string;
+  runtimeStatus?: "bootstrap" | "wake" | "ready" | "degraded" | "disabled";
+  runtimeMessage?: string;
+  lastStageAt?: string;
+  lastBootstrapAt?: string;
+  lastWakeAt?: string;
+  lastReadyAt?: string;
+  lastDegradedAt?: string;
+  lastHealthAt?: string;
+  healthStatus?: "ok" | "error" | "skipped";
+  healthLabelsVersion?: string;
+  healthError?: string;
+  lastUpdatedAt: string;
+}
+
+const healthPill = document.querySelector<HTMLElement>("#health-pill");
+const memberLabel = document.querySelector<HTMLElement>("#member-label");
+const syncLabel = document.querySelector<HTMLElement>("#sync-label");
+const toggleEnabledInput = document.querySelector<HTMLInputElement>("#toggle-enabled");
+const refreshButton = document.querySelector<HTMLButtonElement>("#refresh-button");
+const searchInput = document.querySelector<HTMLInputElement>("#search-input");
+const resultsMeta = document.querySelector<HTMLElement>("#results-meta");
+const resultsList = document.querySelector<HTMLElement>("#results-list");
+const openWorkbenchButton = document.querySelector<HTMLButtonElement>("#open-workbench-button");
+const openPolymarketButton = document.querySelector<HTMLButtonElement>("#open-polymarket-button");
+const sidepanelCard = document.querySelector<HTMLElement>(".sidepanel-card");
+
+let searchTimer: number | null = null;
+let surfaceRefreshTimer: number | null = null;
+
+const sendMessage = <T = unknown>(message: unknown): Promise<T> =>
+  new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response: { ok?: boolean; error?: string; payload?: T }) => {
+      if (chrome.runtime.lastError) {
+        reject(chrome.runtime.lastError);
+        return;
+      }
+      if (response?.ok === false) {
+        reject(new Error(response.error ?? "unknown"));
+        return;
+      }
+      resolve((response as { payload?: T }).payload ?? (response as T));
+    });
+  });
+
+const setHealth = (text: string, tone: "neutral" | "success" | "error") => {
+  if (!healthPill) {
+    return;
+  }
+  healthPill.textContent = text;
+  healthPill.dataset.tone = tone;
+};
+
+const formatRuntimeStatus = (
+  status?: PopupViewState["runtime"]["status"] | PageSurfaceState["runtimeStatus"]
+) => {
+  switch (status) {
+    case "bootstrap":
+      return "Bootstrap";
+    case "wake":
+      return "Wake";
+    case "ready":
+      return "Ready";
+    case "degraded":
+      return "Degraded";
+    case "disabled":
+      return "Disabled";
+    case "signed_out":
+      return "Signed out";
+    default:
+      return "Idle";
+  }
+};
+
+const formatSurfaceKind = (kind?: PageSurfaceState["surfaceKind"]) => {
+  switch (kind) {
+    case "market-main-holders":
+      return "Main holders";
+    case "feed-top-holders":
+      return "Feed top holders";
+    default:
+      return "Unknown";
+  }
+};
+
+const ensureSurfaceInfoSection = () => {
+  const existing = document.querySelector<HTMLElement>("[data-surface-info='1']");
+  if (existing) {
+    return existing;
+  }
+
+  const section = document.createElement("section");
+  section.dataset.surfaceInfo = "1";
+  section.className = "surface-info";
+  section.style.paddingBottom = "0.75rem";
+  section.style.marginBottom = "0.75rem";
+  section.style.borderBottom = "1px solid rgba(255,255,255,0.08)";
+  section.innerHTML = `
+    <p style="font-weight:600;margin-bottom:0.5rem;">Page Runtime</p>
+    <div data-row="runtime"></div>
+    <div data-row="status"></div>
+    <div data-row="kind"></div>
+    <div data-row="rows"></div>
+    <div data-row="annotated"></div>
+    <div data-row="degraded"></div>
+    <div data-row="health"></div>
+    <div data-row="updated"></div>
+  `;
+
+  Array.from(section.querySelectorAll<HTMLElement>("[data-row]")).forEach((row) => {
+    row.style.display = "flex";
+    row.style.justifyContent = "space-between";
+    row.style.marginBottom = "0.25rem";
+  });
+
+  const labels: Record<string, string> = {
+    runtime: "Runtime",
+    status: "Surface",
+    kind: "Kind",
+    rows: "Rows",
+    annotated: "Annotated",
+    degraded: "Degraded",
+    health: "Health",
+    updated: "Updated"
+  };
+
+  Object.entries(labels).forEach(([key, label]) => {
+    const row = section.querySelector<HTMLElement>(`[data-row="${key}"]`);
+    if (!row) {
+      return;
+    }
+
+    const left = document.createElement("span");
+    left.textContent = label;
+    left.style.opacity = "0.8";
+
+    const right = document.createElement("span");
+    right.dataset.value = key;
+    right.style.fontWeight = "500";
+
+    row.append(left, right);
+  });
+
+  sidepanelCard?.insertBefore(section, sidepanelCard.firstElementChild ?? null);
+  return section;
+};
+
+const setSurfaceValue = (key: string, value: string) => {
+  const node = ensureSurfaceInfoSection().querySelector<HTMLElement>(`[data-value="${key}"]`);
+  if (node) {
+    node.textContent = value;
+  }
+};
+
+const renderSurfaceInfo = (state: PageSurfaceState | null) => {
+  if (!state) {
+    setSurfaceValue("runtime", "Waiting");
+    setSurfaceValue("status", "No data");
+    setSurfaceValue("kind", "Waiting");
+    setSurfaceValue("rows", "Waiting");
+    setSurfaceValue("annotated", "Waiting");
+    setSurfaceValue("degraded", "Waiting");
+    setSurfaceValue("health", "Waiting");
+    setSurfaceValue("updated", "Waiting");
+    return;
+  }
+
+  setSurfaceValue("runtime", formatRuntimeStatus(state.runtimeStatus));
+  setSurfaceValue(
+    "status",
+    !state.surfaceFound ? "Surface missing" : state.rowsAnnotated > 0 ? "Annotated" : state.errorCode || "Waiting"
+  );
+  setSurfaceValue("kind", formatSurfaceKind(state.surfaceKind));
+  setSurfaceValue("rows", String(state.rowsDetected));
+  setSurfaceValue("annotated", String(state.rowsAnnotated));
+  setSurfaceValue("degraded", state.fallbackMode ? "Yes" : "No");
+  setSurfaceValue(
+    "health",
+    state.healthStatus === "ok"
+      ? `OK${state.healthLabelsVersion ? ` · ${state.healthLabelsVersion}` : ""}`
+      : state.healthStatus === "error"
+        ? state.healthError || "Error"
+        : state.healthStatus === "skipped"
+          ? "Skipped"
+          : "Waiting"
+  );
+  setSurfaceValue("updated", state.lastUpdatedAt ? new Date(state.lastUpdatedAt).toLocaleString() : "Waiting");
+};
+
+const renderState = (state: PopupViewState) => {
+  if (memberLabel) {
+    memberLabel.textContent = state.auth.memberLabel ?? "Not signed in";
+  }
+
+  if (toggleEnabledInput) {
+    toggleEnabledInput.checked = state.config.enabled;
+  }
+
+  if (state.auth.status === "expired") {
+    setHealth("Session expired", "error");
+    if (syncLabel) {
+      syncLabel.textContent = "Reconnect from the popup.";
+    }
+    return;
+  }
+
+  if (!state.auth.isAuthenticated) {
+    setHealth("Not connected", "neutral");
+    if (syncLabel) {
+      syncLabel.textContent = "Sign in from the popup first.";
+    }
+    return;
+  }
+
+  if (!state.config.enabled) {
+    setHealth("Disabled", "error");
+    if (syncLabel) {
+      syncLabel.textContent = "Enable runtime injection to annotate Polymarket.";
+    }
+    return;
+  }
+
+  if (state.sync.lastError || state.runtime.lastHealthUploadError) {
+    setHealth("Degraded", "error");
+    if (syncLabel) {
+      syncLabel.textContent = state.runtime.lastHealthUploadError || state.sync.lastError || "Runtime degraded.";
+    }
+    return;
+  }
+
+  if (state.runtime.status === "bootstrap" || state.runtime.status === "wake") {
+    setHealth(formatRuntimeStatus(state.runtime.status), "neutral");
+  } else if (state.runtime.status === "degraded") {
+    setHealth("Degraded", "error");
+  } else {
+    setHealth("Ready", "success");
+  }
+
+  if (syncLabel) {
+    syncLabel.textContent =
+      state.runtime.detail?.trim() ||
+      (state.sync.lastSyncAt
+        ? `Last sync ${new Date(state.sync.lastSyncAt).toLocaleString()}`
+        : "Connected and waiting for page activity.");
+  }
+};
+
+const renderResults = (items: AddressSearchResult[]) => {
+  if (!resultsList || !resultsMeta) {
+    return;
+  }
+
+  if (items.length === 0) {
+    resultsMeta.textContent = "No matching wallets found.";
+    resultsList.innerHTML = "";
+    return;
+  }
+
+  resultsMeta.textContent = `Found ${items.length} result(s).`;
+  resultsList.innerHTML = "";
+
+  items.forEach((item) => {
+    const row = document.createElement("li");
+    row.className = "result-card";
+    row.innerHTML = `
+      <div class="result-head">
+        <div class="result-name">${item.alias?.trim() || item.displayName || item.address}</div>
+        <a class="result-link" href="${item.detailUrl}" target="_blank" rel="noreferrer">Workbench</a>
+      </div>
+      <div class="result-address">${item.address}</div>
+      <div class="result-copy">${item.strategyFocus || item.noteSnippet || item.bio || item.teamNote || "No summary yet."}</div>
+      <div class="badge-cluster"></div>
+    `;
+
+    const badgeCluster = row.querySelector<HTMLElement>(".badge-cluster");
+    item.badges.slice(0, 4).forEach((badge) => {
+      const badgeNode = document.createElement("span");
+      badgeNode.className = "badge";
+      badgeNode.textContent = badge.text;
+      badgeCluster?.append(badgeNode);
+    });
+
+    resultsList.append(row);
+  });
+};
+
+const refreshSurfaceInfo = async () => {
+  try {
+    const payload = await sendMessage<PageSurfaceState | null>({ type: "wsm:getPageSurfaceState" });
+    renderSurfaceInfo(payload ?? null);
+  } catch (error) {
+    console.error("surface info fetch", error);
+    renderSurfaceInfo(null);
+  }
+};
+
+const refreshState = async () => {
+  try {
+    const state = await sendMessage<PopupViewState>({ type: "wsm:getPopupState" });
+    renderState(state);
+    await refreshSurfaceInfo();
+  } catch (error) {
+    console.error(error);
+    setHealth("Read failed", "error");
+    if (syncLabel) {
+      syncLabel.textContent = "Unable to read extension state.";
+    }
+  }
+};
+
+const refreshCurrentTabAnnotations = async () => {
+  try {
+    await sendMessage({ type: "wsm:refreshActiveTab" });
+  } catch (error) {
+    console.error(error);
+  }
+};
+
+const runSearch = async () => {
+  const query = searchInput?.value.trim() ?? "";
+  if (!query) {
+    if (resultsMeta) {
+      resultsMeta.textContent = "Search by wallet, alias, or strategy note.";
+    }
+    if (resultsList) {
+      resultsList.innerHTML = "";
+    }
+    return;
+  }
+
+  if (resultsMeta) {
+    resultsMeta.textContent = "Searching...";
+  }
+
+  try {
+    const items = await sendMessage<AddressSearchResult[]>({
+      type: "wsm:searchAddresses",
+      query,
+      limit: 12
+    });
+    renderResults(items);
+  } catch (error) {
+    console.error(error);
+    if (resultsMeta) {
+      resultsMeta.textContent = "Search failed. Try again later.";
+    }
+  }
+};
+
+toggleEnabledInput?.addEventListener("change", () => {
+  void sendMessage<{ state?: PopupViewState }>({
+    type: "wsm:updateConfig",
+    patch: { enabled: Boolean(toggleEnabledInput.checked) }
+  })
+    .then(async (payload) => {
+      if (payload.state) {
+        renderState(payload.state);
+      }
+      await refreshCurrentTabAnnotations();
+      await refreshSurfaceInfo();
+    })
+    .catch((error) => {
+      console.error(error);
+      setHealth("Update failed", "error");
+      if (syncLabel) {
+        syncLabel.textContent = "Failed to update runtime settings.";
+      }
+    });
+});
+
+refreshButton?.addEventListener("click", () => {
+  void refreshCurrentTabAnnotations().finally(() => {
+    void refreshState();
+  });
+});
+
+searchInput?.addEventListener("input", () => {
+  if (searchTimer) {
+    window.clearTimeout(searchTimer);
+  }
+  searchTimer = window.setTimeout(() => {
+    void runSearch();
+  }, 180);
+});
+
+openWorkbenchButton?.addEventListener("click", () => {
+  void sendMessage({ type: "wsm:openWorkbench" }).catch((error) => {
+    console.error(error);
+    setHealth("Open failed", "error");
+    if (syncLabel) {
+      syncLabel.textContent = "Unable to open workbench.";
+    }
+  });
+});
+
+openPolymarketButton?.addEventListener("click", () => {
+  void sendMessage({ type: "wsm:openPolymarket" }).catch((error) => {
+    console.error(error);
+    setHealth("Open failed", "error");
+    if (syncLabel) {
+      syncLabel.textContent = "Unable to open Polymarket.";
+    }
+  });
+});
+
+const startSurfaceInfoPoll = () => {
+  if (surfaceRefreshTimer) {
+    window.clearInterval(surfaceRefreshTimer);
+  }
+  surfaceRefreshTimer = window.setInterval(() => {
+    void refreshSurfaceInfo();
+  }, 30_000);
+};
+
+void refreshState();
+startSurfaceInfoPoll();
+
+export {};

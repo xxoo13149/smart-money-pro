@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Polymarket Smart Labels</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="popup-shell">
+    <main class="popup-app">
+      <header class="popup-header">
+        <div>
+          <p class="eyebrow">Smart Labels</p>
+          <h1>智能标注控制台</h1>
+          <p class="subtitle">登录团队地址库、查看同步状态，并一键打开右侧面板。</p>
+        </div>
+        <div class="status-sphere">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="status-text" class="status-chip" data-tone="neutral">未连接</span>
+        </div>
+      </header>
+
+      <section class="session-card">
+        <form id="login-form" class="login-form">
+          <label class="field">
+            <span class="field-label">邀请码</span>
+            <input
+              id="invite-code"
+              name="inviteCode"
+              type="text"
+              autocomplete="off"
+              placeholder="请输入团队邀请码"
+              required
+            />
+          </label>
+          <button type="submit" id="login-button" class="primary-button">连接地址库</button>
+        </form>
+
+        <div id="session-panel" class="session-panel hidden">
+          <div class="session-meta">
+            <div>
+              <p class="session-label">当前成员</p>
+              <strong id="session-member">未登录</strong>
+            </div>
+            <div>
+              <p class="session-label">连接状态</p>
+              <strong id="session-status">未连接</strong>
+            </div>
+          </div>
+
+          <dl class="session-grid">
+            <div>
+              <dt>访问过期</dt>
+              <dd id="expires-at">-</dd>
+            </div>
+            <div>
+              <dt>续期截止</dt>
+              <dd id="refresh-expires-at">-</dd>
+            </div>
+            <div>
+              <dt>上次同步</dt>
+              <dd id="last-sync">-</dd>
+            </div>
+            <div>
+              <dt>后端地址</dt>
+              <dd id="backend-origin">-</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="session-controls">
+          <label class="toggle-field">
+            <input type="checkbox" id="toggle-enabled" />
+            <span>启用 Polymarket 页内标注</span>
+          </label>
+          <label class="toggle-field hidden" id="debug-controls">
+            <input type="checkbox" id="toggle-debug" />
+            <span>调试模式</span>
+          </label>
+          <div class="feature-status">
+            <span class="feature-pill">运行状态</span>
+            <span class="feature-copy" id="runtime-target">等待连接</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="panel-title">右侧面板</p>
+              <p class="panel-subtitle">搜索地址库、查看更多摘要，并确认当前状态是否为绿色正常。</p>
+            </div>
+          </div>
+          <div class="session-actions">
+            <button type="button" id="open-sidepanel-button" class="primary-button">打开右侧面板</button>
+            <button type="button" id="open-workbench-button" class="secondary-button">打开工作台</button>
+          </div>
+        </div>
+
+        <div class="quick-links">
+          <button type="button" id="open-polymarket-button" class="secondary-button">打开 Polymarket</button>
+          <button type="button" id="refresh-state-button" class="secondary-button ghost">刷新状态</button>
+          <button type="button" id="logout-button" class="ghost-button">退出登录</button>
+        </div>
+      </section>
+
+      <footer class="popup-footer">
+        <a id="privacy-link" href="#" target="_blank" rel="noreferrer">隐私说明</a>
+      </footer>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

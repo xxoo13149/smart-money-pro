@@ -1,0 +1,23 @@
+{
+  "name": "@weather-smart-money/worker",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler build",
+    "compile": "tsc -p tsconfig.json",
+    "deploy": "node ../../scripts/wrangler-cli.mjs deploy -c wrangler.toml",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@weather-smart-money/core": "0.1.0",
+    "@weather-smart-money/data": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@cloudflare/workers-types": "^4.2024.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^4.80.0"
+  }
+}

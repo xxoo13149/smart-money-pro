@@ -1,0 +1,22 @@
+{
+  "name": "weather-smart-money",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/web",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:worker": "npm run dev -w apps/worker",
+    "dev:open": "powershell -ExecutionPolicy Bypass -File .\\open-dev.ps1",
+    "deploy:cloudflare": "node scripts/deploy-cloudflare.mjs",
+    "build": "npm run build -w packages/core && npm run build -w packages/data && npm run build -w apps/web && npm run build -w apps/worker && npm run build -w apps/extension",
+    "test": "npm run test -w packages/core",
+    "lint": "npm run lint -w packages/core && npm run build -w packages/core && npm run lint -w packages/data && npm run build -w packages/data && npm run lint -w apps/web && npm run lint -w apps/worker && npm run lint -w apps/extension"
+  },
+  "devDependencies": {
+    "puppeteer-core": "^24.40.0"
+  }
+}

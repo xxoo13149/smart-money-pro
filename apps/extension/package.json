@@ -1,0 +1,16 @@
+{
+  "name": "@weather-smart-money/extension",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "build:dev": "cross-env-shell EXTENSION_BUILD_TARGET=dev \"tsc -p tsconfig.json && node scripts/copy-static.mjs && node scripts/smoke-check.mjs\"",
+    "build:release": "cross-env-shell EXTENSION_BUILD_TARGET=release \"tsc -p tsconfig.json && node scripts/copy-static.mjs && node scripts/smoke-check.mjs\"",
+    "build": "npm run build:release",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "smoke": "node scripts/smoke-check.mjs"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "typescript": "^5.7.2"
+  }
+}
