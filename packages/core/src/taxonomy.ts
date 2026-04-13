@@ -1,4 +1,9 @@
 ﻿import type { AlertEventType } from "./types.js";
+import type {
+  AddressLabelBadge,
+  WalletLabelKind,
+  WalletPrimarySignalKind
+} from "./types.js";
 
 export const SYSTEM_LABEL_NAMES = [
   ">1年老钱包",
@@ -35,3 +40,53 @@ export const ALERT_EVENT_META: Record<
     description: "短时间内同一地址多次翻转方向，风格不稳定。"
   }
 };
+
+export const PRIMARY_SIGNAL_KIND_PRIORITY: Record<WalletPrimarySignalKind, number> =
+  {
+    payout_region: 500,
+    winrate_region: 400,
+    frequency_region: 300,
+    geo_specialty: 200,
+    trader_archetype: 100
+  };
+
+export const PRIMARY_SIGNAL_LABEL_KINDS = new Set<WalletLabelKind>([
+  "payout_region",
+  "winrate_region",
+  "frequency_region",
+  "geo_specialty",
+  "trader_archetype"
+]);
+
+const BADGE_TONE_PRIORITY: Record<AddressLabelBadge["tone"], number> = {
+  alert: 40,
+  watch: 30,
+  accent: 20,
+  neutral: 10
+};
+
+const FALLBACK_PRIORITY = 0;
+
+export const isPrimarySignalLabelKind = (
+  kind?: WalletLabelKind
+): kind is WalletPrimarySignalKind =>
+  kind !== undefined && PRIMARY_SIGNAL_LABEL_KINDS.has(kind);
+
+export const getPrimarySignalPriority = (kind?: WalletLabelKind) =>
+  isPrimarySignalLabelKind(kind) ? PRIMARY_SIGNAL_KIND_PRIORITY[kind] : FALLBACK_PRIORITY;
+
+export const getAddressBadgePriority = (badge: Pick<
+  AddressLabelBadge,
+  "priority" | "kind" | "isPrimary" | "tone"
+>) =>
+  (badge.priority ?? 0) +
+  getPrimarySignalPriority(badge.kind) +
+  (badge.isPrimary ? 200 : 0) +
+  (BADGE_TONE_PRIORITY[badge.tone] ?? 0);
+
+export const compareAddressBadges = (left: AddressLabelBadge, right: AddressLabelBadge) =>
+  getAddressBadgePriority(right) - getAddressBadgePriority(left) ||
+  left.text.localeCompare(right.text, "zh-CN");
+
+export const sortAddressBadges = <T extends AddressLabelBadge>(badges: readonly T[]) =>
+  [...badges].sort(compareAddressBadges);

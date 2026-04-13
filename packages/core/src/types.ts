@@ -30,6 +30,22 @@ export type WalletLabelKind =
   | "weather_driver"
   | "signal_quality";
 
+export type WalletPrimarySignalKind =
+  | "geo_specialty"
+  | "frequency_region"
+  | "winrate_region"
+  | "payout_region"
+  | "trader_archetype";
+
+export interface WalletPrimarySignal {
+  kind: WalletPrimarySignalKind;
+  label: string;
+  region?: string;
+  metricText?: string;
+  evidence?: string;
+  priority?: number;
+}
+
 export type WalletWeatherMarketScope =
   | "single_city_max_temp"
   | "multi_city_temp"
@@ -259,6 +275,11 @@ export interface AddressLabelBadge {
   id: string;
   text: string;
   tone: "accent" | "neutral" | "watch" | "alert";
+  kind?: WalletLabelKind;
+  priority?: number;
+  detailText?: string;
+  metricText?: string;
+  isPrimary?: boolean;
 }
 
 export interface AddressSummary {
@@ -266,7 +287,11 @@ export interface AddressSummary {
   address: string;
   normalizedAddress: NormalizedAddress;
   alias?: string;
+  displayName?: string;
+  strategyFocus?: string;
   badges: AddressLabelBadge[];
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -285,6 +310,7 @@ export interface WalletImportLabelDraft {
   name: string;
   value: string;
   kind: WalletLabelKind;
+  evidence?: string;
 }
 
 export interface WalletImportWalletDraft {
@@ -326,6 +352,9 @@ export interface WalletAiExtractPreviewRow extends WalletImportPreviewRow {
   confidence: WalletAiConfidence;
   signalQuality: WalletAiSignalQuality;
   weatherSignals: WalletWeatherSignalDraft;
+  highlightTags: string[];
+  keyMetrics: string[];
+  primarySignals: WalletPrimarySignal[];
   providerMeta?: WalletAiProviderMeta;
 }
 
@@ -519,7 +548,11 @@ export interface ResolvedInlineAnnotation {
   source: InlineAnnotationSource;
   renderMode: InlineAnnotationRenderMode;
   aliasText: string;
+  displayName?: string;
+  strategyFocus?: string;
   primaryBadge?: AddressLabelBadge;
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
   noteSnippet?: string;
   detailUrl: string;
   summaryVersion: string;
