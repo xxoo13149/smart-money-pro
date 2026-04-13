@@ -1,19 +1,22 @@
-import { normalizeAddress } from "@weather-smart-money/core";
-import type {
-  WalletAiConfidence,
-  WalletAiExtractPreviewRow,
-  WalletAiExtractRequest,
-  WalletAiProviderMeta,
-  WalletAiSignalQuality,
-  WalletImportLabelDraft,
-  WalletLabelKind,
-  WalletWeatherDriver,
-  WalletWeatherEdgeStyle,
-  WalletWeatherForecastBasis,
-  WalletWeatherMarketScope,
-  WalletWeatherResolutionSource,
-  WalletWeatherSignalDraft,
-  WalletWeatherTimingWindow
+import {
+  PRIMARY_SIGNAL_KIND_PRIORITY,
+  normalizeAddress,
+  type WalletAiConfidence,
+  type WalletAiExtractPreviewRow,
+  type WalletAiExtractRequest,
+  type WalletAiProviderMeta,
+  type WalletAiSignalQuality,
+  type WalletImportLabelDraft,
+  type WalletLabelKind,
+  type WalletPrimarySignal,
+  type WalletPrimarySignalKind,
+  type WalletWeatherDriver,
+  type WalletWeatherEdgeStyle,
+  type WalletWeatherForecastBasis,
+  type WalletWeatherMarketScope,
+  type WalletWeatherResolutionSource,
+  type WalletWeatherSignalDraft,
+  type WalletWeatherTimingWindow
 } from "@weather-smart-money/core";
 
 import { getSmartMoneyBindings } from "./cloudflare-env";
@@ -38,6 +41,14 @@ interface AiExtractSchemaSignals {
   evidenceQuality?: string;
 }
 
+interface AiExtractSchemaPrimarySignal {
+  kind?: string;
+  label?: string;
+  region?: string;
+  metricText?: string;
+  evidence?: string;
+}
+
 interface AiExtractSchemaItem {
   address?: string;
   displayName?: string;
@@ -48,6 +59,9 @@ interface AiExtractSchemaItem {
   watchlist?: boolean;
   confidence?: string;
   sourceExcerpt?: string;
+  highlightTags?: string[];
+  keyMetrics?: string[];
+  primarySignals?: AiExtractSchemaPrimarySignal[];
   weatherSignals?: AiExtractSchemaSignals;
 }
 
@@ -57,23 +71,44 @@ const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-lite";
 const DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b";
 
 const MAX_ALIAS_LENGTH = 18;
-const MAX_SUMMARY_LENGTH = 84;
+const MAX_SUMMARY_LENGTH = 42;
 const MAX_LABEL_VALUE_LENGTH = 24;
-const MAX_SOURCE_EXCERPT_LENGTH = 320;
+const MAX_SOURCE_EXCERPT_LENGTH = 360;
 const MAX_BIO_LENGTH = 600;
 const MAX_TEAM_NOTE_LENGTH = 320;
 const WEATHER_DRIVER_LIMIT = 2;
+const MAX_HIGHLIGHT_TAG_LENGTH = 32;
+const MAX_HIGHLIGHT_TAG_COUNT = 8;
+const MAX_KEY_METRIC_LENGTH = 48;
+const MAX_KEY_METRIC_COUNT = 5;
+const MAX_PRIMARY_SIGNAL_COUNT = 5;
+
+const PRIMARY_SIGNAL_KINDS = [
+  "geo_specialty",
+  "frequency_region",
+  "winrate_region",
+  "payout_region",
+  "trader_archetype"
+] as const satisfies readonly WalletPrimarySignalKind[];
 
 const VALID_CONFIDENCE = new Set<WalletAiConfidence>(["high", "medium", "low", "unknown"]);
-const WEATHER_MAIN_LABEL_KINDS = [
+const VALID_PRIMARY_SIGNAL_KIND = new Set<WalletPrimarySignalKind>(PRIMARY_SIGNAL_KINDS);
+const PRIMARY_SIGNAL_LABEL_KINDS: Record<WalletPrimarySignalKind, WalletLabelKind> = {
+  geo_specialty: "geo_specialty",
+  frequency_region: "frequency_region",
+  winrate_region: "winrate_region",
+  payout_region: "payout_region",
+  trader_archetype: "trader_archetype"
+};
+const WEATHER_HIGHLIGHT_LABEL_KINDS = new Set<WalletLabelKind>([
+  ...Object.values(PRIMARY_SIGNAL_LABEL_KINDS),
   "resolution_source",
   "forecast_basis",
   "timing_window",
   "edge_style",
-  "weather_driver"
-] as const satisfies readonly WalletLabelKind[];
-
-const WEATHER_HIGHLIGHT_LABEL_KINDS = new Set<WalletLabelKind>(WEATHER_MAIN_LABEL_KINDS);
+  "weather_driver",
+  "signal_quality"
+]);
 
 const VALID_MARKET_SCOPE = new Set<WalletWeatherMarketScope>([
   "single_city_max_temp",
@@ -81,7 +116,6 @@ const VALID_MARKET_SCOPE = new Set<WalletWeatherMarketScope>([
   "mixed_weather",
   "unknown"
 ]);
-
 const VALID_RESOLUTION_SOURCE = new Set<WalletWeatherResolutionSource>([
   "nws_noaa",
   "jma",
@@ -90,7 +124,6 @@ const VALID_RESOLUTION_SOURCE = new Set<WalletWeatherResolutionSource>([
   "official_other",
   "unknown"
 ]);
-
 const VALID_FORECAST_BASIS = new Set<WalletWeatherForecastBasis>([
   "ensemble_guidance",
   "official_grid",
@@ -99,7 +132,6 @@ const VALID_FORECAST_BASIS = new Set<WalletWeatherForecastBasis>([
   "narrative_only",
   "unknown"
 ]);
-
 const VALID_TIMING_WINDOW = new Set<WalletWeatherTimingWindow>([
   "d2_plus",
   "d1",
@@ -107,7 +139,6 @@ const VALID_TIMING_WINDOW = new Set<WalletWeatherTimingWindow>([
   "near_close",
   "unknown"
 ]);
-
 const VALID_EDGE_STYLE = new Set<WalletWeatherEdgeStyle>([
   "upper_tail",
   "baseline_mean",
@@ -116,7 +147,6 @@ const VALID_EDGE_STYLE = new Set<WalletWeatherEdgeStyle>([
   "obs_reaction",
   "unknown"
 ]);
-
 const VALID_WEATHER_DRIVERS = new Set<WalletWeatherDriver>([
   "cloud_cover",
   "precip_timing",
@@ -128,7 +158,6 @@ const VALID_WEATHER_DRIVERS = new Set<WalletWeatherDriver>([
   "storm_outflow",
   "unknown"
 ]);
-
 const VALID_EVIDENCE_QUALITY = new Set<WalletWeatherSignalDraft["evidenceQuality"]>([
   "explicit_numeric",
   "source_named",
@@ -138,6 +167,8 @@ const VALID_EVIDENCE_QUALITY = new Set<WalletWeatherSignalDraft["evidenceQuality
 
 const WATCHLIST_CUE =
   /(重点观察|持续跟踪|持续关注|关键样本|重点样本|重点跟踪|观察名单|watchlist|track closely|keep watching|priority sample)/i;
+const GENERIC_SUMMARY_CUE =
+  /(聪明|稳健|经验丰富|激进|高手|值得关注|smart money|experienced|smart|strong)/i;
 
 const MARKET_SCOPE_COPY: Record<WalletWeatherMarketScope, string> = {
   single_city_max_temp: "单城最高温",
@@ -145,7 +176,6 @@ const MARKET_SCOPE_COPY: Record<WalletWeatherMarketScope, string> = {
   mixed_weather: "混合天气",
   unknown: "未知范围"
 };
-
 const RESOLUTION_SOURCE_COPY: Record<WalletWeatherResolutionSource, string> = {
   nws_noaa: "NWS/NOAA",
   jma: "JMA",
@@ -154,7 +184,6 @@ const RESOLUTION_SOURCE_COPY: Record<WalletWeatherResolutionSource, string> = {
   official_other: "官方站点",
   unknown: "未知来源"
 };
-
 const FORECAST_BASIS_COPY: Record<WalletWeatherForecastBasis, string> = {
   ensemble_guidance: "集合预报",
   official_grid: "官方格点",
@@ -163,7 +192,6 @@ const FORECAST_BASIS_COPY: Record<WalletWeatherForecastBasis, string> = {
   narrative_only: "文字判断",
   unknown: "未知依据"
 };
-
 const TIMING_WINDOW_COPY: Record<WalletWeatherTimingWindow, string> = {
   d2_plus: "D2+",
   d1: "D1",
@@ -171,16 +199,14 @@ const TIMING_WINDOW_COPY: Record<WalletWeatherTimingWindow, string> = {
   near_close: "近收盘",
   unknown: "未知窗口"
 };
-
 const EDGE_STYLE_COPY: Record<WalletWeatherEdgeStyle, string> = {
-  upper_tail: "做上尾",
+  upper_tail: "做上沿",
   baseline_mean: "基线均值",
   range_threshold: "区间阈值",
   late_reprice: "临近重定价",
   obs_reaction: "实况反应",
   unknown: "未知下注边"
 };
-
 const WEATHER_DRIVER_COPY: Record<WalletWeatherDriver, string> = {
   cloud_cover: "云量",
   precip_timing: "降水时点",
@@ -192,23 +218,26 @@ const WEATHER_DRIVER_COPY: Record<WalletWeatherDriver, string> = {
   storm_outflow: "雷暴外流",
   unknown: "未知驱动"
 };
-
 const SIGNAL_QUALITY_COPY: Record<WalletAiSignalQuality, string> = {
   high_signal: "高信号",
   needs_review: "需复核",
   low_signal: "低信号"
 };
-
-const LABEL_NAME_COPY: Record<
-  | "market_scope"
-  | "resolution_source"
-  | "forecast_basis"
-  | "timing_window"
-  | "edge_style"
-  | "weather_driver"
-  | "signal_quality",
-  string
-> = {
+const LABEL_NAME_COPY: Record<WalletLabelKind, string> = {
+  wallet_age: "钱包年龄",
+  performance: "表现",
+  specialty: "专精",
+  style: "风格",
+  risk: "风险",
+  group: "标签",
+  alias: "别名",
+  confidence: "置信度",
+  strategy: "策略",
+  geo_specialty: "地点专精",
+  frequency_region: "高频地区",
+  winrate_region: "高胜率地区",
+  payout_region: "高暴击地区",
+  trader_archetype: "选手类型",
   market_scope: "市场范围",
   resolution_source: "结算来源",
   forecast_basis: "预测依据",
@@ -216,6 +245,48 @@ const LABEL_NAME_COPY: Record<
   edge_style: "下注边",
   weather_driver: "天气驱动",
   signal_quality: "信号质量"
+};
+
+const TRADER_ARCHETYPE_NORMALIZERS = [
+  { pattern: /(彩票型|彩票选手|lottery)/i, label: "彩票型选手" },
+  { pattern: /(拆分型|拆分选手|split)/i, label: "拆分型选手" },
+  { pattern: /(流动型|流政型|流动选手|flow|liquid)/i, label: "流动型选手" }
+] as const;
+
+const compactText = (value: unknown) =>
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+
+const truncateText = (value: string, maxLength: number) =>
+  value.length <= maxLength ? value : `${value.slice(0, maxLength - 3).trimEnd()}...`;
+
+const dedupeStrings = <T extends string>(values: T[]) => Array.from(new Set(values));
+
+const normalizeConfidence = (value: string | undefined): WalletAiConfidence => {
+  const normalized = compactText(value).toLowerCase() as WalletAiConfidence;
+  return VALID_CONFIDENCE.has(normalized) ? normalized : "unknown";
+};
+
+const normalizeEnum = <T extends string>(value: string | undefined, valid: Set<T>, fallback: T): T => {
+  const normalized = compactText(value).toLowerCase() as T;
+  return valid.has(normalized) ? normalized : fallback;
+};
+
+const compactExcerpt = (value: string | undefined) => truncateText(compactText(value), MAX_SOURCE_EXCERPT_LENGTH);
+
+const sanitizeLongText = (value: string | undefined, maxLength: number) => {
+  const compactValue = compactText(value);
+  return compactValue ? truncateText(compactValue, maxLength) : undefined;
+};
+
+const sanitizeAlias = (alias: string | undefined, displayName: string): string | undefined => {
+  const compactAlias = compactText(alias).replace(/[，。；;:：]+$/gu, "");
+  if (!compactAlias || compactAlias.length > MAX_ALIAS_LENGTH) {
+    return undefined;
+  }
+  if (compactAlias === displayName || compactAlias.split(/\s+/u).length > 4) {
+    return undefined;
+  }
+  return compactAlias;
 };
 
 const GEMINI_AI_EXTRACT_SCHEMA = {
@@ -233,69 +304,36 @@ const GEMINI_AI_EXTRACT_SCHEMA = {
           bio: { type: "string" },
           teamNote: { type: "string" },
           watchlist: { type: "boolean" },
-          confidence: {
-            type: "string",
-            enum: ["high", "medium", "low", "unknown"]
-          },
+          confidence: { type: "string", enum: ["high", "medium", "low", "unknown"] },
           sourceExcerpt: { type: "string" },
+          highlightTags: { type: "array", items: { type: "string" } },
+          keyMetrics: { type: "array", items: { type: "string" } },
+          primarySignals: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                kind: { type: "string", enum: PRIMARY_SIGNAL_KINDS },
+                label: { type: "string" },
+                region: { type: "string" },
+                metricText: { type: "string" },
+                evidence: { type: "string" }
+              }
+            }
+          },
           weatherSignals: {
             type: "object",
             properties: {
-              marketScope: {
-                type: "string",
-                enum: ["single_city_max_temp", "multi_city_temp", "mixed_weather", "unknown"]
-              },
-              resolutionSource: {
-                type: "string",
-                enum: ["nws_noaa", "jma", "kma", "dwd", "official_other", "unknown"]
-              },
-              forecastBasis: {
-                type: "string",
-                enum: [
-                  "ensemble_guidance",
-                  "official_grid",
-                  "nowcast",
-                  "station_observation",
-                  "narrative_only",
-                  "unknown"
-                ]
-              },
-              timingWindow: {
-                type: "string",
-                enum: ["d2_plus", "d1", "intraday", "near_close", "unknown"]
-              },
-              edgeStyle: {
-                type: "string",
-                enum: [
-                  "upper_tail",
-                  "baseline_mean",
-                  "range_threshold",
-                  "late_reprice",
-                  "obs_reaction",
-                  "unknown"
-                ]
-              },
+              marketScope: { type: "string", enum: [...VALID_MARKET_SCOPE] },
+              resolutionSource: { type: "string", enum: [...VALID_RESOLUTION_SOURCE] },
+              forecastBasis: { type: "string", enum: [...VALID_FORECAST_BASIS] },
+              timingWindow: { type: "string", enum: [...VALID_TIMING_WINDOW] },
+              edgeStyle: { type: "string", enum: [...VALID_EDGE_STYLE] },
               weatherDrivers: {
                 type: "array",
-                items: {
-                  type: "string",
-                  enum: [
-                    "cloud_cover",
-                    "precip_timing",
-                    "wind_shift",
-                    "humidity_dewpoint",
-                    "ridge_heat_dome",
-                    "front_passage",
-                    "urban_heat",
-                    "storm_outflow",
-                    "unknown"
-                  ]
-                }
+                items: { type: "string", enum: [...VALID_WEATHER_DRIVERS] }
               },
-              evidenceQuality: {
-                type: "string",
-                enum: ["explicit_numeric", "source_named", "qualitative_only", "insufficient"]
-              }
+              evidenceQuality: { type: "string", enum: [...VALID_EVIDENCE_QUALITY] }
             },
             required: [
               "marketScope",
@@ -318,6 +356,9 @@ const GEMINI_AI_EXTRACT_SCHEMA = {
           "watchlist",
           "confidence",
           "sourceExcerpt",
+          "highlightTags",
+          "keyMetrics",
+          "primarySignals",
           "weatherSignals"
         ]
       }
@@ -329,207 +370,253 @@ const GEMINI_AI_EXTRACT_SCHEMA = {
 const GROQ_AI_EXTRACT_SCHEMA = {
   type: "object",
   additionalProperties: false,
-  properties: {
-    items: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          address: { type: "string" },
-          displayName: { type: "string" },
-          alias: { type: "string" },
-          strategyFocus: { type: "string" },
-          bio: { type: "string" },
-          teamNote: { type: "string" },
-          watchlist: { type: "boolean" },
-          confidence: {
-            type: "string",
-            enum: ["high", "medium", "low", "unknown"]
-          },
-          sourceExcerpt: { type: "string" },
-          weatherSignals: {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              marketScope: {
-                type: "string",
-                enum: ["single_city_max_temp", "multi_city_temp", "mixed_weather", "unknown"]
-              },
-              resolutionSource: {
-                type: "string",
-                enum: ["nws_noaa", "jma", "kma", "dwd", "official_other", "unknown"]
-              },
-              forecastBasis: {
-                type: "string",
-                enum: [
-                  "ensemble_guidance",
-                  "official_grid",
-                  "nowcast",
-                  "station_observation",
-                  "narrative_only",
-                  "unknown"
-                ]
-              },
-              timingWindow: {
-                type: "string",
-                enum: ["d2_plus", "d1", "intraday", "near_close", "unknown"]
-              },
-              edgeStyle: {
-                type: "string",
-                enum: [
-                  "upper_tail",
-                  "baseline_mean",
-                  "range_threshold",
-                  "late_reprice",
-                  "obs_reaction",
-                  "unknown"
-                ]
-              },
-              weatherDrivers: {
-                type: "array",
-                items: {
-                  type: "string",
-                  enum: [
-                    "cloud_cover",
-                    "precip_timing",
-                    "wind_shift",
-                    "humidity_dewpoint",
-                    "ridge_heat_dome",
-                    "front_passage",
-                    "urban_heat",
-                    "storm_outflow",
-                    "unknown"
-                  ]
-                }
-              },
-              evidenceQuality: {
-                type: "string",
-                enum: ["explicit_numeric", "source_named", "qualitative_only", "insufficient"]
-              }
-            },
-            required: [
-              "marketScope",
-              "resolutionSource",
-              "forecastBasis",
-              "timingWindow",
-              "edgeStyle",
-              "weatherDrivers",
-              "evidenceQuality"
-            ]
-          }
-        },
-        required: [
-          "address",
-          "displayName",
-          "alias",
-          "strategyFocus",
-          "bio",
-          "teamNote",
-          "watchlist",
-          "confidence",
-          "sourceExcerpt",
-          "weatherSignals"
-        ]
-      }
-    }
-  },
+  properties: GEMINI_AI_EXTRACT_SCHEMA.properties,
   required: ["items"]
 } as const;
 
 const SYSTEM_PROMPT = `
-角色：
-你是 Polymarket 天气温度交易地址结构化助手，专门整理“最高温度/天气”市场里的地址资料。
+你是 Polymarket 地址库的结构化整理助手。输入已经是搜索系统 AI 返回的结果，你不用重新核验真假，只需要提炼、筛选、压缩并输出结构化 JSON。
 
-目标：
-只提取会影响天气温度市场交易判断的信息。主展示只服务交易决策，不做人物画像包装。
+核心目标：
+1. 先回答“这个地址和别人最不一样的地方是什么”。
+2. 优先输出 5 类主差异信号：地点专精、高频-地区、高胜率-地区、高暴击-地区、结构型选手（彩票型 / 拆分型 / 流动型）。
+3. highlightTags 可以宽松保留搜索 AI 的原始重点标签，但 primarySignals 必须按统一 taxonomy 输出。
+4. strategyFocus 必须是一句解释句，说明差异，不要只是重复标签。
+5. 人物背景、泛化评价、备注性信息只放到 bio 或 teamNote。
 
-允许信息：
-1. 结算来源或官方站点。
-2. 预测依据，例如集合预报、官方格点、临近预报、站点实测。
-3. 常用时间窗口，例如 D1、D2+、日内、近收盘。
-4. 下注边，例如做上尾、做基线均值、抓阈值、等临近重定价、看实况反应。
-5. 明确天气驱动，例如云量、降水时点、风向切换、湿度/露点、高压热穹、锋面过境、城市热岛、雷暴外流。
-6. 原文证据摘录，只能来自输入材料。
-
-禁止信息：
-1. 不得编造地址、别名、来源、站点、城市、市场、结论。
-2. 不得联网补充，也不得根据常识脑补。
-3. 不要输出空泛人格标签，例如“聪明钱”“高频”“稳健”“激进”“经验丰富”“亚洲风格”。
-4. 不要把人物背景、组织身份、社群身份放进主展示标签。
-5. alias 只有输入材料中出现了清晰短称呼时才可填写，否则留空字符串。
-6. strategyFocus 必须是一句短交易摘要，不得写成长背景。
+禁止事项：
+- 不要编造地址、地区、指标、别名、胜率、倍数
+- 不要联网补充，不要用常识脑补
+- 不要把“聪明、稳健、经验丰富、激进、高手”这类空泛词当成主标签或 strategyFocus
+- alias 只有在输入里本来就有明确短称呼时才填写
 
 输出要求：
-1. 只返回 JSON，格式必须是 { "items": [...] }。
-2. 每个地址拆成单独 item。
-3. 无法确认的枚举必须填 "unknown"。
-4. weatherDrivers 最多输出 2 个，而且必须有输入材料证据。
-5. sourceExcerpt 保留最能支持判断的一小段原文。
-6. watchlist 只有材料明确表达“重点观察 / 持续跟踪 / 关键样本”等意思时才能为 true。
+- 只返回 JSON，格式固定为 { "items": [...] }
+- 每个地址一条 item
+- 字段固定：address、displayName、alias、strategyFocus、bio、teamNote、watchlist、confidence、sourceExcerpt、highlightTags、keyMetrics、primarySignals、weatherSignals
+- primarySignals.kind 只允许：geo_specialty、frequency_region、winrate_region、payout_region、trader_archetype
+- strategyFocus 优先写成解释句，例如：
+  - 主做首尔，高胜率更突出，胜率 68%，偏拆分进场
+  - 新加坡高频明显，暴击倍数更强，已卖出占比高，偏流动型
+- 缺失值使用空字符串、false、unknown 或空数组，不要省略字段
 
-枚举：
-- marketScope: single_city_max_temp | multi_city_temp | mixed_weather | unknown
-- resolutionSource: nws_noaa | jma | kma | dwd | official_other | unknown
-- forecastBasis: ensemble_guidance | official_grid | nowcast | station_observation | narrative_only | unknown
-- timingWindow: d2_plus | d1 | intraday | near_close | unknown
-- edgeStyle: upper_tail | baseline_mean | range_threshold | late_reprice | obs_reaction | unknown
-- weatherDrivers: cloud_cover | precip_timing | wind_shift | humidity_dewpoint | ridge_heat_dome | front_passage | urban_heat | storm_outflow | unknown
-- evidenceQuality: explicit_numeric | source_named | qualitative_only | insufficient
+正例：
+输入：地址 0x1111111111111111111111111111111111111111；显示名 Wumai；标签匹配 高频交易地区-新加坡 高暴击-新加坡 流动型选手；关键数据 新加坡交易占比 62%, 新加坡盈利倍数 3.8x, 已卖出占比 71%。
+输出时：
+- highlightTags 可保留 ["高频-新加坡","高暴击-新加坡","流动型选手"]
+- primarySignals 至少包含 frequency_region、payout_region、trader_archetype
+- strategyFocus 可写“新加坡高频明显，暴击倍数更强，已卖出占比高，偏流动型”
 
-Few-shot 正例：
-输入片段：
-地址: 0x1111111111111111111111111111111111111111
-显示名: Wumai
-主要市场/城市: Singapore
-结算来源或站点: NWS/NOAA station observation
-主要依据: D1 ensemble guidance and late cloud cover reduction
-常用时间窗口: D1
-常见下注方式: upper tail near threshold
-重点观察原因: 持续跟踪样本
-原文证据摘录: Uses NWS/NOAA obs, watches D1 ensemble spread, leans upper tail when cloud cover clears late.
-输出：
-{"items":[{"address":"0x1111111111111111111111111111111111111111","displayName":"Wumai","alias":"Wumai","strategyFocus":"集合预报 / D1 / 做上尾 / 云量","bio":"","teamNote":"持续跟踪样本","watchlist":true,"confidence":"high","sourceExcerpt":"Uses NWS/NOAA obs, watches D1 ensemble spread, leans upper tail when cloud cover clears late.","weatherSignals":{"marketScope":"single_city_max_temp","resolutionSource":"nws_noaa","forecastBasis":"ensemble_guidance","timingWindow":"d1","edgeStyle":"upper_tail","weatherDrivers":["cloud_cover"],"evidenceQuality":"source_named"}}]}
-
-Few-shot 可导入但需 review：
-输入片段：
-地址: 0x2222222222222222222222222222222222222222
-显示名: Seoul Desk
-主要市场/城市: Seoul
-主要依据: JMA style narrative update before close
-常用时间窗口: near close
-原文证据摘录: Usually adjusts late with narrative weather updates before close.
-输出：
-{"items":[{"address":"0x2222222222222222222222222222222222222222","displayName":"Seoul Desk","alias":"","strategyFocus":"文字判断 / 近收盘 / 临近重定价","bio":"","teamNote":"","watchlist":false,"confidence":"medium","sourceExcerpt":"Usually adjusts late with narrative weather updates before close.","weatherSignals":{"marketScope":"single_city_max_temp","resolutionSource":"unknown","forecastBasis":"narrative_only","timingWindow":"near_close","edgeStyle":"late_reprice","weatherDrivers":[],"evidenceQuality":"qualitative_only"}}]}
-
-Few-shot 负例：
-输入片段：
-地址: 0x3333333333333333333333333333333333333333
-显示名: Weather Master
-描述: 天气高手，亚洲风格，经验丰富，聪明钱，值得关注。
-输出：
-{"items":[{"address":"0x3333333333333333333333333333333333333333","displayName":"Weather Master","alias":"","strategyFocus":"","bio":"天气高手，亚洲风格，经验丰富，聪明钱，值得关注。","teamNote":"","watchlist":false,"confidence":"low","sourceExcerpt":"天气高手，亚洲风格，经验丰富，聪明钱，值得关注。","weatherSignals":{"marketScope":"unknown","resolutionSource":"unknown","forecastBasis":"unknown","timingWindow":"unknown","edgeStyle":"unknown","weatherDrivers":[],"evidenceQuality":"insufficient"}}]}
+负例：
+如果输入只有“很聪明、经验丰富、值得关注”，那这些只能进 bio/teamNote，highlightTags 和 primarySignals 应为空。
 `.trim();
 
-const compactText = (value: unknown) =>
-  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+const normalizeHighlightTag = (value: string) => {
+  let normalized = compactText(value)
+    .replace(/^(标签匹配|标签|类型|选手类型|风格标签|重点标签)\s*[:：]?\s*/iu, "")
+    .replace(/^高频交易地区\s*[-:：]?\s*/iu, "高频-")
+    .replace(/^高频地区\s*[-:：]?\s*/iu, "高频-")
+    .replace(/^高暴击地区\s*[-:：]?\s*/iu, "高暴击-")
+    .replace(/^高胜率地区\s*[-:：]?\s*/iu, "高胜率-")
+    .replace(/^地点专精\s*[-:：]?\s*/iu, "")
+    .replace(/^地区专精\s*[-:：]?\s*/iu, "");
 
-const truncateText = (value: string, maxLength: number) =>
-  value.length <= maxLength ? value : `${value.slice(0, maxLength - 3).trimEnd()}...`;
+  for (const item of TRADER_ARCHETYPE_NORMALIZERS) {
+    if (item.pattern.test(normalized)) {
+      normalized = item.label;
+      break;
+    }
+  }
 
-const normalizeConfidence = (value: string | undefined): WalletAiConfidence => {
-  const normalized = compactText(value).toLowerCase() as WalletAiConfidence;
-  return VALID_CONFIDENCE.has(normalized) ? normalized : "unknown";
+  if (/专精|主战场|优势地区/iu.test(value) && normalized) {
+    normalized = normalized.endsWith("专精") ? normalized : `${normalized}专精`;
+  }
+
+  normalized = normalized.replace(/\s+/gu, "").replace(/地区地区$/u, "地区");
+  return normalized ? truncateText(normalized, MAX_HIGHLIGHT_TAG_LENGTH) : "";
 };
 
-const normalizeEnum = <T extends string>(value: string | undefined, valid: Set<T>, fallback: T): T => {
-  const normalized = compactText(value).toLowerCase() as T;
-  return valid.has(normalized) ? normalized : fallback;
+const normalizeKeyMetric = (value: string) => {
+  const normalized = compactText(value).replace(/^(关键数据|核心数据|数据)\s*[:：]?\s*/iu, "");
+  return normalized ? truncateText(normalized, MAX_KEY_METRIC_LENGTH) : "";
 };
 
-const compactExcerpt = (value: string | undefined) => truncateText(compactText(value), MAX_SOURCE_EXCERPT_LENGTH);
+const dedupeLabelDrafts = (labels: WalletImportLabelDraft[]) => {
+  const deduped = new Map<string, WalletImportLabelDraft>();
+  labels.forEach((label) => {
+    deduped.set(`${label.kind}:${label.value.toLowerCase()}`, label);
+  });
+  return Array.from(deduped.values());
+};
 
-const dedupeStrings = <T extends string>(values: T[]) => Array.from(new Set(values));
+const normalizeHighlightTags = (values: string[] | undefined) =>
+  Array.isArray(values)
+    ? Array.from(new Set(values.map(normalizeHighlightTag).filter(Boolean))).slice(0, MAX_HIGHLIGHT_TAG_COUNT)
+    : [];
+
+const normalizeKeyMetrics = (values: string[] | undefined) =>
+  Array.isArray(values)
+    ? Array.from(new Set(values.map(normalizeKeyMetric).filter(Boolean))).slice(0, MAX_KEY_METRIC_COUNT)
+    : [];
+
+const normalizePrimarySignalKind = (value: string | undefined): WalletPrimarySignalKind | undefined => {
+  const normalized = compactText(value).toLowerCase().replace(/\s+/gu, "_") as WalletPrimarySignalKind;
+  return VALID_PRIMARY_SIGNAL_KIND.has(normalized) ? normalized : undefined;
+};
+
+const extractRegionFromTag = (value: string) => {
+  const text = compactText(value)
+    .replace(/^(高频|高胜率|高暴击)-/u, "")
+    .replace(/专精$/u, "")
+    .replace(/^(地点专精|地区专精)-?/u, "")
+    .trim();
+  return text || undefined;
+};
+
+const buildCanonicalSignalLabel = (kind: WalletPrimarySignalKind, label: string, region?: string) => {
+  if (kind === "trader_archetype") {
+    const archetype = TRADER_ARCHETYPE_NORMALIZERS.find((item) => item.pattern.test(label));
+    return archetype?.label ?? label;
+  }
+  if (kind === "geo_specialty") {
+    const value = compactText(region ?? label).replace(/专精$/u, "");
+    return value ? `${value}专精` : "地点专精";
+  }
+  const value = compactText(region ?? label);
+  if (!value) {
+    return label;
+  }
+  if (kind === "frequency_region") {
+    return `高频-${value}`;
+  }
+  if (kind === "winrate_region") {
+    return `高胜率-${value}`;
+  }
+  return `高暴击-${value}`;
+};
+
+const resolveSignalKindFromLabel = (value: string): WalletPrimarySignalKind | undefined => {
+  const normalized = normalizeHighlightTag(value);
+  if (!normalized) {
+    return undefined;
+  }
+  if (normalized.startsWith("高暴击-")) {
+    return "payout_region";
+  }
+  if (normalized.startsWith("高胜率-")) {
+    return "winrate_region";
+  }
+  if (normalized.startsWith("高频-")) {
+    return "frequency_region";
+  }
+  if (normalized.endsWith("专精")) {
+    return "geo_specialty";
+  }
+  if (TRADER_ARCHETYPE_NORMALIZERS.some((item) => item.pattern.test(normalized))) {
+    return "trader_archetype";
+  }
+  return undefined;
+};
+
+const matchMetricBySignal = (
+  kind: WalletPrimarySignalKind,
+  region: string | undefined,
+  keyMetrics: string[]
+) => {
+  const regionPattern = region ? new RegExp(region.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "i") : null;
+  return (
+    keyMetrics.find((metric) => {
+      if (kind === "frequency_region") {
+        return /交易占比|频|成交|活跃/u.test(metric) && (!regionPattern || regionPattern.test(metric));
+      }
+      if (kind === "winrate_region") {
+        return /胜率/u.test(metric) && (!regionPattern || regionPattern.test(metric));
+      }
+      if (kind === "payout_region") {
+        return /(盈利倍数|倍数|x\b|X\b|暴击)/u.test(metric) && (!regionPattern || regionPattern.test(metric));
+      }
+      if (kind === "trader_archetype") {
+        return /(筹码成本占比|持仓均价|已卖出占比|成本占比)/u.test(metric);
+      }
+      return Boolean(regionPattern?.test(metric));
+    }) ?? undefined
+  );
+};
+
+const normalizePrimarySignal = (
+  value: AiExtractSchemaPrimarySignal,
+  keyMetrics: string[],
+  sourceExcerpt: string
+): WalletPrimarySignal | null => {
+  const kind = normalizePrimarySignalKind(value.kind) ?? resolveSignalKindFromLabel(value.label ?? "");
+  if (!kind) {
+    return null;
+  }
+  const region = compactText(value.region) || extractRegionFromTag(value.label ?? "");
+  const label = buildCanonicalSignalLabel(kind, normalizeHighlightTag(value.label ?? ""), region);
+  if (!label) {
+    return null;
+  }
+  const metricText = compactText(value.metricText) || matchMetricBySignal(kind, region, keyMetrics) || undefined;
+  const evidence = compactExcerpt(value.evidence) || sourceExcerpt || undefined;
+  return {
+    kind,
+    label: truncateText(label, MAX_LABEL_VALUE_LENGTH),
+    region,
+    metricText: metricText ? truncateText(metricText, MAX_KEY_METRIC_LENGTH) : undefined,
+    priority: PRIMARY_SIGNAL_KIND_PRIORITY[kind],
+    evidence
+  };
+};
+
+const derivePrimarySignalsFromHighlightTags = (
+  highlightTags: string[],
+  keyMetrics: string[],
+  sourceExcerpt: string
+) =>
+  highlightTags
+    .map((tag) =>
+      normalizePrimarySignal(
+        {
+          kind: resolveSignalKindFromLabel(tag),
+          label: tag,
+          region: extractRegionFromTag(tag),
+          metricText: matchMetricBySignal(resolveSignalKindFromLabel(tag) ?? "geo_specialty", extractRegionFromTag(tag), keyMetrics),
+          evidence: sourceExcerpt
+        },
+        keyMetrics,
+        sourceExcerpt
+      )
+    )
+    .filter((value): value is WalletPrimarySignal => Boolean(value));
+
+export const normalizePrimarySignals = (
+  values: AiExtractSchemaPrimarySignal[] | undefined,
+  highlightTags: string[],
+  keyMetrics: string[],
+  sourceExcerpt: string
+) => {
+  const deduped = new Map<string, WalletPrimarySignal>();
+  const candidates = [
+    ...(Array.isArray(values) ? values : []).map((value) => normalizePrimarySignal(value, keyMetrics, sourceExcerpt)),
+    ...derivePrimarySignalsFromHighlightTags(highlightTags, keyMetrics, sourceExcerpt)
+  ].filter((value): value is WalletPrimarySignal => Boolean(value));
+
+  candidates.forEach((signal) => {
+    const key = `${signal.kind}:${signal.label.toLowerCase()}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, signal);
+    }
+  });
+
+  return Array.from(deduped.values())
+    .sort(
+      (left, right) =>
+        (right.priority ?? 0) - (left.priority ?? 0) ||
+        left.label.localeCompare(right.label, "zh-CN")
+    )
+    .slice(0, MAX_PRIMARY_SIGNAL_COUNT);
+};
 
 export const normalizeWeatherSignals = (
   value: AiExtractSchemaSignals | WalletWeatherSignalDraft | undefined
@@ -549,11 +636,7 @@ export const normalizeWeatherSignals = (
     timingWindow: normalizeEnum(value?.timingWindow, VALID_TIMING_WINDOW, "unknown"),
     edgeStyle: normalizeEnum(value?.edgeStyle, VALID_EDGE_STYLE, "unknown"),
     weatherDrivers,
-    evidenceQuality: normalizeEnum(
-      value?.evidenceQuality,
-      VALID_EVIDENCE_QUALITY,
-      "insufficient"
-    )
+    evidenceQuality: normalizeEnum(value?.evidenceQuality, VALID_EVIDENCE_QUALITY, "insufficient")
   };
 };
 
@@ -567,26 +650,37 @@ export const countHighValueWeatherSignals = (signals: WalletWeatherSignalDraft) 
   ].filter(Boolean).length;
 
 export const inferWalletAiSignalQuality = (
-  signals: WalletWeatherSignalDraft
+  signals: WalletWeatherSignalDraft,
+  primarySignals: WalletPrimarySignal[],
+  highlightTags: string[],
+  keyMetrics: string[],
+  sourceExcerpt: string,
+  strategyFocus?: string
 ): WalletAiSignalQuality => {
-  const highValueSignalCount = countHighValueWeatherSignals(signals);
+  const weatherCount = countHighValueWeatherSignals(signals);
+  const primaryCount = primarySignals.length;
+  const hasEvidence =
+    signals.evidenceQuality === "explicit_numeric" ||
+    signals.evidenceQuality === "source_named" ||
+    keyMetrics.length > 0 ||
+    Boolean(sourceExcerpt);
 
   if (
-    highValueSignalCount >= 3 &&
-    (signals.evidenceQuality === "explicit_numeric" || signals.evidenceQuality === "source_named")
+    (primaryCount >= 3 && hasEvidence) ||
+    (primaryCount >= 2 && keyMetrics.length >= 1) ||
+    (primaryCount >= 1 && weatherCount >= 2 && hasEvidence)
   ) {
     return "high_signal";
   }
 
   if (
-    highValueSignalCount >= 1 &&
-    signals.evidenceQuality !== "insufficient" &&
-    signals.evidenceQuality !== "explicit_numeric"
+    primaryCount > 0 ||
+    keyMetrics.length > 0 ||
+    highlightTags.length > 0 ||
+    weatherCount > 0 ||
+    Boolean(compactText(strategyFocus)) ||
+    Boolean(sourceExcerpt)
   ) {
-    return "needs_review";
-  }
-
-  if (highValueSignalCount >= 1 && signals.evidenceQuality === "explicit_numeric") {
     return "needs_review";
   }
 
@@ -595,18 +689,45 @@ export const inferWalletAiSignalQuality = (
 
 const createLabelDraft = (
   kind: WalletLabelKind,
-  value: string | undefined
+  value: string | undefined,
+  evidence?: string
 ): WalletImportLabelDraft | null => {
   const normalized = compactText(value);
   if (!normalized) {
     return null;
   }
-
   return {
-    name: LABEL_NAME_COPY[kind as keyof typeof LABEL_NAME_COPY] ?? "标签",
+    name: LABEL_NAME_COPY[kind],
     value: truncateText(normalized, MAX_LABEL_VALUE_LENGTH),
-    kind
+    kind,
+    evidence: compactExcerpt(evidence) || undefined
   };
+};
+
+const buildPrimarySignalLabels = (signals: WalletPrimarySignal[]) =>
+  signals
+    .map((signal) =>
+      createLabelDraft(
+        PRIMARY_SIGNAL_LABEL_KINDS[signal.kind],
+        signal.label,
+        signal.metricText || signal.evidence
+      )
+    )
+    .filter((label): label is WalletImportLabelDraft => Boolean(label));
+
+const buildFallbackHighlightLabelDrafts = (
+  highlightTags: string[],
+  primarySignals: WalletPrimarySignal[],
+  sourceExcerpt: string
+) => {
+  const primaryTexts = new Set(primarySignals.map((signal) => signal.label));
+  return highlightTags
+    .filter((tag) => !primaryTexts.has(tag))
+    .map((tag) => {
+      const kind = resolveSignalKindFromLabel(tag);
+      return createLabelDraft(kind ? PRIMARY_SIGNAL_LABEL_KINDS[kind] : "group", tag, sourceExcerpt);
+    })
+    .filter((label): label is WalletImportLabelDraft => Boolean(label));
 };
 
 export const buildWeatherLabels = (
@@ -614,11 +735,10 @@ export const buildWeatherLabels = (
   signalQuality: WalletAiSignalQuality
 ): WalletImportLabelDraft[] => {
   const labels: Array<WalletImportLabelDraft | null> = [
+    createLabelDraft("market_scope", signals.marketScope === "unknown" ? undefined : MARKET_SCOPE_COPY[signals.marketScope]),
     createLabelDraft(
       "resolution_source",
-      signals.resolutionSource === "unknown"
-        ? undefined
-        : RESOLUTION_SOURCE_COPY[signals.resolutionSource]
+      signals.resolutionSource === "unknown" ? undefined : RESOLUTION_SOURCE_COPY[signals.resolutionSource]
     ),
     createLabelDraft(
       "forecast_basis",
@@ -631,26 +751,28 @@ export const buildWeatherLabels = (
     createLabelDraft(
       "edge_style",
       signals.edgeStyle === "unknown" ? undefined : EDGE_STYLE_COPY[signals.edgeStyle]
-    ),
-    createLabelDraft(
-      "market_scope",
-      signals.marketScope === "unknown" ? undefined : MARKET_SCOPE_COPY[signals.marketScope]
     )
   ];
 
   signals.weatherDrivers.forEach((driver) => {
-    labels.push(
-      createLabelDraft(
-        "weather_driver",
-        driver === "unknown" ? undefined : WEATHER_DRIVER_COPY[driver]
-      )
-    );
+    labels.push(createLabelDraft("weather_driver", driver === "unknown" ? undefined : WEATHER_DRIVER_COPY[driver]));
   });
-
   labels.push(createLabelDraft("signal_quality", SIGNAL_QUALITY_COPY[signalQuality]));
-
   return labels.filter((label): label is WalletImportLabelDraft => Boolean(label));
 };
+
+const buildAiLabels = (
+  primarySignals: WalletPrimarySignal[],
+  highlightTags: string[],
+  weatherSignals: WalletWeatherSignalDraft,
+  signalQuality: WalletAiSignalQuality,
+  sourceExcerpt: string
+) =>
+  dedupeLabelDrafts([
+    ...buildPrimarySignalLabels(primarySignals),
+    ...buildFallbackHighlightLabelDrafts(highlightTags, primarySignals, sourceExcerpt),
+    ...buildWeatherLabels(weatherSignals, signalQuality)
+  ]);
 
 export const filterWeatherHighlightLabels = <T extends { kind: WalletLabelKind }>(labels: T[]) =>
   labels.filter((label) => WEATHER_HIGHLIGHT_LABEL_KINDS.has(label.kind));
@@ -665,47 +787,83 @@ export const buildWeatherStrategyFocus = (
     signals.edgeStyle === "unknown" ? "" : EDGE_STYLE_COPY[signals.edgeStyle],
     signals.weatherDrivers[0] ? WEATHER_DRIVER_COPY[signals.weatherDrivers[0]] : ""
   ].filter(Boolean);
-
   if (parts.length > 0) {
     return truncateText(parts.join(" / "), MAX_SUMMARY_LENGTH);
   }
-
   const compactFallback = compactText(fallbackText);
   return compactFallback ? truncateText(compactFallback, MAX_SUMMARY_LENGTH) : "";
 };
 
-const sanitizeAlias = (
-  alias: string | undefined,
-  displayName: string,
-  sourceExcerpt: string
-): string | undefined => {
-  const compactAlias = compactText(alias).replace(/[，。；;:：、]+$/g, "");
-  if (!compactAlias || compactAlias.length > MAX_ALIAS_LENGTH) {
-    return undefined;
+const buildGeneratedStrategyFocus = (
+  primarySignals: WalletPrimarySignal[],
+  keyMetrics: string[],
+  weatherSignals: WalletWeatherSignalDraft
+) => {
+  const [primary, secondary] = primarySignals;
+  const metric = primary?.metricText || secondary?.metricText || keyMetrics[0];
+  const parts: string[] = [];
+
+  if (primary?.kind === "winrate_region") {
+    parts.push(primary.region ? `主做${primary.region}` : primary.label);
+    parts.push("高胜率更突出");
+  } else if (primary?.kind === "payout_region") {
+    parts.push(primary.region ? `${primary.region}暴击更强` : primary.label);
+  } else if (primary?.kind === "frequency_region") {
+    parts.push(primary.region ? `${primary.region}高频明显` : primary.label);
+  } else if (primary?.kind === "geo_specialty") {
+    parts.push(primary.region ? `主做${primary.region}` : primary.label);
+  } else if (primary?.kind === "trader_archetype") {
+    parts.push(primary.label.replace("选手", ""));
   }
 
-  if (compactAlias === displayName) {
-    return undefined;
+  if (secondary?.kind === "trader_archetype") {
+    parts.push(`偏${secondary.label.replace("选手", "")}`);
+  } else if (secondary?.kind === "winrate_region") {
+    parts.push("高胜率更突出");
+  } else if (secondary?.kind === "payout_region") {
+    parts.push("暴击倍数更强");
+  } else if (secondary?.kind === "frequency_region") {
+    parts.push("高频更明显");
   }
 
-  if (compactAlias.split(/\s+/).length > 4) {
-    return undefined;
+  if (metric) {
+    parts.push(metric);
+  } else {
+    const fallback = buildWeatherStrategyFocus(weatherSignals);
+    if (fallback) {
+      parts.push(fallback);
+    }
   }
 
-  if (sourceExcerpt && !sourceExcerpt.includes(compactAlias) && !displayName.includes(compactAlias)) {
-    return undefined;
-  }
-
-  return compactAlias;
+  const summary = parts.filter(Boolean).join("，");
+  return summary ? truncateText(summary, MAX_SUMMARY_LENGTH) : "";
 };
 
-const sanitizeLongText = (value: string | undefined, maxLength: number) => {
-  const compactValue = compactText(value);
-  return compactValue ? truncateText(compactValue, maxLength) : undefined;
+export const buildAiStrategyFocus = (
+  explicitSummary: string | undefined,
+  primarySignals: WalletPrimarySignal[],
+  keyMetrics: string[],
+  weatherSignals: WalletWeatherSignalDraft
+) => {
+  const compactSummary = compactText(explicitSummary);
+  if (compactSummary && !GENERIC_SUMMARY_CUE.test(compactSummary)) {
+    return truncateText(compactSummary, MAX_SUMMARY_LENGTH);
+  }
+  const generated = buildGeneratedStrategyFocus(primarySignals, keyMetrics, weatherSignals);
+  if (generated) {
+    return generated;
+  }
+  if (keyMetrics.length > 0) {
+    return truncateText(keyMetrics.slice(0, 2).join("，"), MAX_SUMMARY_LENGTH);
+  }
+  return buildWeatherStrategyFocus(weatherSignals, explicitSummary);
 };
 
-const shouldKeepWatchlist = (watchlist: boolean | undefined, sourceExcerpt: string, teamNote?: string) =>
-  Boolean(watchlist) && WATCHLIST_CUE.test(`${sourceExcerpt} ${compactText(teamNote)}`);
+const shouldKeepWatchlist = (
+  watchlist: boolean | undefined,
+  sourceExcerpt: string,
+  teamNote?: string
+) => Boolean(watchlist) || WATCHLIST_CUE.test(`${sourceExcerpt} ${teamNote ?? ""}`);
 
 const buildProviderConfig = async (): Promise<ProviderRuntimeConfig> => {
   const bindings = await getSmartMoneyBindings();
@@ -749,7 +907,6 @@ const extractGeminiJson = (payload: unknown) => {
       }
     }
   }
-
   throw new Error("gemini returned no text content");
 };
 
@@ -766,9 +923,7 @@ const callGemini = async (
     `${GEMINI_BASE_URL}/models/${encodeURIComponent(config.geminiModel)}:generateContent?key=${encodeURIComponent(config.geminiApiKey)}`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [
           {
@@ -796,8 +951,7 @@ const callGemini = async (
     );
   }
 
-  const jsonText = extractGeminiJson(payload);
-  const parsed = JSON.parse(jsonText) as { items?: AiExtractSchemaItem[] };
+  const parsed = JSON.parse(extractGeminiJson(payload)) as { items?: AiExtractSchemaItem[] };
   return {
     items: Array.isArray(parsed.items) ? parsed.items : [],
     providerMeta: {
@@ -828,19 +982,13 @@ const callGroq = async (
       model: config.groqModel,
       temperature: 0.1,
       messages: [
-        {
-          role: "system",
-          content: SYSTEM_PROMPT
-        },
-        {
-          role: "user",
-          content: `sourceName: ${input.sourceName ?? "text"}\n\nrawText:\n${input.text}`
-        }
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `sourceName: ${input.sourceName ?? "text"}\n\nrawText:\n${input.text}` }
       ],
       response_format: {
         type: "json_schema",
         json_schema: {
-          name: "wallet_weather_extract",
+          name: "wallet_primary_signal_extract",
           schema: GROQ_AI_EXTRACT_SCHEMA,
           strict: true
         }
@@ -875,59 +1023,52 @@ const callGroq = async (
   };
 };
 
-const normalizeAiItemsToRows = (
-  items: AiExtractSchemaItem[],
-  providerMeta: WalletAiProviderMeta
-) =>
+const normalizeAiItemsToRows = (items: AiExtractSchemaItem[], providerMeta: WalletAiProviderMeta) =>
   items.map((item, index) => {
     const address = compactText(item.address);
     const normalizedAddress = normalizeAddress(address);
     const sourceExcerpt = compactExcerpt(item.sourceExcerpt);
-    const displayName = compactText(item.displayName) || normalizedAddress || "";
+    const rawDisplayName = compactText(item.displayName);
+    const displayName = rawDisplayName || normalizedAddress || "";
     const weatherSignals = normalizeWeatherSignals(item.weatherSignals);
-    const signalQuality = inferWalletAiSignalQuality(weatherSignals);
-    const strategyFocus = buildWeatherStrategyFocus(weatherSignals, item.strategyFocus);
-    const alias = sanitizeAlias(item.alias, displayName, sourceExcerpt);
-    const labels = buildWeatherLabels(weatherSignals, signalQuality);
+    const highlightTags = normalizeHighlightTags(item.highlightTags);
+    const keyMetrics = normalizeKeyMetrics(item.keyMetrics);
+    const primarySignals = normalizePrimarySignals(item.primarySignals, highlightTags, keyMetrics, sourceExcerpt);
+    const strategyFocus = buildAiStrategyFocus(item.strategyFocus, primarySignals, keyMetrics, weatherSignals);
+    const signalQuality = inferWalletAiSignalQuality(
+      weatherSignals,
+      primarySignals,
+      highlightTags,
+      keyMetrics,
+      sourceExcerpt,
+      strategyFocus
+    );
+    const alias = sanitizeAlias(item.alias, displayName);
+    const labels = buildAiLabels(primarySignals, highlightTags, weatherSignals, signalQuality, sourceExcerpt);
     const warnings: string[] = [];
     const errors: string[] = [];
-    const highValueSignalCount = countHighValueWeatherSignals(weatherSignals);
     const watchlistEnabled = shouldKeepWatchlist(item.watchlist, sourceExcerpt, item.teamNote);
 
     if (!normalizedAddress) {
       errors.push("AI 未提取出有效地址");
     }
-
-    if (!displayName) {
+    if (!rawDisplayName) {
       errors.push("AI 未提取出显示名");
     }
-
     if (!sourceExcerpt) {
-      errors.push("缺少原文证据摘录");
+      warnings.push("缺少原文摘录，建议补充证据后再确认导入");
     }
-
-    if (highValueSignalCount < 2) {
-      errors.push("高价值天气信号不足，至少需要 2 个明确维度");
+    if (primarySignals.length === 0 && highlightTags.length > 0) {
+      warnings.push("已保留原始重点标签，但主差异信号仍建议人工复核");
     }
-
     if (signalQuality === "needs_review") {
-      warnings.push("天气交易信号仍需人工复核");
+      warnings.push("当前条目建议进入复核视图后再作为主标注使用");
     }
-
     if (signalQuality === "low_signal") {
-      warnings.push("材料偏泛，交易信号较弱");
+      warnings.push("当前材料重点不够集中，系统已尽量保留原始结果供后续整理");
     }
-
-    if (weatherSignals.evidenceQuality === "qualitative_only") {
-      warnings.push("当前只有定性证据，建议补充来源或数值依据");
-    }
-
-    if (weatherSignals.evidenceQuality === "insufficient") {
-      warnings.push("证据不足，默认进入低信号处理");
-    }
-
     if (compactText(item.alias) && !alias) {
-      warnings.push("别名不够短或证据不足，已自动清空");
+      warnings.push("别名过长或不适合页内展示，已自动清空回退为显示名");
     }
 
     return {
@@ -949,6 +1090,9 @@ const normalizeAiItemsToRows = (
       confidence: normalizeConfidence(item.confidence),
       signalQuality,
       weatherSignals,
+      highlightTags,
+      keyMetrics,
+      primarySignals,
       providerMeta
     } satisfies WalletAiExtractPreviewRow;
   });

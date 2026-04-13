@@ -9,10 +9,12 @@
   <body class="popup-shell">
     <main class="popup-app">
       <header class="popup-header">
-        <div>
+        <div class="header-copy">
           <p class="eyebrow">Smart Labels</p>
-          <h1>智能标注控制台</h1>
-          <p class="subtitle">登录团队地址库、查看同步状态，并一键打开右侧面板。</p>
+          <h1>扩展登录与运行面板</h1>
+          <p class="subtitle">
+            首次使用请填写邮箱、密码和邀请码完成绑定。绑定后，后续只需要邮箱和密码即可继续使用。
+          </p>
         </div>
         <div class="status-sphere">
           <span class="status-dot" aria-hidden="true"></span>
@@ -23,24 +25,60 @@
       <section class="session-card">
         <form id="login-form" class="login-form">
           <label class="field">
+            <span class="field-label">邮箱</span>
+            <input
+              id="email"
+              name="email"
+              type="email"
+              autocomplete="email"
+              placeholder="you@example.com"
+              required
+            />
+          </label>
+
+          <label class="field">
+            <span class="field-label">密码</span>
+            <input
+              id="password"
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              placeholder="请输入密码"
+              required
+            />
+          </label>
+
+          <label class="field">
             <span class="field-label">邀请码</span>
             <input
               id="invite-code"
               name="inviteCode"
               type="text"
               autocomplete="off"
-              placeholder="请输入团队邀请码"
-              required
+              placeholder="首次绑定时填写，后续登录可留空"
             />
           </label>
-          <button type="submit" id="login-button" class="primary-button">连接地址库</button>
+
+          <p class="field-help">
+            同一个邀请码只能绑定一个用户账户。邀请码一旦绑定成功，这个账户之后就不需要再次输入邀请码。
+          </p>
+
+          <button type="submit" id="login-button" class="primary-button">登录并绑定账户</button>
         </form>
 
         <div id="session-panel" class="session-panel hidden">
-          <div class="session-meta">
+          <div class="session-meta session-meta--stack">
             <div>
-              <p class="session-label">当前成员</p>
+              <p class="session-label">账户邮箱</p>
+              <strong id="session-email">未登录</strong>
+            </div>
+            <div>
+              <p class="session-label">团队身份</p>
               <strong id="session-member">未登录</strong>
+            </div>
+            <div>
+              <p class="session-label">绑定邀请码</p>
+              <strong id="session-invite">未绑定</strong>
             </div>
             <div>
               <p class="session-label">连接状态</p>
@@ -50,15 +88,15 @@
 
           <dl class="session-grid">
             <div>
-              <dt>访问过期</dt>
+              <dt>访问令牌到期</dt>
               <dd id="expires-at">-</dd>
             </div>
             <div>
-              <dt>续期截止</dt>
+              <dt>刷新会话到期</dt>
               <dd id="refresh-expires-at">-</dd>
             </div>
             <div>
-              <dt>上次同步</dt>
+              <dt>最近同步</dt>
               <dd id="last-sync">-</dd>
             </div>
             <div>
@@ -86,13 +124,15 @@
         <div class="panel">
           <div class="panel-header">
             <div>
-              <p class="panel-title">右侧面板</p>
-              <p class="panel-subtitle">搜索地址库、查看更多摘要，并确认当前状态是否为绿色正常。</p>
+              <p class="panel-title">快捷入口</p>
+              <p class="panel-subtitle">
+                打开侧边面板、管理后台或 Polymarket 页面，并检查当前运行状态是否正常。
+              </p>
             </div>
           </div>
           <div class="session-actions">
-            <button type="button" id="open-sidepanel-button" class="primary-button">打开右侧面板</button>
-            <button type="button" id="open-workbench-button" class="secondary-button">打开工作台</button>
+            <button type="button" id="open-sidepanel-button" class="primary-button">打开侧边面板</button>
+            <button type="button" id="open-workbench-button" class="secondary-button">打开管理后台</button>
           </div>
         </div>
 

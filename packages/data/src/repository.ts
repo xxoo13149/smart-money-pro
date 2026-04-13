@@ -1,11 +1,15 @@
 ﻿import type { D1Database } from "@cloudflare/workers-types";
 import {
+  getPrimarySignalPriority,
+  isPrimarySignalLabelKind,
+  sortAddressBadges,
   type AdminExtensionInviteEffectiveStatus,
   type AdminExtensionInviteItem,
   type AdminExtensionOverview,
   type AdminExtensionSessionItem,
   type AdminExtensionSessionStatus,
   normalizeAddress,
+  type AddressHoverCard,
   type AddressLabelBadge,
   type AddressSearchResult,
   type AddressSummary,
@@ -17,6 +21,7 @@ import {
   type WalletFacetSummary,
   type WalletImportBatch,
   type WalletLabel,
+  type WalletLabelKind,
   type WalletListResponse,
   type WalletListSort,
   type WalletSavedView,
@@ -29,12 +34,14 @@ import { extensionSchemaStatements } from "./schema.js";
 import type {
   DatasetKey,
   ExtensionInviteRecord,
+  ExtensionUserRecord,
   ExtensionSessionRecord,
   WalletDeleteInput,
   WalletImportBatchRecord,
   WalletInput,
   WalletListFilters,
   WalletLabelInput,
+  WalletLabelPatchInput,
   WalletPageInput,
   WalletSavedViewRecord,
   WalletUpdate
@@ -55,6 +62,7 @@ const REQUIRED_SCHEMA_TABLES = [
   "wallet_saved_views",
   "wallet_import_batches",
   "extension_invites",
+  "extension_users",
   "extension_sessions",
   "admin_users",
   "admin_sessions",
@@ -148,7 +156,12 @@ const mapWalletLabelRow = (row: Record<string, unknown>): WalletLabel => ({
   kind: String(row.kind) as WalletLabel["kind"],
   source: String(row.source) as WalletLabel["source"],
   evidence: row.evidence ? repairPossiblyMojibake(String(row.evidence)) : undefined,
-  createdAt: String(row.created_at)
+  verificationNote: row.verification_note
+    ? repairPossiblyMojibake(String(row.verification_note))
+    : undefined,
+  sourceNote: row.source_note ? repairPossiblyMojibake(String(row.source_note)) : undefined,
+  createdAt: String(row.created_at),
+  updatedAt: row.updated_at ? String(row.updated_at) : String(row.created_at)
 });
 
 const mapAuditLogRow = (row: Record<string, unknown>): NoteAuditLog => ({
@@ -174,7 +187,26 @@ const mapInviteRow = (row: Record<string, unknown>): ExtensionInviteRecord => ({
   expiresAt: row.expires_at ? String(row.expires_at) : null,
   createdAt: String(row.created_at),
   updatedAt: String(row.updated_at),
-  lastUsedAt: row.last_used_at ? String(row.last_used_at) : null
+  lastUsedAt: row.last_used_at ? String(row.last_used_at) : null,
+  boundUserId: row.bound_user_id ? String(row.bound_user_id) : null,
+  boundUserEmail: row.bound_user_email ? String(row.bound_user_email) : null,
+  boundAt: row.bound_at ? String(row.bound_at) : null
+});
+
+const mapExtensionUserRow = (row: Record<string, unknown>): ExtensionUserRecord => ({
+  id: String(row.id),
+  email: String(row.email),
+  normalizedEmail: String(row.normalized_email),
+  passwordHash: String(row.password_hash),
+  passwordSalt: String(row.password_salt),
+  passwordIterations: Number(row.password_iterations ?? 100_000),
+  inviteCode: row.invite_code ? String(row.invite_code) : null,
+  memberLabel: row.member_label ? repairPossiblyMojibake(String(row.member_label)) : null,
+  boundAt: row.bound_at ? String(row.bound_at) : null,
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at),
+  lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
+  disabledAt: row.disabled_at ? String(row.disabled_at) : null
 });
 
 const mapSessionRow = (row: Record<string, unknown>): ExtensionSessionRecord => ({
@@ -182,6 +214,8 @@ const mapSessionRow = (row: Record<string, unknown>): ExtensionSessionRecord => 
   refreshTokenHash: String(row.refresh_token_hash),
   memberLabel: repairPossiblyMojibake(String(row.member_label)),
   inviteCode: String(row.invite_code),
+  userId: row.user_id ? String(row.user_id) : null,
+  userEmail: row.user_email ? String(row.user_email) : null,
   deviceLabel: row.device_label ? repairPossiblyMojibake(String(row.device_label)) : null,
   extensionVersion: row.extension_version ? String(row.extension_version) : null,
   refreshExpiresAt: String(row.refresh_expires_at),
@@ -277,6 +311,80 @@ const ensureWalletColumns = async (db: D1Database) => {
   ].filter((column) => !existingColumns.has(column.name));
 
   for (const column of missingColumns) {
+    await db.prepare(column.ddl).run();
+  }
+};
+
+const ensureWalletLabelColumns = async (db: D1Database) => {
+  const result = await db
+    .prepare(`PRAGMA table_info(wallet_user_labels)`)
+    .all<Record<string, unknown>>();
+  const existingColumns = new Set((result.results ?? []).map((row) => String(row.name)));
+
+  const missingColumns = [
+    {
+      name: "verification_note",
+      ddl: `ALTER TABLE wallet_user_labels ADD COLUMN verification_note TEXT`
+    },
+    {
+      name: "source_note",
+      ddl: `ALTER TABLE wallet_user_labels ADD COLUMN source_note TEXT`
+    },
+    {
+      name: "updated_at",
+      ddl: `ALTER TABLE wallet_user_labels ADD COLUMN updated_at TEXT`
+    }
+  ].filter((column) => !existingColumns.has(column.name));
+
+  for (const column of missingColumns) {
+    await db.prepare(column.ddl).run();
+  }
+
+  if (missingColumns.some((column) => column.name === "updated_at")) {
+    await db
+      .prepare(
+        `UPDATE wallet_user_labels
+         SET updated_at = coalesce(updated_at, created_at)
+         WHERE updated_at IS NULL`
+      )
+      .run();
+  }
+};
+
+const ensureExtensionColumns = async (db: D1Database) => {
+  const inviteColumnsResult = await db.prepare(`PRAGMA table_info(extension_invites)`).all<Record<string, unknown>>();
+  const sessionColumnsResult = await db.prepare(`PRAGMA table_info(extension_sessions)`).all<Record<string, unknown>>();
+
+  const inviteColumns = new Set((inviteColumnsResult.results ?? []).map((row) => String(row.name)));
+  const sessionColumns = new Set((sessionColumnsResult.results ?? []).map((row) => String(row.name)));
+
+  const inviteMissing = [
+    {
+      name: "bound_user_id",
+      ddl: `ALTER TABLE extension_invites ADD COLUMN bound_user_id TEXT`
+    },
+    {
+      name: "bound_user_email",
+      ddl: `ALTER TABLE extension_invites ADD COLUMN bound_user_email TEXT`
+    },
+    {
+      name: "bound_at",
+      ddl: `ALTER TABLE extension_invites ADD COLUMN bound_at TEXT`
+    }
+  ].filter((column) => !inviteColumns.has(column.name));
+
+  const sessionMissing = [
+    {
+      name: "user_id",
+      ddl: `ALTER TABLE extension_sessions ADD COLUMN user_id TEXT`
+    },
+    {
+      name: "user_email",
+      ddl: `ALTER TABLE extension_sessions ADD COLUMN user_email TEXT`
+    }
+  ].filter((column) => !sessionColumns.has(column.name));
+
+  for (const column of [...inviteMissing, ...sessionMissing]) {
     await db.prepare(column.ddl).run();
   }
 };
@@ -692,26 +800,99 @@ const createAuditLog = async (
   return log;
 };
 
-const createBadges = (labels: WalletLabel[], watchlisted: boolean) => {
+const getLabelDisplayText = (label: WalletLabel) => label.value.length <= 18 ? label.value : label.name;
+
+const shouldIncludeSummaryLabel = (kind: WalletLabelKind) =>
+  kind !== "signal_quality" && kind !== "market_scope" && kind !== "confidence";
+
+const toLabelBadge = (label: WalletLabel): AddressLabelBadge => ({
+  id: label.id,
+  text: getLabelDisplayText(label),
+  tone: label.source === "user" ? "accent" : "neutral",
+  kind: label.kind,
+  priority: getPrimarySignalPriority(label.kind),
+  detailText: label.name,
+  metricText: label.evidence,
+  isPrimary: isPrimarySignalLabelKind(label.kind)
+});
+
+const createSummaryBadges = (labels: WalletLabel[]) =>
+  sortAddressBadges(
+    labels.filter((label) => shouldIncludeSummaryLabel(label.kind)).map(toLabelBadge)
+  ).slice(0, 2);
+
+const createHoverBadges = (labels: WalletLabel[]) =>
+  sortAddressBadges(
+    labels.filter((label) => shouldIncludeSummaryLabel(label.kind)).map(toLabelBadge)
+  ).slice(0, 6);
+
+const joinUniqueLabelTexts = (items: string[]) => {
+  const values = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+  return values.length > 0 ? values.join(" | ") : undefined;
+};
+
+const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undefined => {
+  const filteredLabels = labels.filter((label) => shouldIncludeSummaryLabel(label.kind));
+  const officialTags = sortAddressBadges(
+    filteredLabels.filter((label) => label.source === "user").map(toLabelBadge)
+  ).slice(0, 8);
+  const aiTags = sortAddressBadges(
+    filteredLabels.filter((label) => label.source !== "user").map(toLabelBadge)
+  ).slice(0, 8);
+
+  const officialNoteText = joinUniqueLabelTexts([
+    ...filteredLabels
+      .filter((label) => label.source === "user")
+      .flatMap((label) => [label.verificationNote ?? "", label.sourceNote ?? ""])
+  ]);
+
+  const aiStatsNoteText = joinUniqueLabelTexts([
+    ...filteredLabels
+      .filter((label) => label.source !== "user")
+      .flatMap((label) => [label.evidence ?? "", label.sourceNote ?? ""])
+  ]);
+
+  if (officialTags.length === 0 && aiTags.length === 0 && !officialNoteText && !aiStatsNoteText) {
+    return undefined;
+  }
+
+  return {
+    officialTags,
+    officialNoteText,
+    aiTags,
+    aiStatsNoteText
+  };
+};
+
+const createStatusBadges = (wallet: Wallet): AddressLabelBadge[] => {
   const badges: AddressLabelBadge[] = [];
 
-  if (watchlisted) {
+  if (wallet.watchlisted) {
     badges.push({
-      id: "watchlist",
+      id: `${wallet.id}-watchlist`,
       text: "Watchlist",
-      tone: "watch"
+      tone: "watch",
+      priority: 40
     });
   }
 
-  labels.slice(0, 3).forEach((label) => {
+  if (wallet.deletedAt) {
     badges.push({
-      id: label.id,
-      text: label.value.length <= 16 ? label.value : label.name,
-      tone: label.source === "user" ? "accent" : "neutral"
+      id: `${wallet.id}-deleted`,
+      text: "已删除",
+      tone: "danger",
+      priority: 60
     });
-  });
+  } else if (wallet.curationStatus === "review_needed") {
+    badges.push({
+      id: `${wallet.id}-review`,
+      text: "待复核",
+      tone: "ai-review",
+      priority: 35
+    });
+  }
 
-  return badges;
+  return sortAddressBadges(badges);
 };
 
 export const runMigrations = async (db: D1Database) => {
@@ -719,6 +900,8 @@ export const runMigrations = async (db: D1Database) => {
   await runStatements(db, [walletTableStatement]);
   await ensureWalletColumns(db);
   await runStatements(db, remainingStatements);
+  await ensureWalletLabelColumns(db);
+  await ensureExtensionColumns(db);
 };
 
 export interface SmartMoneySchemaStatus {
@@ -1294,7 +1477,7 @@ export const listWalletLabelsByWalletIds = async (db: D1Database, walletIds: str
           .prepare(
             `SELECT * FROM wallet_user_labels
              WHERE wallet_id IN (${buildPlaceholders(chunk)})
-             ORDER BY created_at DESC`
+             ORDER BY coalesce(updated_at, created_at) DESC, created_at DESC`
           )
           .bind(...chunk)
           .all<Record<string, unknown>>();
@@ -1465,13 +1648,28 @@ export const createWalletLabel = async (
     kind: input.kind ?? "strategy",
     source: input.source ?? "user",
     evidence: input.evidence?.trim() || undefined,
-    createdAt: nowIso()
+    verificationNote: input.verificationNote?.trim() || undefined,
+    sourceNote: input.sourceNote?.trim() || undefined,
+    createdAt: nowIso(),
+    updatedAt: nowIso()
   };
 
   await db
     .prepare(
-      `INSERT INTO wallet_user_labels (id, wallet_id, name, value, kind, source, evidence, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO wallet_user_labels (
+        id,
+        wallet_id,
+        name,
+        value,
+        kind,
+        source,
+        evidence,
+        verification_note,
+        source_note,
+        created_at,
+        updated_at
+      )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       label.id,
@@ -1481,7 +1679,10 @@ export const createWalletLabel = async (
       label.kind,
       label.source,
       label.evidence ?? null,
-      label.createdAt
+      label.verificationNote ?? null,
+      label.sourceNote ?? null,
+      label.createdAt,
+      label.updatedAt
     )
     .run();
 
@@ -1490,6 +1691,120 @@ export const createWalletLabel = async (
   await incrementDatasetVersion(db, "address_labels");
 
   return label;
+};
+
+export const updateWalletLabel = async (
+  db: D1Database,
+  walletId: string,
+  labelId: string,
+  input: WalletLabelPatchInput,
+  actor = DEFAULT_ACTOR
+) => {
+  const existingWallet = await getWalletById(db, walletId, { includeDeleted: true });
+  if (!existingWallet) {
+    return undefined;
+  }
+
+  const existingRow = await db
+    .prepare(`SELECT * FROM wallet_user_labels WHERE id = ? AND wallet_id = ?`)
+    .bind(labelId, walletId)
+    .first<Record<string, unknown>>();
+  if (!existingRow) {
+    return null;
+  }
+
+  const existingLabel = mapWalletLabelRow(existingRow);
+  const updatedAt = nowIso();
+  const nextName = input.name === undefined ? existingLabel.name : input.name.trim();
+  const nextValue = input.value === undefined ? existingLabel.value : input.value.trim();
+  const nextKind = input.kind ?? existingLabel.kind;
+  const nextSource = input.source ?? existingLabel.source;
+  const nextEvidence =
+    input.evidence === undefined
+      ? existingLabel.evidence
+      : input.evidence.trim() || undefined;
+  const nextVerificationNote =
+    input.verificationNote === undefined
+      ? existingLabel.verificationNote
+      : input.verificationNote.trim() || undefined;
+  const nextSourceNote =
+    input.sourceNote === undefined
+      ? existingLabel.sourceNote
+      : input.sourceNote.trim() || undefined;
+
+  await db
+    .prepare(
+      `UPDATE wallet_user_labels
+       SET name = ?,
+           value = ?,
+           kind = ?,
+           source = ?,
+           evidence = ?,
+           verification_note = ?,
+           source_note = ?,
+           updated_at = ?
+       WHERE id = ? AND wallet_id = ?`
+    )
+    .bind(
+      nextName,
+      nextValue,
+      nextKind,
+      nextSource,
+      nextEvidence ?? null,
+      nextVerificationNote ?? null,
+      nextSourceNote ?? null,
+      updatedAt,
+      labelId,
+      walletId
+    )
+    .run();
+
+  await touchWallet(db, walletId);
+  await createAuditLog(db, walletId, "create_user_tag", `更新标签: ${nextName}: ${nextValue}`, actor);
+  await incrementDatasetVersion(db, "address_labels");
+
+  const row = await db
+    .prepare(`SELECT * FROM wallet_user_labels WHERE id = ? AND wallet_id = ?`)
+    .bind(labelId, walletId)
+    .first<Record<string, unknown>>();
+  return row ? mapWalletLabelRow(row) : null;
+};
+
+export const deleteWalletLabel = async (
+  db: D1Database,
+  walletId: string,
+  labelId: string,
+  actor = DEFAULT_ACTOR
+) => {
+  const existingWallet = await getWalletById(db, walletId, { includeDeleted: true });
+  if (!existingWallet) {
+    return undefined;
+  }
+
+  const existingRow = await db
+    .prepare(`SELECT * FROM wallet_user_labels WHERE id = ? AND wallet_id = ?`)
+    .bind(labelId, walletId)
+    .first<Record<string, unknown>>();
+  if (!existingRow) {
+    return null;
+  }
+
+  const existingLabel = mapWalletLabelRow(existingRow);
+  await db
+    .prepare(`DELETE FROM wallet_user_labels WHERE id = ? AND wallet_id = ?`)
+    .bind(labelId, walletId)
+    .run();
+
+  await touchWallet(db, walletId);
+  await createAuditLog(
+    db,
+    walletId,
+    "create_user_tag",
+    `删除标签: ${existingLabel.name}: ${existingLabel.value}`,
+    actor
+  );
+  await incrementDatasetVersion(db, "address_labels");
+  return { id: labelId };
 };
 
 export const upsertWalletWatchlist = async (
@@ -1738,6 +2053,165 @@ export const updateWalletImportBatch = async (
   return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
 };
 
+export const getExtensionUserByNormalizedEmail = async (db: D1Database, normalizedEmail: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM extension_users WHERE normalized_email = ?`)
+    .bind(normalizedEmail.trim().toLowerCase())
+    .first<Record<string, unknown>>();
+
+  return row ? mapExtensionUserRow(row) : null;
+};
+
+export const getExtensionUserByInviteCode = async (db: D1Database, inviteCode: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM extension_users WHERE invite_code = ?`)
+    .bind(inviteCode)
+    .first<Record<string, unknown>>();
+
+  return row ? mapExtensionUserRow(row) : null;
+};
+
+export const createExtensionUser = async (
+  db: D1Database,
+  input: {
+    email: string;
+    normalizedEmail: string;
+    passwordHash: string;
+    passwordSalt: string;
+    passwordIterations: number;
+    inviteCode: string;
+    memberLabel: string;
+  }
+) => {
+  const timestamp = nowIso();
+  const user: ExtensionUserRecord = {
+    id: crypto.randomUUID(),
+    email: input.email,
+    normalizedEmail: input.normalizedEmail,
+    passwordHash: input.passwordHash,
+    passwordSalt: input.passwordSalt,
+    passwordIterations: input.passwordIterations,
+    inviteCode: input.inviteCode,
+    memberLabel: input.memberLabel,
+    boundAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    lastLoginAt: timestamp,
+    disabledAt: null
+  };
+
+  await db
+    .prepare(
+      `INSERT INTO extension_users (
+        id,
+        email,
+        normalized_email,
+        password_hash,
+        password_salt,
+        password_iterations,
+        invite_code,
+        member_label,
+        bound_at,
+        created_at,
+        updated_at,
+        last_login_at,
+        disabled_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    )
+    .bind(
+      user.id,
+      user.email,
+      user.normalizedEmail,
+      user.passwordHash,
+      user.passwordSalt,
+      user.passwordIterations,
+      user.inviteCode,
+      user.memberLabel,
+      user.boundAt,
+      user.createdAt,
+      user.updatedAt,
+      user.lastLoginAt
+    )
+    .run();
+
+  return user;
+};
+
+export const bindExtensionUserInvite = async (
+  db: D1Database,
+  userId: string,
+  input: {
+    inviteCode: string;
+    memberLabel: string;
+  }
+) => {
+  const timestamp = nowIso();
+  await db
+    .prepare(
+      `UPDATE extension_users
+       SET invite_code = ?,
+           member_label = ?,
+           bound_at = coalesce(bound_at, ?),
+           updated_at = ?
+       WHERE id = ?`
+    )
+    .bind(input.inviteCode, input.memberLabel, timestamp, timestamp, userId)
+    .run();
+
+  const row = await db
+    .prepare(`SELECT * FROM extension_users WHERE id = ?`)
+    .bind(userId)
+    .first<Record<string, unknown>>();
+
+  return row ? mapExtensionUserRow(row) : null;
+};
+
+export const setExtensionInviteBinding = async (
+  db: D1Database,
+  code: string,
+  input: {
+    userId: string;
+    userEmail: string;
+    boundAt?: string;
+  }
+) => {
+  const timestamp = input.boundAt ?? nowIso();
+  await db
+    .prepare(
+      `UPDATE extension_invites
+       SET bound_user_id = ?,
+           bound_user_email = ?,
+           bound_at = coalesce(bound_at, ?),
+           updated_at = ?
+       WHERE code = ?`
+    )
+    .bind(input.userId, input.userEmail, timestamp, timestamp, code)
+    .run();
+
+  return getExtensionInvite(db, code);
+};
+
+export const updateExtensionUserLogin = async (db: D1Database, userId: string) => {
+  const timestamp = nowIso();
+  await db
+    .prepare(
+      `UPDATE extension_users
+       SET updated_at = ?,
+           last_login_at = ?
+       WHERE id = ?`
+    )
+    .bind(timestamp, timestamp, userId)
+    .run();
+
+  const row = await db
+    .prepare(`SELECT * FROM extension_users WHERE id = ?`)
+    .bind(userId)
+    .first<Record<string, unknown>>();
+
+  return row ? mapExtensionUserRow(row) : null;
+};
+
 export const getExtensionInvite = async (db: D1Database, code: string) => {
   const row = await db
     .prepare(`SELECT * FROM extension_invites WHERE code = ?`)
@@ -1819,6 +2293,8 @@ export const createExtensionSession = async (
     refreshTokenHash: string;
     memberLabel: string;
     inviteCode: string;
+    userId?: string | null;
+    userEmail?: string | null;
     refreshExpiresAt: string;
     deviceLabel?: string;
     extensionVersion?: string;
@@ -1829,6 +2305,8 @@ export const createExtensionSession = async (
     refreshTokenHash: input.refreshTokenHash,
     memberLabel: input.memberLabel,
     inviteCode: input.inviteCode,
+    userId: input.userId?.trim() || null,
+    userEmail: input.userEmail?.trim().toLowerCase() || null,
     deviceLabel: input.deviceLabel?.trim() || null,
     extensionVersion: input.extensionVersion?.trim() || null,
     refreshExpiresAt: input.refreshExpiresAt,
@@ -1845,6 +2323,8 @@ export const createExtensionSession = async (
         refresh_token_hash,
         member_label,
         invite_code,
+        user_id,
+        user_email,
         device_label,
         extension_version,
         refresh_expires_at,
@@ -1853,13 +2333,15 @@ export const createExtensionSession = async (
         updated_at,
         revoked_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
     )
     .bind(
       session.id,
       session.refreshTokenHash,
       session.memberLabel,
       session.inviteCode,
+      session.userId ?? null,
+      session.userEmail ?? null,
       session.deviceLabel ?? null,
       session.extensionVersion ?? null,
       session.refreshExpiresAt,
@@ -1939,6 +2421,8 @@ export const listExtensionSessions = async (
       id: session.id,
       inviteCode: session.inviteCode,
       memberLabel: session.memberLabel,
+      userId: session.userId,
+      userEmail: session.userEmail,
       deviceLabel: session.deviceLabel,
       extensionVersion: session.extensionVersion,
       createdAt: session.createdAt,
@@ -1946,7 +2430,7 @@ export const listExtensionSessions = async (
       refreshExpiresAt: session.refreshExpiresAt,
       revokedAt: session.revokedAt,
       status: getAdminExtensionSessionStatus(session, now)
-    }) satisfies AdminExtensionSessionItem)
+    }))
     .filter((session) => {
       if (status !== "all" && session.status !== status) {
         return false;
@@ -1960,6 +2444,7 @@ export const listExtensionSessions = async (
         session.id,
         session.inviteCode,
         session.memberLabel,
+        session.userEmail,
         session.deviceLabel,
         session.extensionVersion
       ]
@@ -2005,10 +2490,13 @@ export const listExtensionInvites = async (db: D1Database) => {
       updatedAt: invite.updatedAt,
       expiresAt: invite.expiresAt,
       lastUsedAt: invite.lastUsedAt,
+      boundUserId: invite.boundUserId,
+      boundUserEmail: invite.boundUserEmail,
+      boundAt: invite.boundAt,
       sessionCount: inviteSessions.length,
       activeSessionCount: inviteSessions.filter((session) => session.status === "active").length,
       latestSessionAt: latestSessionAt ? new Date(latestSessionAt).toISOString() : null
-    } satisfies AdminExtensionInviteItem;
+    };
   });
 };
 
@@ -2095,7 +2583,12 @@ export const listAddressSummaries = async (
         address: wallet.address,
         normalizedAddress: wallet.normalizedAddress,
         alias: wallet.alias ?? wallet.displayName,
-        badges: createBadges(labels, wallet.watchlisted),
+        displayName: wallet.displayName,
+        strategyFocus: wallet.strategyFocus || undefined,
+        badges: createSummaryBadges(labels),
+        hoverBadges: createHoverBadges(labels),
+        statusBadges: createStatusBadges(wallet),
+        hoverCard: createAddressHoverCard(labels),
         noteSnippet: latestNote?.content ?? wallet.teamNote,
         watchlisted: wallet.watchlisted,
         detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
@@ -2190,14 +2683,17 @@ export const searchAddressSummaries = async (
       normalizedAddress: wallet.normalizedAddress,
       displayName: wallet.displayName,
       alias: wallet.alias ?? wallet.displayName,
-      badges: createBadges(labels, wallet.watchlisted),
+      strategyFocus: wallet.strategyFocus || undefined,
+      badges: createSummaryBadges(labels),
+      hoverBadges: createHoverBadges(labels),
+      statusBadges: createStatusBadges(wallet),
+      hoverCard: createAddressHoverCard(labels),
       noteSnippet: latestNote?.content ?? wallet.teamNote,
       watchlisted: wallet.watchlisted,
       detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
       updatedAt,
       version: `v${version}:${wallet.id}:${updatedAt}`,
       bio: wallet.bio || undefined,
-      strategyFocus: wallet.strategyFocus || undefined,
       teamNote: wallet.teamNote || undefined
     } satisfies AddressSearchResult;
   });

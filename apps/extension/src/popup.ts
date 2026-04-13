@@ -1,47 +1,20 @@
-interface PopupViewState {
-  runtimeConfig: {
-    mode: "dev" | "release";
-    backendBaseUrl: string;
-    adminBaseUrl: string;
-    workbenchPath: string;
-    showDebugControls: boolean;
-    privacyPolicyUrl?: string;
-  };
-  config: {
-    enabled: boolean;
-    debugMode: boolean;
-  };
-  auth: {
-    status: "connected" | "signed_out" | "expired";
-    isAuthenticated: boolean;
-    memberLabel?: string;
-    expiresAt?: string;
-    refreshExpiresAt?: string;
-  };
-  sync: {
-    lastSyncAt?: string;
-    lastError?: string;
-  };
-  runtime: {
-    status: "idle" | "bootstrap" | "wake" | "ready" | "degraded" | "disabled" | "signed_out";
-    detail?: string;
-    lastEventAt: string;
-    lastBootstrapAt?: string;
-    lastWakeAt?: string;
-    lastReadyAt?: string;
-    lastDegradedAt?: string;
-    lastHealthAt?: string;
-    lastHealthUploadAt?: string;
-    lastHealthUploadError?: string;
-    lastLabelsVersion?: string;
-  };
-}
+import {
+  type ExtensionStorageChange,
+  type PopupViewState,
+  hasRelevantStorageChange,
+  readStoredPopupState,
+  sendExtensionMessage
+} from "./ui-state.js";
 
 const loginForm = document.querySelector<HTMLFormElement>("#login-form");
+const emailInput = document.querySelector<HTMLInputElement>("#email");
+const passwordInput = document.querySelector<HTMLInputElement>("#password");
 const inviteInput = document.querySelector<HTMLInputElement>("#invite-code");
 const loginButton = document.querySelector<HTMLButtonElement>("#login-button");
 const sessionPanel = document.querySelector<HTMLElement>("#session-panel");
+const sessionEmail = document.querySelector<HTMLElement>("#session-email");
 const sessionMember = document.querySelector<HTMLElement>("#session-member");
+const sessionInvite = document.querySelector<HTMLElement>("#session-invite");
 const sessionStatus = document.querySelector<HTMLElement>("#session-status");
 const runtimeTarget = document.querySelector<HTMLElement>("#runtime-target");
 const expiresAtNode = document.querySelector<HTMLElement>("#expires-at");
@@ -61,24 +34,7 @@ const privacyLink = document.querySelector<HTMLAnchorElement>("#privacy-link");
 
 let currentState: PopupViewState | null = null;
 
-const sendMessage = <T = unknown>(message: unknown): Promise<T> =>
-  new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response: { ok?: boolean; error?: string; payload?: T }) => {
-      if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
-        return;
-      }
-
-      if (response?.ok === false) {
-        reject(new Error(response.error ?? "unknown"));
-        return;
-      }
-
-      resolve((response as { payload?: T }).payload ?? (response as T));
-    });
-  });
-
-const formatTimestamp = (value?: string, fallback = "Not synced yet") =>
+const formatTimestamp = (value?: string, fallback = "暂无") =>
   value ? new Date(value).toLocaleString() : fallback;
 
 const setStatus = (text: string, tone: "neutral" | "success" | "error" = "neutral") => {
@@ -91,6 +47,9 @@ const setStatus = (text: string, tone: "neutral" | "success" | "error" = "neutra
 };
 
 const setBusy = (value: boolean) => {
+  emailInput?.toggleAttribute("disabled", value);
+  passwordInput?.toggleAttribute("disabled", value);
+  inviteInput?.toggleAttribute("disabled", value);
   loginButton?.toggleAttribute("disabled", value);
   refreshStateButton?.toggleAttribute("disabled", value);
   openWorkbenchButton?.toggleAttribute("disabled", value || !currentState);
@@ -102,45 +61,54 @@ const setBusy = (value: boolean) => {
 const formatRuntimeStatus = (status: PopupViewState["runtime"]["status"]) => {
   switch (status) {
     case "bootstrap":
-      return "Bootstrap";
+      return "初始化中";
     case "wake":
-      return "Wake";
+      return "唤醒中";
     case "ready":
-      return "Ready";
+      return "已就绪";
     case "degraded":
-      return "Degraded";
+      return "降级运行";
     case "disabled":
-      return "Disabled";
+      return "已停用";
     case "signed_out":
-      return "Signed out";
+      return "未登录";
     default:
-      return "Idle";
+      return "空闲";
   }
+};
+
+const syncLoginButtonLabel = () => {
+  if (!loginButton) {
+    return;
+  }
+
+  const hasInvite = Boolean(inviteInput?.value.trim());
+  loginButton.textContent = hasInvite ? "登录并绑定账户" : "登录账户";
 };
 
 const renderHealth = (state: PopupViewState) => {
   if (state.auth.status === "expired") {
-    setStatus("Session expired", "error");
+    setStatus("登录已过期", "error");
     return;
   }
 
   if (!state.auth.isAuthenticated) {
-    setStatus("Not connected", "neutral");
+    setStatus("未登录", "neutral");
     return;
   }
 
   if (!state.config.enabled) {
-    setStatus("Runtime disabled", "error");
+    setStatus("标注已停用", "error");
     return;
   }
 
   if (state.runtime.status === "degraded" || state.sync.lastError || state.runtime.lastHealthUploadError) {
-    setStatus("Needs attention", "error");
+    setStatus("需要处理", "error");
     return;
   }
 
   if (state.runtime.status === "ready") {
-    setStatus("Runtime ready", "success");
+    setStatus("运行正常", "success");
     return;
   }
 
@@ -149,7 +117,7 @@ const renderHealth = (state: PopupViewState) => {
     return;
   }
 
-  setStatus("Connected", "success");
+  setStatus("已连接", "success");
 };
 
 const renderRuntimeSummary = (state: PopupViewState) => {
@@ -162,7 +130,7 @@ const renderRuntimeSummary = (state: PopupViewState) => {
     parts.push(state.runtime.detail.trim());
   }
   if (state.runtime.lastLabelsVersion?.trim()) {
-    parts.push(`Labels ${state.runtime.lastLabelsVersion.trim()}`);
+    parts.push(`标签 ${state.runtime.lastLabelsVersion.trim()}`);
   }
   runtimeTarget.textContent = parts.join(" · ");
 };
@@ -170,6 +138,7 @@ const renderRuntimeSummary = (state: PopupViewState) => {
 const applyState = (state: PopupViewState) => {
   currentState = state;
   renderRuntimeSummary(state);
+  syncLoginButtonLabel();
 
   if (backendOriginNode) {
     backendOriginNode.textContent = state.runtimeConfig.backendBaseUrl;
@@ -184,30 +153,38 @@ const applyState = (state: PopupViewState) => {
   sessionPanel?.classList.toggle("hidden", !state.auth.isAuthenticated);
   loginForm?.classList.toggle("hidden", state.auth.isAuthenticated);
 
+  if (sessionEmail) {
+    sessionEmail.textContent = state.auth.userEmail ?? "未登录";
+  }
+
   if (sessionMember) {
-    sessionMember.textContent = state.auth.memberLabel ?? "Not signed in";
+    sessionMember.textContent = state.auth.memberLabel ?? "未登录";
+  }
+
+  if (sessionInvite) {
+    sessionInvite.textContent = state.auth.inviteCode ?? "未绑定";
   }
 
   if (sessionStatus) {
     sessionStatus.textContent =
       state.auth.status === "connected"
-        ? "Connected"
+        ? "已连接"
         : state.auth.status === "expired"
-          ? "Expired"
-          : "Signed out";
+          ? "已过期"
+          : "未登录";
   }
 
   if (expiresAtNode) {
-    expiresAtNode.textContent = formatTimestamp(state.auth.expiresAt, "Waiting for token");
+    expiresAtNode.textContent = formatTimestamp(state.auth.expiresAt, "等待签发");
   }
 
   if (refreshExpiresAtNode) {
-    refreshExpiresAtNode.textContent = formatTimestamp(state.auth.refreshExpiresAt, "Not issued");
+    refreshExpiresAtNode.textContent = formatTimestamp(state.auth.refreshExpiresAt, "未签发");
   }
 
   if (lastSyncNode) {
     const healthStamp = state.runtime.lastHealthUploadAt ?? state.runtime.lastHealthAt;
-    lastSyncNode.textContent = formatTimestamp(state.sync.lastSyncAt ?? healthStamp);
+    lastSyncNode.textContent = formatTimestamp(state.sync.lastSyncAt ?? healthStamp, "尚未同步");
   }
 
   if (toggleEnabledInput) {
@@ -222,18 +199,30 @@ const applyState = (state: PopupViewState) => {
   renderHealth(state);
 };
 
+const hydrateStoredState = async () => {
+  const state = await readStoredPopupState();
+  applyState(state);
+  return state;
+};
+
 const refreshState = async (options?: { silent?: boolean }) => {
   if (!options?.silent) {
-    setStatus("Reading runtime state...", "neutral");
+    setStatus("正在读取运行状态...", "neutral");
   }
 
   setBusy(true);
   try {
-    const payload = await sendMessage<PopupViewState>({ type: "wsm:getPopupState" });
+    const payload = await sendExtensionMessage<PopupViewState>({ type: "wsm:getPopupState" });
     applyState(payload);
   } catch (error) {
     console.error("popup state", error);
-    setStatus("Failed to read state", "error");
+    try {
+      const fallbackState = await hydrateStoredState();
+      renderHealth(fallbackState);
+    } catch (fallbackError) {
+      console.error("popup storage fallback", fallbackError);
+      setStatus("读取状态失败", "error");
+    }
   } finally {
     setBusy(false);
   }
@@ -241,7 +230,7 @@ const refreshState = async (options?: { silent?: boolean }) => {
 
 const refreshCurrentTabAnnotations = async () => {
   try {
-    await sendMessage({ type: "wsm:refreshActiveTab" });
+    await sendExtensionMessage({ type: "wsm:refreshActiveTab" });
   } catch (error) {
     console.error("refresh active tab", error);
   }
@@ -249,7 +238,7 @@ const refreshCurrentTabAnnotations = async () => {
 
 const openSidePanelDirect = async () => {
   if (!chrome.sidePanel?.open) {
-    await sendMessage({ type: "wsm:openWorkbench" });
+    await sendExtensionMessage({ type: "wsm:openWorkbench" });
     return;
   }
 
@@ -283,36 +272,57 @@ const openSidePanelDirect = async () => {
     console.warn("open side panel direct failed, falling back to background", error);
   }
 
-  await sendMessage({ type: "wsm:openSidePanel" });
+  await sendExtensionMessage({ type: "wsm:openSidePanel" });
 };
 
 const openOrFocusPolymarket = async () => {
-  await sendMessage({ type: "wsm:openPolymarket" });
+  await sendExtensionMessage({ type: "wsm:openPolymarket" });
 };
 
 const handleLogin = async (event: SubmitEvent) => {
   event.preventDefault();
-  const inviteCode = inviteInput?.value.trim();
-  if (!inviteCode) {
-    setStatus("Invite code required", "error");
+
+  const email = emailInput?.value.trim() ?? "";
+  const password = passwordInput?.value ?? "";
+  const inviteCode = inviteInput?.value.trim() || undefined;
+
+  if (!email) {
+    setStatus("请输入邮箱", "error");
+    return;
+  }
+
+  if (!password) {
+    setStatus("请输入密码", "error");
     return;
   }
 
   setBusy(true);
-  setStatus("Connecting session...", "neutral");
+  setStatus(inviteCode ? "正在登录并绑定邀请码..." : "正在登录...", "neutral");
   try {
-    await sendMessage({
-      type: "wsm:authExchange",
+    const payload = await sendExtensionMessage<{ state?: PopupViewState }>({
+      type: "wsm:authLogin",
+      email,
+      password,
       inviteCode
     });
+
+    if (passwordInput) {
+      passwordInput.value = "";
+    }
     if (inviteInput) {
       inviteInput.value = "";
     }
-    await refreshState({ silent: true });
-    setStatus("Connected", "success");
+    syncLoginButtonLabel();
+
+    if (payload.state) {
+      applyState(payload.state);
+    } else {
+      await hydrateStoredState();
+    }
+    setStatus("登录成功", "success");
   } catch (error) {
-    console.error("auth exchange", error);
-    setStatus("Failed to connect", "error");
+    console.error("auth login", error);
+    setStatus(error instanceof Error ? error.message : "登录失败", "error");
   } finally {
     setBusy(false);
   }
@@ -320,14 +330,18 @@ const handleLogin = async (event: SubmitEvent) => {
 
 const handleLogout = async () => {
   setBusy(true);
-  setStatus("Signing out...", "neutral");
+  setStatus("正在退出登录...", "neutral");
   try {
-    await sendMessage({ type: "wsm:logout" });
-    await refreshState({ silent: true });
-    setStatus("Signed out", "neutral");
+    const payload = await sendExtensionMessage<{ state?: PopupViewState }>({ type: "wsm:logout" });
+    if (payload.state) {
+      applyState(payload.state);
+    } else {
+      await hydrateStoredState();
+    }
+    setStatus("已退出登录", "neutral");
   } catch (error) {
     console.error("logout", error);
-    setStatus("Failed to sign out", "error");
+    setStatus("退出失败", "error");
   } finally {
     setBusy(false);
   }
@@ -335,7 +349,7 @@ const handleLogout = async () => {
 
 const updateConfig = async (patch: { enabled?: boolean; debugMode?: boolean }) => {
   try {
-    const payload = await sendMessage<{ state?: PopupViewState }>({
+    const payload = await sendExtensionMessage<{ state?: PopupViewState }>({
       type: "wsm:updateConfig",
       patch
     });
@@ -347,28 +361,29 @@ const updateConfig = async (patch: { enabled?: boolean; debugMode?: boolean }) =
     }
   } catch (error) {
     console.error("update config", error);
-    setStatus("Failed to save settings", "error");
+    setStatus("保存设置失败", "error");
   }
 };
 
 loginForm?.addEventListener("submit", handleLogin);
+inviteInput?.addEventListener("input", syncLoginButtonLabel);
 logoutButton?.addEventListener("click", handleLogout);
 openWorkbenchButton?.addEventListener("click", () => {
-  void sendMessage({ type: "wsm:openWorkbench" }).catch((error) => {
+  void sendExtensionMessage({ type: "wsm:openWorkbench" }).catch((error) => {
     console.error(error);
-    setStatus("Failed to open workbench", "error");
+    setStatus("打开后台失败", "error");
   });
 });
 openSidePanelButton?.addEventListener("click", () => {
   void openSidePanelDirect().catch((error) => {
     console.error(error);
-    setStatus("Failed to open side panel", "error");
+    setStatus("打开侧边面板失败", "error");
   });
 });
 openPolymarketButton?.addEventListener("click", () => {
   void openOrFocusPolymarket().catch((error) => {
     console.error(error);
-    setStatus("Failed to open Polymarket", "error");
+    setStatus("打开 Polymarket 失败", "error");
   });
 });
 refreshStateButton?.addEventListener("click", () => {
@@ -383,6 +398,23 @@ toggleDebugInput?.addEventListener("change", () => {
   void updateConfig({ debugMode: Boolean(toggleDebugInput.checked) });
 });
 
-void refreshState();
+chrome.storage.onChanged.addListener((changes: Record<string, ExtensionStorageChange>, areaName: string) => {
+  if (!hasRelevantStorageChange(changes, areaName)) {
+    return;
+  }
+
+  void hydrateStoredState().catch((error) => {
+    console.error("popup storage sync", error);
+  });
+});
+
+void hydrateStoredState()
+  .catch((error) => {
+    console.error("popup initial storage", error);
+  })
+  .finally(() => {
+    syncLoginButtonLabel();
+    void refreshState();
+  });
 
 export {};

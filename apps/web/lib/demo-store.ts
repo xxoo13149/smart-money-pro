@@ -4,13 +4,16 @@
   computeMarketDigests,
   computeWalletMetrics,
   deriveSystemLabels,
+  getPrimarySignalPriority,
   getChainAddressKey,
   generateAlertEvents,
+  isPrimarySignalLabelKind,
   markets as seedMarkets,
   normalizeAddress,
   noteAuditLogs as seedNoteAuditLogs,
   positionSnapshots as seedPositionSnapshots,
   shortenAddress,
+  sortAddressBadges,
   trades as seedTrades,
   walletLabels as seedWalletLabels,
   wallets as seedWallets,
@@ -114,34 +117,59 @@ const toBadge = (
   tone
 });
 
-const buildSummaryBadges = (
-  wallet: Wallet,
-  labels: WalletLabel[],
-  activeAlertCount: number
-) => {
+const toLabelBadge = (wallet: Wallet, label: WalletLabel, suffix: string): AddressLabelBadge =>
+  ({
+    id: `${wallet.id}-${suffix}`,
+    text: label.value.length <= 18 ? label.value : label.name,
+    tone: label.source === "user" ? "accent" : "neutral",
+    kind: label.kind,
+    priority: getPrimarySignalPriority(label.kind),
+    detailText: label.name,
+    metricText: label.evidence,
+    isPrimary: isPrimarySignalLabelKind(label.kind)
+  }) satisfies AddressLabelBadge;
+
+const shouldIncludeSummaryLabel = (kind: WalletLabelKind) =>
+  kind !== "signal_quality" && kind !== "market_scope" && kind !== "confidence";
+
+const buildStatusBadges = (wallet: Wallet, activeAlertCount: number) => {
   const badges: AddressLabelBadge[] = [];
 
   if (wallet.watchlisted) {
     badges.push(toBadge(wallet.id, "Watchlist", "watch", "watchlist"));
   }
 
+  if (wallet.deletedAt) {
+    badges.push(toBadge(wallet.id, "已删除", "danger", "deleted"));
+  } else if (wallet.curationStatus === "review_needed") {
+    badges.push(toBadge(wallet.id, "待复核", "ai-review", "review"));
+  }
+
   if (activeAlertCount > 0) {
     badges.push(toBadge(wallet.id, `${activeAlertCount} 红旗`, "alert", "alerts"));
   }
 
-  labels.slice(0, 3).forEach((label, index) => {
-    badges.push(
-      toBadge(
-        wallet.id,
-        label.value.length <= 16 ? label.value : label.name,
-        label.source === "user" ? "accent" : "neutral",
-        `label-${index}`
-      )
-    );
-  });
-
-  return badges;
+  return sortAddressBadges(badges);
 };
+
+const buildSummaryBadges = (
+  wallet: Wallet,
+  labels: WalletLabel[],
+  activeAlertCount: number
+) => {
+  return sortAddressBadges(
+    labels
+      .filter((label) => shouldIncludeSummaryLabel(label.kind))
+      .map((label, index) => toLabelBadge(wallet, label, `label-${index}`))
+  ).slice(0, 2);
+};
+
+const buildHoverBadges = (wallet: Wallet, labels: WalletLabel[]) =>
+  sortAddressBadges(
+    labels
+      .filter((label) => shouldIncludeSummaryLabel(label.kind))
+      .map((label, index) => toLabelBadge(wallet, label, `hover-${index}`))
+  ).slice(0, 6);
 
 const buildAddressSummaryForWallet = (
   wallet: Wallet,
@@ -164,7 +192,11 @@ const buildAddressSummaryForWallet = (
     address: wallet.address,
     normalizedAddress: wallet.normalizedAddress,
     alias: wallet.alias ?? wallet.displayName,
+    displayName: wallet.displayName,
+    strategyFocus: wallet.strategyFocus || undefined,
     badges: buildSummaryBadges(wallet, labels, activeAlertCount),
+    hoverBadges: buildHoverBadges(wallet, labels),
+    statusBadges: buildStatusBadges(wallet, activeAlertCount),
     noteSnippet: latestNote?.content ?? wallet.teamNote,
     watchlisted: wallet.watchlisted,
     detailUrl: buildDetailUrl(baseUrl, wallet.id),

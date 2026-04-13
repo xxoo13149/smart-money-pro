@@ -15,6 +15,8 @@ export {
   createAdminExtensionInvite,
   createManualWallet,
   createUserTag,
+  updateUserTag,
+  deleteUserTag,
   createWallet,
   createWalletNote,
   deleteWallet,

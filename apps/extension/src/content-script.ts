@@ -7,9 +7,32 @@ interface ExtensionConfig {
   refreshIntervalMs: number;
 }
 
+interface AddressLabelBadge {
+  id: string;
+  text: string;
+  tone: string;
+  kind?: string;
+  priority?: number;
+  detailText?: string;
+  metricText?: string;
+  isPrimary?: boolean;
+}
+
+interface AddressHoverCard {
+  officialTags: AddressLabelBadge[];
+  officialNoteText?: string;
+  aiTags: AddressLabelBadge[];
+  aiStatsNoteText?: string;
+}
+
 interface AddressSummary {
   alias?: string;
-  badges: Array<{ id: string; text: string; tone: string }>;
+  displayName?: string;
+  strategyFocus?: string;
+  badges: AddressLabelBadge[];
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -35,7 +58,7 @@ interface AnnotatedHolder {
   summary?: AddressSummary;
 }
 
-interface MarketAnnotationResponse {
+interface ContentMarketAnnotationResponse {
   market: {
     slug: string;
     conditionId: string;
@@ -56,7 +79,12 @@ interface AddressLookupSummary {
   address: string;
   normalizedAddress: string;
   alias?: string;
-  badges: Array<{ id: string; text: string; tone: string }>;
+  displayName?: string;
+  strategyFocus?: string;
+  badges: AddressLabelBadge[];
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -115,6 +143,10 @@ interface ResolvedInlineAnnotation {
   source: InlineAnnotationSource;
   aliasText: string;
   primaryBadge?: AddressSummary["badges"][number];
+  secondaryBadges: AddressSummary["badges"];
+  statusBadges: NonNullable<AddressSummary["statusBadges"]>;
+  hoverCard?: AddressHoverCard;
+  summaryText?: string;
   noteSnippet?: string;
   detailUrl: string;
   summaryVersion: string;
@@ -131,9 +163,9 @@ interface PageRuntimeState {
   rowsDetected: number;
   rowsAnnotated: number;
   visibleAddressCount: number;
-  sourceStatus?: MarketAnnotationResponse["sourceStatus"];
+  sourceStatus?: ContentMarketAnnotationResponse["sourceStatus"];
   labelsVersion?: string;
-  resolvedBy?: MarketAnnotationResponse["resolvedBy"];
+  resolvedBy?: ContentMarketAnnotationResponse["resolvedBy"];
   errorCode?: string;
   language: string;
   runtimeStatus: PageRuntimeStatus;
@@ -163,7 +195,7 @@ interface RuntimeHealthEvent {
   errorCode?: string;
   pageLanguage?: string;
   runtimeStatus?: PageRuntimeStatus;
-  sourceStatus?: MarketAnnotationResponse["sourceStatus"];
+  sourceStatus?: ContentMarketAnnotationResponse["sourceStatus"];
   addresses?: string[];
 }
 
@@ -248,7 +280,7 @@ type ContentRuntimeMessage =
 
   let currentConfig: ExtensionConfig = DEFAULT_CONFIG;
   let currentSlug: string | null = null;
-  let currentPayload: MarketAnnotationResponse | null = null;
+  let currentPayload: ContentMarketAnnotationResponse | null = null;
   let refreshTimer: number | null = null;
   let renderTimer: number | null = null;
   let renderGeneration = 0;
@@ -276,11 +308,16 @@ type ContentRuntimeMessage =
     string,
     {
       node: HTMLElement;
+      trigger?: HTMLButtonElement;
+      annotation: ResolvedInlineAnnotation;
       row: HTMLElement;
       mountTarget: HTMLElement;
       mainContainer?: HTMLElement | null;
     }
   >();
+  const fallbackHoverAnnotations = new Map<string, ResolvedInlineAnnotation>();
+  let hoverOverlayManager: HoverOverlayManager | null = null;
+  let interactionAbortController: AbortController | null = null;
   let mountedFallbackNode: HTMLElement | null = null;
 
   const setDebugState = (key: string, value: string) => {
@@ -337,6 +374,386 @@ type ContentRuntimeMessage =
     }
     return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}...`;
   };
+
+  class HoverOverlayManager {
+    private readonly closeDelayMs = 300;
+    private activeKey: string | null = null;
+    private activeTrigger: HTMLElement | null = null;
+    private host: HTMLDivElement | null = null;
+    private shadowRoot: ShadowRoot | null = null;
+    private cardElement: HTMLDivElement | null = null;
+    private closeTimer: number | null = null;
+    private rafId: number | null = null;
+
+    constructor(
+      private readonly getAnnotation: (key: string) => ResolvedInlineAnnotation | undefined
+    ) {}
+
+    private ensureHost() {
+      if (this.host && this.shadowRoot) {
+        return;
+      }
+
+      this.host = document.createElement("div");
+      this.host.className = "wsmx-overlay-host";
+      this.host.style.position = "fixed";
+      this.host.style.left = "0";
+      this.host.style.top = "0";
+      this.host.style.width = "0";
+      this.host.style.height = "0";
+      this.host.style.zIndex = "2147483647";
+
+      const shadow = this.host.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = `
+.wsmx-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483647}
+.wsmx-card{position:absolute;width:264px;padding:10px 11px;border-radius:10px;border:1px solid rgba(147,163,184,.24);background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.98));box-shadow:0 18px 36px rgba(0,0,0,.42),0 0 0 1px rgba(15,23,42,.22);color:#e8f0fb;pointer-events:auto;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.42;transform:translateY(0);animation:wsmxFadeIn .14s ease}
+.wsmx-header{display:grid;gap:2px;margin-bottom:8px}
+.wsmx-title{font-size:12px;font-weight:700;color:#f8fbff}
+.wsmx-subtitle{font-size:10px;color:rgba(209,220,234,.7)}
+.wsmx-summary{font-size:11px;color:rgba(231,239,247,.86);margin-bottom:9px}
+.wsmx-section{display:grid;gap:6px;padding-top:7px;margin-top:7px;border-top:1px solid rgba(148,163,184,.15)}
+.wsmx-section:first-of-type{border-top:none;padding-top:0;margin-top:0}
+.wsmx-section-title{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:rgba(204,216,230,.7)}
+.wsmx-tag-list{display:flex;flex-wrap:wrap;gap:6px}
+.wsmx-tag{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:10px;border:1px solid transparent;max-width:236px}
+.wsmx-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-tag--neutral,.wsmx-tag--ai-review{color:rgba(231,239,247,.9);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
+.wsmx-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.2)}
+.wsmx-tag--alert,.wsmx-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
+.wsmx-note{font-size:11px;color:rgba(215,227,239,.78);word-break:break-word}
+.wsmx-link{font-size:10px;font-weight:600;color:#92bcff;text-decoration:none}
+.wsmx-link:hover{color:#bfd7ff}
+@keyframes wsmxFadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+      `;
+      shadow.append(style);
+
+      const layer = document.createElement("div");
+      layer.className = "wsmx-layer";
+      shadow.append(layer);
+
+      document.body.append(this.host);
+      this.shadowRoot = shadow;
+    }
+
+    private getLayer() {
+      if (!this.shadowRoot) {
+        return null;
+      }
+      return this.shadowRoot.querySelector<HTMLDivElement>(".wsmx-layer");
+    }
+
+    private clearCloseTimer() {
+      if (this.closeTimer) {
+        window.clearTimeout(this.closeTimer);
+        this.closeTimer = null;
+      }
+    }
+
+    private cancelRaf() {
+      if (this.rafId) {
+        window.cancelAnimationFrame(this.rafId);
+        this.rafId = null;
+      }
+    }
+
+    private toneClass(tone?: string) {
+      switch (tone) {
+        case "accent":
+        case "watch":
+        case "alert":
+        case "danger":
+        case "ai-review":
+          return tone;
+        default:
+          return "neutral";
+      }
+    }
+
+    private createTagNode(badge: AddressLabelBadge) {
+      const tag = document.createElement("span");
+      tag.className = `wsmx-tag wsmx-tag--${this.toneClass(badge.tone)}`;
+      tag.textContent = truncateText(badge.text, 28);
+      return tag;
+    }
+
+    private appendTagsSection(
+      card: HTMLDivElement,
+      titleText: string,
+      tags: AddressLabelBadge[],
+      fallbackTagText: string
+    ) {
+      const section = document.createElement("section");
+      section.className = "wsmx-section";
+
+      const title = document.createElement("div");
+      title.className = "wsmx-section-title";
+      title.textContent = titleText;
+      section.append(title);
+
+      const tagList = document.createElement("div");
+      tagList.className = "wsmx-tag-list";
+      if (tags.length > 0) {
+        tags.forEach((badge) => tagList.append(this.createTagNode(badge)));
+      } else {
+        const emptyTag = document.createElement("span");
+        emptyTag.className = "wsmx-tag wsmx-tag--neutral";
+        emptyTag.textContent = fallbackTagText;
+        tagList.append(emptyTag);
+      }
+      section.append(tagList);
+
+      card.append(section);
+    }
+
+    private appendNoteSection(
+      card: HTMLDivElement,
+      titleText: string,
+      noteText: string,
+      fallbackNoteText: string
+    ) {
+      const section = document.createElement("section");
+      section.className = "wsmx-section";
+
+      const title = document.createElement("div");
+      title.className = "wsmx-section-title";
+      title.textContent = titleText;
+      section.append(title);
+
+      const note = document.createElement("div");
+      note.className = "wsmx-note";
+      note.textContent = noteText || fallbackNoteText;
+      section.append(note);
+
+      card.append(section);
+    }
+
+    private buildCard(annotation: ResolvedInlineAnnotation) {
+      const card = document.createElement("div");
+      card.className = "wsmx-card";
+      card.setAttribute("role", "dialog");
+      card.setAttribute("aria-label", `${annotation.aliasText} 标签详情`);
+      card.dataset.wsmxHoverCard = "1";
+
+      const header = document.createElement("div");
+      header.className = "wsmx-header";
+      const title = document.createElement("div");
+      title.className = "wsmx-title";
+      title.textContent = annotation.aliasText;
+      header.append(title);
+      if (annotation.displayName && annotation.displayName !== annotation.aliasText) {
+        const subtitle = document.createElement("div");
+        subtitle.className = "wsmx-subtitle";
+        subtitle.textContent = truncateText(annotation.displayName, 32);
+        header.append(subtitle);
+      }
+      card.append(header);
+
+      if (annotation.summaryText) {
+        const summary = document.createElement("div");
+        summary.className = "wsmx-summary";
+        summary.textContent = truncateText(annotation.summaryText, 120);
+        card.append(summary);
+      }
+
+      const officialTags = annotation.hoverCard?.officialTags ?? [];
+      const aiTags =
+        annotation.hoverCard?.aiTags ??
+        annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
+      const officialNoteText = annotation.hoverCard?.officialNoteText ?? "";
+      const aiStatsNoteText = annotation.hoverCard?.aiStatsNoteText ?? "";
+
+      this.appendTagsSection(
+        card,
+        "官方标签",
+        officialTags,
+        "暂无官方标签"
+      );
+      this.appendNoteSection(card, "官方标签备注说明", officialNoteText, "暂无官方标签备注说明");
+      this.appendTagsSection(
+        card,
+        "AI 标签",
+        aiTags,
+        "暂无 AI 标签"
+      );
+      this.appendNoteSection(card, "AI 标签统计备注说明", aiStatsNoteText, "暂无 AI 标签统计备注说明");
+
+      const footer = document.createElement("a");
+      footer.className = "wsmx-link";
+      footer.href = annotation.detailUrl;
+      footer.target = "_blank";
+      footer.rel = "noreferrer";
+      footer.textContent = "打开完整详情";
+      card.append(footer);
+
+      return card;
+    }
+
+    private resolvePosition(triggerRect: DOMRect, cardRect: DOMRect) {
+      const gap = 10;
+      let left = triggerRect.right + gap;
+      let top = triggerRect.bottom + gap;
+
+      if (left + cardRect.width > window.innerWidth - 8) {
+        left = triggerRect.left - cardRect.width - gap;
+      }
+      if (top + cardRect.height > window.innerHeight - 8) {
+        top = triggerRect.top - cardRect.height - gap;
+      }
+
+      left = Math.max(8, Math.min(left, window.innerWidth - cardRect.width - 8));
+      top = Math.max(8, Math.min(top, window.innerHeight - cardRect.height - 8));
+      return { left, top };
+    }
+
+    private renderAtTrigger(trigger: HTMLElement) {
+      if (!this.cardElement) {
+        return;
+      }
+      const triggerRect = trigger.getBoundingClientRect();
+      const cardRect = this.cardElement.getBoundingClientRect();
+      const position = this.resolvePosition(triggerRect, cardRect);
+      this.cardElement.style.left = `${Math.round(position.left)}px`;
+      this.cardElement.style.top = `${Math.round(position.top)}px`;
+    }
+
+    private queueReposition() {
+      if (!this.activeTrigger || !this.cardElement) {
+        return;
+      }
+      if (this.rafId) {
+        return;
+      }
+      this.rafId = window.requestAnimationFrame(() => {
+        this.rafId = null;
+        if (this.activeTrigger && this.cardElement) {
+          this.renderAtTrigger(this.activeTrigger);
+        }
+      });
+    }
+
+    private setTriggerExpanded(trigger: HTMLElement | null, expanded: boolean) {
+      if (!trigger || !(trigger instanceof HTMLButtonElement)) {
+        return;
+      }
+      trigger.setAttribute("aria-expanded", expanded ? "true" : "false");
+    }
+
+    private resetTriggerAria() {
+      this.setTriggerExpanded(this.activeTrigger, false);
+    }
+
+    isInsideInteractiveRegion(target: EventTarget | null) {
+      if (!(target instanceof Node)) {
+        return false;
+      }
+      if (this.activeTrigger?.contains(target)) {
+        return true;
+      }
+      if (this.host && (target === this.host || this.host.contains(target))) {
+        return true;
+      }
+      return this.cardElement?.contains(target) ?? false;
+    }
+
+    open(key: string, trigger: HTMLElement) {
+      const annotation = this.getAnnotation(key);
+      if (!annotation) {
+        return;
+      }
+      if (!trigger.isConnected) {
+        this.close();
+        return;
+      }
+
+      this.clearCloseTimer();
+      if (this.activeKey === key && this.activeTrigger === trigger && this.cardElement) {
+        this.renderAtTrigger(trigger);
+        this.queueReposition();
+        return;
+      }
+      if (this.activeKey !== key) {
+        this.resetTriggerAria();
+      }
+
+      this.ensureHost();
+      const layer = this.getLayer();
+      if (!layer) {
+        return;
+      }
+
+      this.activeKey = key;
+      this.activeTrigger = trigger;
+      this.setTriggerExpanded(trigger, true);
+
+      layer.textContent = "";
+      const card = this.buildCard(annotation);
+      card.addEventListener("pointerenter", () => this.clearCloseTimer());
+      card.addEventListener("pointerleave", (event) => {
+        if (this.isInsideInteractiveRegion((event as PointerEvent).relatedTarget)) {
+          return;
+        }
+        this.scheduleClose();
+      });
+      card.addEventListener("focusin", () => this.clearCloseTimer());
+      card.addEventListener("focusout", (event) => {
+        if (this.isInsideInteractiveRegion((event as FocusEvent).relatedTarget)) {
+          return;
+        }
+        this.scheduleClose();
+      });
+      layer.append(card);
+      this.cardElement = card;
+      this.renderAtTrigger(trigger);
+      this.queueReposition();
+    }
+
+    scheduleClose() {
+      this.clearCloseTimer();
+      this.closeTimer = window.setTimeout(() => {
+        this.close();
+      }, this.closeDelayMs);
+    }
+
+    close() {
+      this.clearCloseTimer();
+      this.cancelRaf();
+      this.resetTriggerAria();
+      this.activeKey = null;
+      this.activeTrigger = null;
+      this.cardElement = null;
+      const layer = this.getLayer();
+      if (layer) {
+        layer.textContent = "";
+      }
+    }
+
+    onViewportChange = () => {
+      if (this.activeTrigger && !this.activeTrigger.isConnected) {
+        this.close();
+        return;
+      }
+      this.queueReposition();
+    };
+
+    getActiveTrigger() {
+      return this.activeTrigger;
+    }
+
+    getActiveKey() {
+      return this.activeKey;
+    }
+
+    destroy() {
+      this.close();
+      this.cancelRaf();
+      if (this.host) {
+        this.host.remove();
+      }
+      this.host = null;
+      this.shadowRoot = null;
+    }
+  }
 
   const normalizeAddress = (value: string) => {
     const match = value.match(ADDRESS_PATTERN)?.[0];
@@ -565,7 +982,7 @@ type ContentRuntimeMessage =
     });
 
   const requestAnnotations = async (slug: string, forceRefresh = false) =>
-    sendBackgroundMessage<MarketAnnotationResponse>({
+    sendBackgroundMessage<ContentMarketAnnotationResponse>({
       type: "wsm:getMarketAnnotations",
       slug,
       forceRefresh
@@ -1349,6 +1766,23 @@ type ContentRuntimeMessage =
         return left.text.length - right.text.length;
       })[0];
 
+  const selectSecondaryBadges = (
+    summary: AddressSummary,
+    primaryBadge?: AddressSummary["badges"][number]
+  ) =>
+    (summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+      .filter((badge) => badge.id !== primaryBadge?.id)
+      .slice(0, 5);
+
+  const hasHoverPayload = (annotation: ResolvedInlineAnnotation) =>
+    Boolean(annotation.summaryText) ||
+    annotation.secondaryBadges.length > 0 ||
+    annotation.statusBadges.length > 0 ||
+    Boolean(annotation.hoverCard?.officialTags.length) ||
+    Boolean(annotation.hoverCard?.aiTags.length) ||
+    Boolean(annotation.hoverCard?.officialNoteText) ||
+    Boolean(annotation.hoverCard?.aiStatsNoteText);
+
   const buildResolvedAnnotation = (
     row: HolderRowSnapshot,
     summary: AddressSummary,
@@ -1356,6 +1790,7 @@ type ContentRuntimeMessage =
     source: InlineAnnotationSource
   ): ResolvedInlineAnnotation => {
     const aliasText = summary.alias?.trim() || row.displayNameText || holder.displayName || shortenAddress(holder.proxyWallet);
+    const primaryBadge = selectPrimaryBadge(summary, aliasText, holder.displayName);
     return {
       key: `${row.rowKey}:${row.normalizedAddress}`,
       rowKey: row.rowKey,
@@ -1363,18 +1798,50 @@ type ContentRuntimeMessage =
       surfaceKind: row.surfaceKind,
       source,
       aliasText: truncateText(aliasText, 22),
-      primaryBadge: selectPrimaryBadge(summary, aliasText, holder.displayName),
+      primaryBadge,
+      secondaryBadges: selectSecondaryBadges(summary, primaryBadge),
+      statusBadges: summary.statusBadges ?? [],
+      hoverCard: summary.hoverCard,
+      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
       noteSnippet: truncateText(summary.noteSnippet, 48),
       detailUrl: summary.detailUrl,
       summaryVersion: summary.version,
       proxyWallet: holder.proxyWallet,
-      displayName: holder.displayName
+      displayName: summary.displayName || holder.displayName
+    };
+  };
+
+  const buildFallbackAnnotation = (
+    panel: HolderPanelSnapshot,
+    holder: AnnotatedHolder,
+    summary: AddressSummary
+  ): ResolvedInlineAnnotation => {
+    const aliasText =
+      summary.alias?.trim() || summary.displayName || holder.displayName || shortenAddress(holder.proxyWallet);
+    const primaryBadge = selectPrimaryBadge(summary, aliasText, holder.displayName);
+    return {
+      key: `fallback:${holder.normalizedAddress}`,
+      rowKey: `fallback:${holder.normalizedAddress}`,
+      normalizedAddress: holder.normalizedAddress,
+      surfaceKind: panel.surfaceKind,
+      source: "market_annotations",
+      aliasText: truncateText(aliasText, 22),
+      primaryBadge,
+      secondaryBadges: selectSecondaryBadges(summary, primaryBadge),
+      statusBadges: summary.statusBadges ?? [],
+      hoverCard: summary.hoverCard,
+      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
+      noteSnippet: truncateText(summary.noteSnippet, 48),
+      detailUrl: summary.detailUrl,
+      summaryVersion: summary.version,
+      proxyWallet: holder.proxyWallet,
+      displayName: summary.displayName || holder.displayName
     };
   };
 
   const resolvePanelAnnotations = async (
     panel: HolderPanelSnapshot,
-    payload: MarketAnnotationResponse,
+  payload: ContentMarketAnnotationResponse,
     generation: number
   ) => {
     const payloadByAddress = new Map(
@@ -1480,6 +1947,9 @@ type ContentRuntimeMessage =
     if (!entry) {
       return;
     }
+    if (hoverOverlayManager?.getActiveKey() === key) {
+      hoverOverlayManager.close();
+    }
     entry.node.remove();
     mountedAnnotations.delete(key);
     cleanupMountClasses(entry);
@@ -1492,6 +1962,7 @@ type ContentRuntimeMessage =
 
   const clearAnnotations = () => {
     [...mountedAnnotations.keys()].forEach((key) => removeMountedAnnotation(key));
+    fallbackHoverAnnotations.clear();
     clearMountedFallback();
     setDebugState("Rendered", "0");
   };
@@ -1504,19 +1975,7 @@ type ContentRuntimeMessage =
     }
   };
 
-  const createBadgeNode = (
-    badge: AddressSummary["badges"][number],
-    detailUrl?: string
-  ) => {
-    if (detailUrl) {
-      const link = document.createElement("a");
-      link.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
-      link.href = detailUrl;
-      link.target = "_blank";
-      link.rel = "noreferrer";
-      link.textContent = truncateText(badge.text, 18);
-      return link;
-    }
+  const createChipNode = (badge: AddressSummary["badges"][number]) => {
     const span = document.createElement("span");
     span.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
     span.textContent = truncateText(badge.text, 18);
@@ -1538,13 +1997,19 @@ type ContentRuntimeMessage =
     aliasLink.target = "_blank";
     aliasLink.rel = "noreferrer";
     aliasLink.textContent = annotation.aliasText;
-    aliasLink.title = annotation.noteSnippet
-      ? `${annotation.proxyWallet}\n${annotation.noteSnippet}`
-      : annotation.proxyWallet;
     row.append(aliasLink);
 
-    if (annotation.primaryBadge) {
-      row.append(createBadgeNode(annotation.primaryBadge, annotation.detailUrl));
+    let trigger: HTMLButtonElement | undefined;
+    if (annotation.primaryBadge || hasHoverPayload(annotation)) {
+      trigger = document.createElement("button");
+      trigger.type = "button";
+      trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${annotation.primaryBadge?.tone || "neutral"}`;
+      trigger.textContent = truncateText(annotation.primaryBadge?.text || "More", 18);
+      trigger.setAttribute("aria-haspopup", "dialog");
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.dataset.wsmxHoverTrigger = "1";
+      trigger.dataset.wsmxHoverKey = annotation.key;
+      row.append(trigger);
     } else if (annotation.noteSnippet) {
       const note = document.createElement("span");
       note.className = "wsm-note";
@@ -1552,7 +2017,7 @@ type ContentRuntimeMessage =
       row.append(note);
     }
 
-    return row;
+    return { node: row, trigger };
   };
 
   const upsertMountedAnnotation = (row: HolderRowSnapshot, annotation: ResolvedInlineAnnotation) => {
@@ -1575,15 +2040,17 @@ type ContentRuntimeMessage =
     row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
     row.mount.row.dataset.wsmRowSide = row.side;
     row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
-    const node = buildAnnotationNode(annotation);
+    const built = buildAnnotationNode(annotation);
     if (row.mount.nameLine) {
-      row.mount.nameLine.insertAdjacentElement("afterend", node);
+      row.mount.nameLine.insertAdjacentElement("afterend", built.node);
     } else {
-      row.mount.mountTarget.append(node);
+      row.mount.mountTarget.append(built.node);
     }
 
     mountedAnnotations.set(annotation.key, {
-      node,
+      node: built.node,
+      trigger: built.trigger,
+      annotation,
       row: row.mount.row,
       mountTarget: row.mount.mountTarget,
       mainContainer: row.mount.mainContainer
@@ -1592,10 +2059,11 @@ type ContentRuntimeMessage =
 
   const renderFallbackList = (
     panel: HolderPanelSnapshot,
-    payload: MarketAnnotationResponse,
+  payload: ContentMarketAnnotationResponse,
     annotations: ResolvedInlineAnnotation[]
   ) => {
     clearMountedFallback();
+    fallbackHoverAnnotations.clear();
     const items = payload.holders.filter((holder) => holder.summary).slice(0, 6);
     if (items.length === 0) {
       return false;
@@ -1629,9 +2097,19 @@ type ContentRuntimeMessage =
       alias.textContent = holder.summary.alias?.trim() || holder.displayName || shortenAddress(holder.proxyWallet);
       item.append(alias);
 
-      const badge = selectPrimaryBadge(holder.summary, alias.textContent ?? "", holder.displayName);
-      if (badge) {
-        item.append(createBadgeNode(badge));
+      const fallbackAnnotation = buildFallbackAnnotation(panel, holder, holder.summary);
+      fallbackHoverAnnotations.set(fallbackAnnotation.key, fallbackAnnotation);
+
+      if (fallbackAnnotation.primaryBadge || hasHoverPayload(fallbackAnnotation)) {
+        const trigger = document.createElement("button");
+        trigger.type = "button";
+        trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${fallbackAnnotation.primaryBadge?.tone || "neutral"}`;
+        trigger.textContent = truncateText(fallbackAnnotation.primaryBadge?.text || "More", 18);
+        trigger.setAttribute("aria-haspopup", "dialog");
+        trigger.setAttribute("aria-expanded", "false");
+        trigger.dataset.wsmxHoverTrigger = "1";
+        trigger.dataset.wsmxHoverKey = fallbackAnnotation.key;
+        item.append(trigger);
       }
 
       list.append(item);
@@ -1645,7 +2123,7 @@ type ContentRuntimeMessage =
 
   const reconcileInlineAnnotations = (
     panel: HolderPanelSnapshot,
-    payload: MarketAnnotationResponse,
+  payload: ContentMarketAnnotationResponse,
     annotations: ResolvedInlineAnnotation[],
     visibleAddressCount: number
   ) => {
@@ -2074,6 +2552,222 @@ type ContentRuntimeMessage =
     });
   };
 
+  const resolveHoverTarget = (
+    target: EventTarget | null
+  ): { trigger: HTMLElement; key: string } | null => {
+    if (!(target instanceof Element)) {
+      return null;
+    }
+
+    const explicitTrigger = target.closest<HTMLElement>("[data-wsmx-hover-trigger='1']");
+    const explicitKey = explicitTrigger?.dataset.wsmxHoverKey?.trim();
+    if (explicitTrigger && explicitKey) {
+      return { trigger: explicitTrigger, key: explicitKey };
+    }
+
+    const legacyChip = target.closest<HTMLElement>(".wsm-chip, .wsm-note");
+    const annotationRoot = legacyChip?.closest<HTMLElement>(`.${ROOT_CLASS}[data-annotation-key]`);
+    const fallbackKey = annotationRoot?.dataset.annotationKey?.trim();
+    if (legacyChip && fallbackKey) {
+      return { trigger: legacyChip, key: fallbackKey };
+    }
+
+    return null;
+  };
+
+  const installHoverInteractionHandlers = () => {
+    interactionAbortController?.abort();
+    const controller = new AbortController();
+    interactionAbortController = controller;
+    const signal = controller.signal;
+
+    document.addEventListener(
+      "pointerover",
+      (event) => {
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (!hoverTarget || !hoverOverlayManager) {
+          return;
+        }
+        if (!hoverTarget.key) {
+          return;
+        }
+        hoverOverlayManager.open(hoverTarget.key, hoverTarget.trigger);
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "pointerout",
+      (event) => {
+        if (!hoverOverlayManager) {
+          return;
+        }
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (!hoverTarget) {
+          return;
+        }
+        if (hoverOverlayManager.isInsideInteractiveRegion(event.relatedTarget)) {
+          return;
+        }
+        hoverOverlayManager.scheduleClose();
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "pointercancel",
+      (event) => {
+        if (!hoverOverlayManager) {
+          return;
+        }
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (!hoverTarget) {
+          return;
+        }
+        if (hoverOverlayManager.isInsideInteractiveRegion(event.relatedTarget)) {
+          return;
+        }
+        hoverOverlayManager.scheduleClose();
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "focusin",
+      (event) => {
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (!hoverTarget || !hoverOverlayManager) {
+          return;
+        }
+        if (!hoverTarget.key) {
+          return;
+        }
+        hoverOverlayManager.open(hoverTarget.key, hoverTarget.trigger);
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "focusout",
+      (event) => {
+        if (!hoverOverlayManager) {
+          return;
+        }
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (!hoverTarget) {
+          return;
+        }
+        if (hoverOverlayManager.isInsideInteractiveRegion(event.relatedTarget)) {
+          return;
+        }
+        hoverOverlayManager.scheduleClose();
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (!hoverOverlayManager) {
+          return;
+        }
+        if (event.key === "Escape" && hoverOverlayManager.getActiveKey()) {
+          const trigger = hoverOverlayManager.getActiveTrigger();
+          hoverOverlayManager.close();
+          trigger?.focus();
+          return;
+        }
+
+        if (event.key === "Enter" || event.key === " ") {
+          const hoverTarget = resolveHoverTarget(event.target);
+          if (!hoverTarget || !hoverTarget.key) {
+            return;
+          }
+          event.preventDefault();
+          hoverOverlayManager.open(hoverTarget.key, hoverTarget.trigger);
+        }
+      },
+      { signal }
+    );
+
+    document.addEventListener(
+      "pointerdown",
+      (event) => {
+        const hoverTarget = resolveHoverTarget(event.target);
+        if (hoverTarget && hoverOverlayManager) {
+          if (!hoverTarget.key) {
+            return;
+          }
+          if (hoverOverlayManager.getActiveKey() === hoverTarget.key) {
+            hoverOverlayManager.close();
+            return;
+          }
+          hoverOverlayManager.open(hoverTarget.key, hoverTarget.trigger);
+          return;
+        }
+
+        if (!hoverOverlayManager?.getActiveKey()) {
+          return;
+        }
+        if (hoverOverlayManager.isInsideInteractiveRegion(event.target)) {
+          return;
+        }
+        hoverOverlayManager.close();
+      },
+      { signal }
+    );
+
+    window.addEventListener(
+      "resize",
+      () => hoverOverlayManager?.onViewportChange(),
+      { passive: true, signal }
+    );
+    document.addEventListener(
+      "visibilitychange",
+      () => handleLifecycleRefresh(),
+      { signal }
+    );
+    window.addEventListener(
+      "focus",
+      () => handleLifecycleRefresh(),
+      { signal }
+    );
+    document.addEventListener(
+      "scroll",
+      () => {
+        hoverOverlayManager?.onViewportChange();
+        if (currentConfig.enabled && document.visibilityState === "visible" && currentPayload) {
+          queueRender();
+        }
+      },
+      {
+        capture: true,
+        passive: true,
+        signal
+      }
+    );
+    window.addEventListener(
+      "pagehide",
+      (event) => {
+        hoverOverlayManager?.close();
+        if ((event as PageTransitionEvent).persisted) {
+          return;
+        }
+        interactionAbortController?.abort();
+        interactionAbortController = null;
+        hoverOverlayManager?.destroy();
+        hoverOverlayManager = null;
+        surfaceObserver?.disconnect();
+        surfaceObserver = null;
+        discoveryObserver?.disconnect();
+        discoveryObserver = null;
+        resizeObserver?.disconnect();
+        resizeObserver = null;
+      },
+      { signal }
+    );
+  };
+
   const installLocationObserver = () => {
     const dispatch = () => window.dispatchEvent(new Event("wsm-locationchange"));
 
@@ -2094,20 +2788,6 @@ type ContentRuntimeMessage =
     window.addEventListener("popstate", dispatch);
     window.addEventListener("hashchange", dispatch);
     window.addEventListener("pageshow", handleLifecycleRefresh);
-    document.addEventListener("visibilitychange", () => handleLifecycleRefresh());
-    window.addEventListener("focus", () => handleLifecycleRefresh());
-    document.addEventListener(
-      "scroll",
-      () => {
-        if (currentConfig.enabled && document.visibilityState === "visible" && currentPayload) {
-          queueRender();
-        }
-      },
-      {
-        capture: true,
-        passive: true
-      }
-    );
   };
 
   void (async () => {
@@ -2116,6 +2796,11 @@ type ContentRuntimeMessage =
     if (!isHostEnabled(currentConfig)) {
       return;
     }
+
+    hoverOverlayManager = new HoverOverlayManager(
+      (key) => mountedAnnotations.get(key)?.annotation ?? fallbackHoverAnnotations.get(key)
+    );
+    installHoverInteractionHandlers();
 
     chrome.storage.onChanged.addListener(handleStorageChange);
     chrome.runtime.onMessage.addListener(

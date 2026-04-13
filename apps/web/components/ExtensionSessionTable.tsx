@@ -33,7 +33,7 @@ const labelByStatus: Record<AdminExtensionSessionItem["status"], string> = {
 };
 
 const formatDate = (value?: string | null) =>
-  value ? new Date(value).toLocaleString() : "无";
+  value ? new Date(value).toLocaleString() : "暂无";
 
 export const ExtensionSessionTable = ({
   initialSessions
@@ -120,7 +120,7 @@ export const ExtensionSessionTable = ({
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="成员名 / 邀请码 / 设备名"
+            placeholder="搜索邮箱、成员、邀请码或设备名"
             className="field-input"
           />
         </label>
@@ -154,18 +154,22 @@ export const ExtensionSessionTable = ({
               </span>
             </div>
 
-            <div className="identity-address">{session.inviteCode}</div>
+            <div className="identity-address">{session.userEmail || session.inviteCode}</div>
 
             <div className="extension-admin-meta">
+              <span>邀请码 {session.inviteCode}</span>
               <span>设备 {session.deviceLabel || "未上报"}</span>
               <span>版本 {session.extensionVersion || "未知"}</span>
+            </div>
+
+            <div className="extension-admin-meta">
               <span>首次登录 {formatDate(session.createdAt)}</span>
-              <span>最近活跃 {formatDate(session.lastSeenAt)}</span>
-              <span>续期截止 {formatDate(session.refreshExpiresAt)}</span>
+              <span>最近活动 {formatDate(session.lastSeenAt)}</span>
+              <span>刷新到期 {formatDate(session.refreshExpiresAt)}</span>
             </div>
 
             <div className="subtle-row">
-              <span>ID {session.id}</span>
+              <span>{session.userId ? `用户 ID ${session.userId}` : `会话 ID ${session.id}`}</span>
               <button
                 type="button"
                 className="secondary-button"

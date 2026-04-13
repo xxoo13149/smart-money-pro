@@ -47,7 +47,7 @@ export const ExtensionInviteTable = ({ invites }: { invites: AdminExtensionInvit
     }
 
     setBusyCode(null);
-    setMessage(nextStatus === "active" ? "邀请码已恢复" : "邀请码已停用");
+    setMessage(nextStatus === "active" ? "邀请码已恢复可用" : "邀请码已停用");
     startTransition(() => router.refresh());
   };
 
@@ -79,15 +79,21 @@ export const ExtensionInviteTable = ({ invites }: { invites: AdminExtensionInvit
             <div className="identity-address">{invite.code}</div>
 
             <div className="extension-admin-meta">
-              <span>创建 {formatDate(invite.createdAt)}</span>
-              <span>到期 {formatDate(invite.expiresAt)}</span>
-              <span>最后使用 {formatDate(invite.lastUsedAt)}</span>
-              <span>会话 {invite.sessionCount}</span>
-              <span>活跃 {invite.activeSessionCount}</span>
+              <span>创建于 {formatDate(invite.createdAt)}</span>
+              <span>到期于 {formatDate(invite.expiresAt)}</span>
+              <span>最近使用 {formatDate(invite.lastUsedAt)}</span>
+              <span>会话数 {invite.sessionCount}</span>
+              <span>活跃会话 {invite.activeSessionCount}</span>
+            </div>
+
+            <div className="extension-admin-meta">
+              <span>最近会话 {formatDate(invite.latestSessionAt)}</span>
+              <span>绑定邮箱 {invite.boundUserEmail || "未绑定"}</span>
+              <span>绑定时间 {formatDate(invite.boundAt)}</span>
             </div>
 
             <div className="subtle-row">
-              <span>最近会话 {formatDate(invite.latestSessionAt)}</span>
+              <span>{invite.boundUserId ? `用户 ID ${invite.boundUserId}` : "尚未绑定用户账户"}</span>
               <div className="badge-cluster">
                 <button
                   type="button"

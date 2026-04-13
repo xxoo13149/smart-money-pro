@@ -7,16 +7,22 @@ import {
   type NormalizedAddress
 } from "@weather-smart-money/core";
 import {
+  bindExtensionUserInvite,
   createExtensionSession,
+  createExtensionUser,
   getDatasetVersion,
   getExtensionInvite,
   getExtensionSessionById,
   getExtensionSessionByRefreshHash,
+  getExtensionUserByInviteCode,
+  getExtensionUserByNormalizedEmail,
   listAddressSummaries,
   markExtensionInviteUsed,
   revokeExtensionSession,
   searchAddressSummaries,
-  touchExtensionSession
+  setExtensionInviteBinding,
+  touchExtensionSession,
+  updateExtensionUserLogin
 } from "@weather-smart-money/data";
 
 import type { Env } from "./env";
@@ -45,6 +51,9 @@ import {
 const ACCESS_TOKEN_TTL_SECONDS = 15 * 60;
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const ADMIN_APPROVAL_SECRET_HEADER = "x-admin-approval-secret";
+const PASSWORD_ITERATIONS = 100_000;
+const PASSWORD_KEY_BITS = 256;
+const PASSWORD_SALT_BYTES = 16;
 const marketAnnotationInflight = new Map<
   string,
   Promise<{
@@ -55,6 +64,47 @@ const marketAnnotationInflight = new Map<
 >();
 
 const unauthorized = () => buildJsonResponse({ error: "unauthorized" }, {}, 401);
+
+const normalizeEmail = (value: string) => value.trim().toLowerCase();
+
+const encodeHex = (buffer: ArrayBuffer) =>
+  Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+const decodeHex = (value: string) =>
+  Uint8Array.from((value.match(/.{1,2}/g) ?? []).map((part) => Number.parseInt(part, 16)));
+
+const derivePasswordHash = async (password: string, saltHex: string, iterations: number) => {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: decodeHex(saltHex),
+      iterations
+    },
+    key,
+    PASSWORD_KEY_BITS
+  );
+
+  return encodeHex(bits);
+};
+
+const createPasswordRecord = async (password: string) => {
+  const salt = crypto.getRandomValues(new Uint8Array(PASSWORD_SALT_BYTES));
+  const passwordSalt = encodeHex(salt.buffer);
+  const passwordHash = await derivePasswordHash(password, passwordSalt, PASSWORD_ITERATIONS);
+  return {
+    passwordHash,
+    passwordSalt,
+    passwordIterations: PASSWORD_ITERATIONS
+  };
+};
 
 const escapeHeaderValue = (value: string) => value.replace(/[\r\n]+/g, " ").trim();
 
@@ -197,6 +247,9 @@ const buildAuthResponse = async (
   });
 
   return {
+    userId: session.userId ?? undefined,
+    userEmail: session.userEmail ?? undefined,
+    inviteCode: session.inviteCode,
     accessToken,
     expiresAt: new Date(expiresAtSeconds * 1000).toISOString(),
     refreshExpiresAt: session.refreshExpiresAt,
@@ -239,6 +292,200 @@ const authenticateRequest = async (request: Request, env: Env) => {
   return session;
 };
 
+const resolveActiveInvite = async (env: Env, inviteCode?: string | null) => {
+  const normalizedInviteCode = inviteCode?.trim();
+  if (!normalizedInviteCode) {
+    return {
+      inviteCode: null,
+      invite: null
+    };
+  }
+
+  const invite = await getExtensionInvite(env.SMART_MONEY_DB, normalizedInviteCode);
+  if (!invite || invite.status !== "active") {
+    throw new Error("invalid invite");
+  }
+
+  if (invite.expiresAt && new Date(invite.expiresAt).getTime() <= Date.now()) {
+    throw new Error("invite expired");
+  }
+
+  return {
+    inviteCode: normalizedInviteCode,
+    invite
+  };
+};
+
+const issueExtensionSession = async (
+  env: Env,
+  input: {
+    memberLabel: string;
+    inviteCode: string;
+    userId?: string | null;
+    userEmail?: string | null;
+    deviceLabel?: string;
+    extensionVersion?: string;
+  }
+) => {
+  const refreshToken = generateRandomToken(48);
+  const refreshTokenHash = await hashValue(refreshToken);
+  const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
+  const session = await createExtensionSession(env.SMART_MONEY_DB, {
+    refreshTokenHash,
+    memberLabel: input.memberLabel,
+    inviteCode: input.inviteCode,
+    userId: input.userId,
+    userEmail: input.userEmail,
+    refreshExpiresAt,
+    deviceLabel: input.deviceLabel,
+    extensionVersion: input.extensionVersion
+  });
+
+  await markExtensionInviteUsed(env.SMART_MONEY_DB, input.inviteCode);
+
+  return buildJsonResponse({
+    ...(await buildAuthResponse(env, session)),
+    refreshToken
+  });
+};
+
+const authenticateExtensionUserLogin = async (
+  env: Env,
+  input: {
+    email?: string;
+    password?: string;
+    inviteCode?: string;
+    deviceLabel?: string;
+    extensionVersion?: string;
+    requireInviteForNewUser?: boolean;
+  }
+) => {
+  const normalizedEmail = normalizeEmail(input.email ?? "");
+  const password = input.password ?? "";
+
+  if (!normalizedEmail) {
+    return buildJsonResponse({ error: "email is required" }, {}, 400);
+  }
+
+  if (!password) {
+    return buildJsonResponse({ error: "password is required" }, {}, 400);
+  }
+
+  let inviteCode: string | null = null;
+  let invite: Awaited<ReturnType<typeof getExtensionInvite>> | null = null;
+  try {
+    const resolved = await resolveActiveInvite(env, input.inviteCode);
+    inviteCode = resolved.inviteCode;
+    invite = resolved.invite;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "invalid invite";
+    return buildJsonResponse({ error: message }, {}, message === "invite expired" ? 401 : 401);
+  }
+  const existingUser = await getExtensionUserByNormalizedEmail(env.SMART_MONEY_DB, normalizedEmail);
+
+  if (!existingUser) {
+    if (input.requireInviteForNewUser !== false && !inviteCode) {
+      return buildJsonResponse({ error: "inviteCode is required for first sign-in" }, {}, 400);
+    }
+
+    if (!invite || !inviteCode) {
+      return buildJsonResponse({ error: "invalid invite" }, {}, 401);
+    }
+
+    if (invite.boundUserId || invite.boundUserEmail) {
+      return buildJsonResponse({ error: "invite already bound to another user" }, {}, 409);
+    }
+
+    if (password.length < 8) {
+      return buildJsonResponse({ error: "password must be at least 8 characters" }, {}, 400);
+    }
+
+    const passwordRecord = await createPasswordRecord(password);
+    const user = await createExtensionUser(env.SMART_MONEY_DB, {
+      email: normalizedEmail,
+      normalizedEmail,
+      passwordHash: passwordRecord.passwordHash,
+      passwordSalt: passwordRecord.passwordSalt,
+      passwordIterations: passwordRecord.passwordIterations,
+      inviteCode,
+      memberLabel: invite.memberLabel
+    });
+    await setExtensionInviteBinding(env.SMART_MONEY_DB, inviteCode, {
+      userId: user.id,
+      userEmail: user.email,
+      boundAt: user.boundAt ?? isoNow()
+    });
+
+    return issueExtensionSession(env, {
+      memberLabel: invite.memberLabel,
+      inviteCode,
+      userId: user.id,
+      userEmail: user.email,
+      deviceLabel: input.deviceLabel,
+      extensionVersion: input.extensionVersion
+    });
+  }
+
+  if (existingUser.disabledAt) {
+    return buildJsonResponse({ error: "user disabled" }, {}, 403);
+  }
+
+  const passwordHash = await derivePasswordHash(
+    password,
+    existingUser.passwordSalt,
+    existingUser.passwordIterations
+  );
+  if (passwordHash !== existingUser.passwordHash) {
+    return buildJsonResponse({ error: "invalid email or password" }, {}, 401);
+  }
+
+  let resolvedInviteCode = existingUser.inviteCode ?? null;
+  let resolvedMemberLabel = existingUser.memberLabel ?? null;
+
+  if (!resolvedInviteCode) {
+    if (!invite || !inviteCode) {
+      return buildJsonResponse({ error: "inviteCode is required to bind this account" }, {}, 400);
+    }
+
+    if (invite.boundUserId && invite.boundUserId !== existingUser.id) {
+      return buildJsonResponse({ error: "invite already bound to another user" }, {}, 409);
+    }
+
+    const boundUser = await bindExtensionUserInvite(env.SMART_MONEY_DB, existingUser.id, {
+      inviteCode,
+      memberLabel: invite.memberLabel
+    });
+    await setExtensionInviteBinding(env.SMART_MONEY_DB, inviteCode, {
+      userId: existingUser.id,
+      userEmail: existingUser.email,
+      boundAt: boundUser?.boundAt ?? isoNow()
+    });
+    resolvedInviteCode = inviteCode;
+    resolvedMemberLabel = invite.memberLabel;
+  } else if (inviteCode && inviteCode !== resolvedInviteCode) {
+    return buildJsonResponse({ error: "this account is already bound to another invite" }, {}, 409);
+  }
+
+  await updateExtensionUserLogin(env.SMART_MONEY_DB, existingUser.id);
+
+  if (!resolvedInviteCode) {
+    return buildJsonResponse(
+      { error: "account is not bound to an invite, please sign in with an invite code once" },
+      {},
+      409
+    );
+  }
+
+  return issueExtensionSession(env, {
+    memberLabel: resolvedMemberLabel ?? existingUser.memberLabel ?? existingUser.email,
+    inviteCode: resolvedInviteCode,
+    userId: existingUser.id,
+    userEmail: existingUser.email,
+    deviceLabel: input.deviceLabel,
+    extensionVersion: input.extensionVersion
+  });
+};
+
 export const handleAuthExchange = async (request: Request, env: Env) => {
   await ensureSchema(env);
   const body = await parseJson<{
@@ -252,31 +499,72 @@ export const handleAuthExchange = async (request: Request, env: Env) => {
     return buildJsonResponse({ error: "inviteCode is required" }, {}, 400);
   }
 
-  const invite = await getExtensionInvite(env.SMART_MONEY_DB, inviteCode);
-  if (!invite || invite.status !== "active") {
+  let invite: Awaited<ReturnType<typeof getExtensionInvite>> | null = null;
+  try {
+    invite = (await resolveActiveInvite(env, inviteCode)).invite;
+  } catch (error) {
+    return buildJsonResponse(
+      { error: error instanceof Error ? error.message : "invalid invite" },
+      {},
+      401
+    );
+  }
+  if (!invite) {
     return buildJsonResponse({ error: "invalid invite" }, {}, 401);
   }
-
-  if (invite.expiresAt && new Date(invite.expiresAt).getTime() <= Date.now()) {
-    return buildJsonResponse({ error: "invite expired" }, {}, 401);
+  if (invite.boundUserId || invite.boundUserEmail) {
+    return buildJsonResponse(
+      { error: "invite is already bound to a user account, please update the extension and sign in with email" },
+      {},
+      409
+    );
   }
 
-  const refreshToken = generateRandomToken(48);
-  const refreshTokenHash = await hashValue(refreshToken);
-  const refreshExpiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS).toISOString();
-  const session = await createExtensionSession(env.SMART_MONEY_DB, {
-    refreshTokenHash,
+  return issueExtensionSession(env, {
     memberLabel: invite.memberLabel,
     inviteCode,
-    refreshExpiresAt,
     deviceLabel: body.deviceLabel,
     extensionVersion: body.extensionVersion
   });
-  await markExtensionInviteUsed(env.SMART_MONEY_DB, inviteCode);
+};
 
-  return buildJsonResponse({
-    ...(await buildAuthResponse(env, session)),
-    refreshToken
+export const handleAuthLogin = async (request: Request, env: Env) => {
+  await ensureSchema(env);
+  const body = await parseJson<{
+    email?: string;
+    password?: string;
+    inviteCode?: string;
+    deviceLabel?: string;
+    extensionVersion?: string;
+  }>(request);
+
+  return authenticateExtensionUserLogin(env, {
+    email: body.email,
+    password: body.password,
+    inviteCode: body.inviteCode,
+    deviceLabel: body.deviceLabel,
+    extensionVersion: body.extensionVersion,
+    requireInviteForNewUser: false
+  });
+};
+
+export const handleAuthRegister = async (request: Request, env: Env) => {
+  await ensureSchema(env);
+  const body = await parseJson<{
+    email?: string;
+    password?: string;
+    inviteCode?: string;
+    deviceLabel?: string;
+    extensionVersion?: string;
+  }>(request);
+
+  return authenticateExtensionUserLogin(env, {
+    email: body.email,
+    password: body.password,
+    inviteCode: body.inviteCode,
+    deviceLabel: body.deviceLabel,
+    extensionVersion: body.extensionVersion,
+    requireInviteForNewUser: true
   });
 };
 
@@ -309,6 +597,8 @@ export const handleAuthRefresh = async (request: Request, env: Env) => {
     refreshTokenHash: nextRefreshHash,
     memberLabel: currentSession.memberLabel,
     inviteCode: currentSession.inviteCode,
+    userId: currentSession.userId,
+    userEmail: currentSession.userEmail,
     refreshExpiresAt,
     deviceLabel: currentSession.deviceLabel ?? undefined,
     extensionVersion: currentSession.extensionVersion ?? undefined

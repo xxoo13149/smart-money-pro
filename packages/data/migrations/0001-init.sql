@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS wallet_user_labels (
   source TEXT NOT NULL,
   evidence TEXT,
   created_at TEXT NOT NULL,
+  verification_note TEXT,
+  source_note TEXT,
+  updated_at TEXT NOT NULL,
   FOREIGN KEY (wallet_id) REFERENCES wallets(id)
 );
 
@@ -114,14 +117,38 @@ CREATE TABLE IF NOT EXISTS extension_invites (
   expires_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  last_used_at TEXT
+  last_used_at TEXT,
+  bound_user_id TEXT,
+  bound_user_email TEXT,
+  bound_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS extension_users (
+  id TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  normalized_email TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  password_salt TEXT NOT NULL,
+  password_iterations INTEGER NOT NULL DEFAULT 100000,
+  invite_code TEXT UNIQUE,
+  member_label TEXT,
+  bound_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_login_at TEXT,
+  disabled_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_extension_users_normalized_email
+  ON extension_users(normalized_email);
 
 CREATE TABLE IF NOT EXISTS extension_sessions (
   id TEXT PRIMARY KEY,
   refresh_token_hash TEXT NOT NULL UNIQUE,
   member_label TEXT NOT NULL,
   invite_code TEXT NOT NULL,
+  user_id TEXT,
+  user_email TEXT,
   device_label TEXT,
   extension_version TEXT,
   refresh_expires_at TEXT NOT NULL,

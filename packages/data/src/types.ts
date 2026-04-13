@@ -58,6 +58,18 @@ export interface WalletLabelInput {
   kind?: WalletLabelKind;
   source?: WalletLabelSource;
   evidence?: string;
+  verificationNote?: string;
+  sourceNote?: string;
+}
+
+export interface WalletLabelPatchInput {
+  name?: string;
+  value?: string;
+  kind?: WalletLabelKind;
+  source?: WalletLabelSource;
+  evidence?: string;
+  verificationNote?: string;
+  sourceNote?: string;
 }
 
 export interface ExtensionInviteRecord {
@@ -68,6 +80,25 @@ export interface ExtensionInviteRecord {
   createdAt: string;
   updatedAt: string;
   lastUsedAt?: string | null;
+  boundUserId?: string | null;
+  boundUserEmail?: string | null;
+  boundAt?: string | null;
+}
+
+export interface ExtensionUserRecord {
+  id: string;
+  email: string;
+  normalizedEmail: string;
+  passwordHash: string;
+  passwordSalt: string;
+  passwordIterations: number;
+  inviteCode?: string | null;
+  memberLabel?: string | null;
+  boundAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  lastLoginAt?: string | null;
+  disabledAt?: string | null;
 }
 
 export interface ExtensionSessionRecord {
@@ -75,6 +106,8 @@ export interface ExtensionSessionRecord {
   refreshTokenHash: string;
   memberLabel: string;
   inviteCode: string;
+  userId?: string | null;
+  userEmail?: string | null;
   deviceLabel?: string | null;
   extensionVersion?: string | null;
   refreshExpiresAt: string;

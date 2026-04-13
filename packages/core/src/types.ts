@@ -22,6 +22,11 @@ export type WalletLabelKind =
   | "alias"
   | "confidence"
   | "strategy"
+  | "geo_specialty"
+  | "frequency_region"
+  | "winrate_region"
+  | "payout_region"
+  | "trader_archetype"
   | "market_scope"
   | "resolution_source"
   | "forecast_basis"
@@ -189,8 +194,11 @@ export interface WalletLabel {
   name: string;
   value: string;
   evidence?: string;
+  verificationNote?: string;
+  sourceNote?: string;
   score?: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface WatchlistEntry {
@@ -274,12 +282,19 @@ export interface WalletTableRow {
 export interface AddressLabelBadge {
   id: string;
   text: string;
-  tone: "accent" | "neutral" | "watch" | "alert";
+  tone: "accent" | "neutral" | "watch" | "alert" | "danger" | "ai-review";
   kind?: WalletLabelKind;
   priority?: number;
   detailText?: string;
   metricText?: string;
   isPrimary?: boolean;
+}
+
+export interface AddressHoverCard {
+  officialTags: AddressLabelBadge[];
+  officialNoteText?: string;
+  aiTags: AddressLabelBadge[];
+  aiStatsNoteText?: string;
 }
 
 export interface AddressSummary {
@@ -292,6 +307,7 @@ export interface AddressSummary {
   badges: AddressLabelBadge[];
   hoverBadges?: AddressLabelBadge[];
   statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -304,6 +320,8 @@ export interface AddressSearchResult extends AddressSummary {
   bio?: string;
   strategyFocus?: string;
   teamNote?: string;
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
 }
 
 export interface WalletImportLabelDraft {
@@ -311,6 +329,9 @@ export interface WalletImportLabelDraft {
   value: string;
   kind: WalletLabelKind;
   evidence?: string;
+  source?: WalletLabelSource;
+  verificationNote?: string;
+  sourceNote?: string;
 }
 
 export interface WalletImportWalletDraft {
@@ -553,6 +574,7 @@ export interface ResolvedInlineAnnotation {
   primaryBadge?: AddressLabelBadge;
   hoverBadges?: AddressLabelBadge[];
   statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   detailUrl: string;
   summaryVersion: string;
@@ -673,6 +695,9 @@ export interface AdminExtensionInviteItem {
   updatedAt: string;
   expiresAt?: string | null;
   lastUsedAt?: string | null;
+  boundUserId?: string | null;
+  boundUserEmail?: string | null;
+  boundAt?: string | null;
   sessionCount: number;
   activeSessionCount: number;
   latestSessionAt?: string | null;
@@ -682,6 +707,8 @@ export interface AdminExtensionSessionItem {
   id: string;
   inviteCode: string;
   memberLabel: string;
+  userId?: string | null;
+  userEmail?: string | null;
   deviceLabel?: string | null;
   extensionVersion?: string | null;
   createdAt: string;
@@ -706,6 +733,8 @@ export interface ExtensionRuntimeConfig {
 }
 
 export interface ExtensionAuthSession {
+  userId?: string;
+  userEmail?: string;
   memberLabel: string;
   inviteCode: string;
   deviceLabel?: string;
@@ -722,12 +751,27 @@ export interface ExtensionAuthExchangeRequest {
   extensionVersion?: string;
 }
 
+export interface ExtensionAuthLoginRequest {
+  email: string;
+  password: string;
+  inviteCode?: string;
+  deviceLabel?: string;
+  extensionVersion?: string;
+}
+
+export interface ExtensionAuthRegisterRequest extends ExtensionAuthLoginRequest {
+  inviteCode: string;
+}
+
 export interface ExtensionAuthExchangeResponse {
+  userId?: string;
+  userEmail?: string;
   accessToken: string;
   refreshToken: string;
   expiresAt: string;
   refreshExpiresAt: string;
   memberLabel: string;
+  inviteCode: string;
 }
 
 export interface ExtensionAuthRefreshRequest {

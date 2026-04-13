@@ -20,6 +20,11 @@ interface ExtensionRuntimeConfig {
 }
 
 interface ExtensionAuthSession {
+  userId?: string;
+  userEmail?: string;
+  inviteCode: string;
+  deviceLabel?: string;
+  extensionVersion?: string;
   accessToken: string;
   refreshToken: string;
   expiresAt: string;
@@ -28,6 +33,24 @@ interface ExtensionAuthSession {
 }
 
 interface ExtensionAuthExchangeResponse extends ExtensionAuthSession {}
+
+interface AddressLabelBadge {
+  id: string;
+  text: string;
+  tone: string;
+  kind?: string;
+  priority?: number;
+  detailText?: string;
+  metricText?: string;
+  isPrimary?: boolean;
+}
+
+interface AddressHoverCard {
+  officialTags: AddressLabelBadge[];
+  officialNoteText?: string;
+  aiTags: AddressLabelBadge[];
+  aiStatsNoteText?: string;
+}
 
 interface MarketAnnotationResponse {
   market: {
@@ -45,7 +68,12 @@ interface MarketAnnotationResponse {
     amountByOutcome: Array<{ outcomeIndex: number; amount: number }>;
     summary?: {
       alias?: string;
-      badges: Array<{ id: string; text: string; tone: string }>;
+      displayName?: string;
+      strategyFocus?: string;
+      badges: AddressLabelBadge[];
+      hoverBadges?: AddressLabelBadge[];
+      statusBadges?: AddressLabelBadge[];
+      hoverCard?: AddressHoverCard;
       noteSnippet?: string;
       watchlisted: boolean;
       detailUrl: string;
@@ -81,14 +109,17 @@ interface AddressSearchResult {
   normalizedAddress: string;
   displayName: string;
   alias?: string;
-  badges: Array<{ id: string; text: string; tone: string }>;
+  strategyFocus?: string;
+  badges: AddressLabelBadge[];
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
   version: string;
   bio?: string;
-  strategyFocus?: string;
   teamNote?: string;
 }
 
@@ -97,7 +128,12 @@ interface AddressLookupSummary {
   address: string;
   normalizedAddress: string;
   alias?: string;
-  badges: Array<{ id: string; text: string; tone: string }>;
+  displayName?: string;
+  strategyFocus?: string;
+  badges: AddressLabelBadge[];
+  hoverBadges?: AddressLabelBadge[];
+  statusBadges?: AddressLabelBadge[];
+  hoverCard?: AddressHoverCard;
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -158,7 +194,9 @@ interface PopupState {
   auth: {
     status: "connected" | "signed_out" | "expired";
     isAuthenticated: boolean;
+    userEmail?: string;
     memberLabel?: string;
+    inviteCode?: string;
     expiresAt?: string;
     refreshExpiresAt?: string;
   };
@@ -291,6 +329,13 @@ type BackgroundMessage =
   | {
       type: "wsm:updateConfig";
       patch: Partial<Pick<ExtensionConfig, "enabled" | "debugMode" | "backendBaseUrl">>;
+    }
+  | {
+      type: "wsm:authLogin";
+      email: string;
+      password: string;
+      inviteCode?: string;
+      deviceLabel?: string;
     }
   | { type: "wsm:authExchange"; inviteCode: string; deviceLabel?: string }
   | { type: "wsm:logout" }
@@ -951,6 +996,40 @@ const exchangeInviteCode = async (inviteCode: string, deviceLabel?: string) => {
   return payload;
 };
 
+const loginWithAccount = async (input: {
+  email: string;
+  password: string;
+  inviteCode?: string;
+  deviceLabel?: string;
+}) => {
+  const runtimeConfig = await readRuntimeConfig();
+  const { response, payload } = await requestJson<ExtensionAuthExchangeResponse>(
+    "/api/extension/auth/login",
+    {
+      method: "POST",
+      auth: "none",
+      body: {
+        email: input.email.trim(),
+        password: input.password,
+        inviteCode: input.inviteCode?.trim() || undefined,
+        deviceLabel: input.deviceLabel?.trim() || createDeviceLabel(),
+        extensionVersion: runtimeConfig.extensionVersion
+      }
+    }
+  );
+
+  if (!response.ok || !payload) {
+    throw new Error((payload as { error?: string } | undefined)?.error ?? `Request failed with ${response.status}`);
+  }
+
+  await writeAuthSession(payload);
+  await clearMarketCaches();
+  await writeSyncState({
+    lastError: undefined
+  });
+  return payload;
+};
+
 const refreshAuthSession = async (currentSession: ExtensionAuthSession) => {
   const { response, payload } = await requestJson<ExtensionAuthExchangeResponse>(
     "/api/extension/auth/refresh",
@@ -1552,7 +1631,9 @@ const buildPopupState = async (): Promise<PopupState> => {
     auth: {
       status: !session ? "signed_out" : expired ? "expired" : "connected",
       isAuthenticated: Boolean(session) && !expired,
+      userEmail: session?.userEmail,
       memberLabel: session?.memberLabel,
+      inviteCode: session?.inviteCode,
       expiresAt: session?.expiresAt,
       refreshExpiresAt: session?.refreshExpiresAt
     },
@@ -1591,6 +1672,27 @@ const handleMessage = async (message: BackgroundMessage, sender?: { tab?: Browse
           state: await buildPopupState()
         }
       };
+    case "wsm:authLogin":
+      {
+        const session = await loginWithAccount({
+          email: message.email,
+          password: message.password,
+          inviteCode: message.inviteCode,
+          deviceLabel: message.deviceLabel
+        });
+        await writeRuntimeState({
+          status: "bootstrap",
+          detail: "Account authenticated. Coordinating open Polymarket tabs."
+        });
+        await refreshSupportedTabs();
+        return {
+          ok: true,
+          payload: {
+            session,
+            state: await buildPopupState()
+          }
+        };
+      }
     case "wsm:authExchange":
       {
         const session = await exchangeInviteCode(message.inviteCode, message.deviceLabel);

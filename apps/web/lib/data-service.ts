@@ -5,9 +5,12 @@
   computeWalletMetrics,
   deriveSystemLabels,
   generateAlertEvents,
+  getPrimarySignalPriority,
+  isPrimarySignalLabelKind,
   markets as seedMarkets,
   normalizeAddress,
   positionSnapshots as seedPositions,
+  sortAddressBadges,
   trades as seedTrades,
   type AddressLabelBadge,
   type AdminExtensionInviteItem,
@@ -41,6 +44,7 @@ import {
   createWallet as createPersistedWallet,
   createWalletLabel as createPersistedWalletLabel,
   createWalletNote as createPersistedWalletNote,
+  deleteWalletLabel as deletePersistedWalletLabel,
   deleteWalletSavedView as deletePersistedWalletSavedView,
   getExtensionOverview as getPersistedExtensionOverview,
   getSmartMoneySchemaStatus as getPersistedSmartMoneySchemaStatus,
@@ -61,9 +65,11 @@ import {
   type WalletDeleteInput,
   type WalletInput,
   type WalletLabelInput,
+  type WalletLabelPatchInput,
   type WalletListFilters,
   type WalletUpdate,
   updateWalletImportBatch as updatePersistedWalletImportBatch,
+  updateWalletLabel as updatePersistedWalletLabel,
   updateWalletSavedView as updatePersistedWalletSavedView,
   updateWallet as updatePersistedWallet,
   upsertWalletWatchlist as upsertPersistedWalletWatchlist,
@@ -88,10 +94,8 @@ import { getSmartMoneyBindings, type SmartMoneyBindings } from "./cloudflare-env
 import {
   buildWeatherLabels,
   buildWeatherStrategyFocus,
-  countHighValueWeatherSignals,
   extractWalletsWithAi,
   filterWeatherHighlightLabels,
-  inferWalletAiSignalQuality,
   normalizeWeatherSignals
 } from "./wallet-ai";
 import {
@@ -146,8 +150,6 @@ const LABEL_VALUE_BLACKLIST = new Set([
   "smart money",
   "experienced"
 ]);
-const WATCHLIST_NOTE_CUE = /(重点|跟踪|观察|watchlist|priority|sample)/i;
-
 const compactImportText = (value: string | null | undefined) =>
   (value ?? "").replace(/\s+/g, " ").trim();
 
@@ -241,8 +243,11 @@ const sanitizeWalletImportRowForCommit = (
   }
 
   const weatherSignals = normalizeWeatherSignals(row.weatherSignals);
-  const signalQuality = inferWalletAiSignalQuality(weatherSignals);
-  const highValueSignalCount = countHighValueWeatherSignals(weatherSignals);
+  const signalQuality = row.signalQuality;
+  const mergedLabels = normalizeImportLabelDrafts([
+    ...baseRow.labels,
+    ...buildWeatherLabels(weatherSignals, signalQuality)
+  ]);
 
   if (!normalizeAddress(baseWallet.address)) {
     throw new Error("缺少有效地址");
@@ -250,14 +255,6 @@ const sanitizeWalletImportRowForCommit = (
 
   if (!baseWallet.displayName) {
     throw new Error("缺少显示名");
-  }
-
-  if (!sourceExcerpt) {
-    throw new Error("缺少原文证据摘录");
-  }
-
-  if (highValueSignalCount < 2) {
-    throw new Error("高价值天气信号不足，无法写库");
   }
 
   return {
@@ -269,15 +266,17 @@ const sanitizeWalletImportRowForCommit = (
           ? baseRow.wallet.alias
           : undefined,
       strategyFocus:
-        buildWeatherStrategyFocus(weatherSignals, baseRow.wallet.strategyFocus) || undefined
+        compactImportText(baseRow.wallet.strategyFocus) ||
+        buildWeatherStrategyFocus(weatherSignals, baseRow.wallet.strategyFocus) ||
+        undefined
     },
-    labels: buildWeatherLabels(weatherSignals, signalQuality),
-    watchlistNote:
-      compactImportText(baseRow.watchlistNote) && WATCHLIST_NOTE_CUE.test(compactImportText(baseRow.watchlistNote))
-        ? baseRow.watchlistNote
-        : undefined,
+    labels: mergedLabels,
+    watchlistNote: compactImportText(baseRow.watchlistNote) ? baseRow.watchlistNote : undefined,
     signalQuality,
-    weatherSignals
+    weatherSignals,
+    highlightTags: row.highlightTags,
+    keyMetrics: row.keyMetrics,
+    primarySignals: row.primarySignals
   };
 };
 
@@ -354,30 +353,22 @@ const buildPersistedAlertItems = (wallets: Wallet[]): AlertListItem[] => {
 };
 
 const buildHighlightBadges = (wallet: Wallet, labels: WalletLabel[]): AddressLabelBadge[] => {
-  const badges: AddressLabelBadge[] = [];
-  const weatherHighlights = filterWeatherHighlightLabels(labels);
-  const preferredLabels =
-    weatherHighlights.length > 0
-      ? weatherHighlights
-      : labels.filter((label) => label.kind !== "signal_quality" && label.kind !== "market_scope");
+  const preferredLabels = filterWeatherHighlightLabels(labels).filter(
+    (label) => label.kind !== "signal_quality" && label.kind !== "market_scope"
+  );
 
-  if (wallet.watchlisted) {
-    badges.push({
-      id: `${wallet.id}-watch`,
-      text: "Watchlist",
-      tone: "watch"
-    });
-  }
-
-  preferredLabels.slice(0, 3).forEach((label, index) => {
-    badges.push({
+  return sortAddressBadges(
+    preferredLabels.map((label, index) => ({
       id: `${wallet.id}-${label.id}-${index}`,
       text: label.value || label.name,
-      tone: label.source === "user" ? "accent" : "neutral"
-    });
-  });
-
-  return badges;
+      tone: label.source === "user" ? "accent" : "neutral",
+      kind: label.kind,
+      priority: getPrimarySignalPriority(label.kind),
+      detailText: label.name,
+      metricText: label.evidence,
+      isPrimary: isPrimarySignalLabelKind(label.kind)
+    }))
+  ).slice(0, 2);
 };
 
 const buildSummaryText = (wallet: Wallet) =>
@@ -438,7 +429,7 @@ const buildSourceMeta = (wallet: Wallet): WalletAdminRow["sourceMeta"] => ({
 });
 
 const buildWalletAdminSummaryText = (wallet: Wallet) =>
-  wallet.strategyFocus || wallet.teamNote || wallet.bio || "待补充摘要";
+  buildSummaryText(wallet);
 const buildWalletAdminStatusBadges = (wallet: Wallet): WalletStatusBadge[] => {
   const badges: WalletStatusBadge[] = [];
 
@@ -1071,6 +1062,43 @@ export const createUserTag = async (walletId: string, payload: WalletLabelInput,
   return createPersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, payload, actor);
 };
 
+export const updateUserTag = async (
+  walletId: string,
+  tagId: string,
+  payload: WalletLabelPatchInput,
+  actor?: string
+) => {
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    return undefined;
+  }
+
+  const wallet = await getPersistedWalletById(bindings.SMART_MONEY_DB, walletId, {
+    includeDeleted: true
+  });
+  if (!wallet) {
+    return undefined;
+  }
+
+  return updatePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, tagId, payload, actor);
+};
+
+export const deleteUserTag = async (walletId: string, tagId: string, actor?: string) => {
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    return undefined;
+  }
+
+  const wallet = await getPersistedWalletById(bindings.SMART_MONEY_DB, walletId, {
+    includeDeleted: true
+  });
+  if (!wallet) {
+    return undefined;
+  }
+
+  return deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, tagId, actor);
+};
+
 export const upsertWatchlistEntry = async (walletId: string, note?: string, actor?: string) => {
   const bindings = await ensurePersistedBindings();
   if (!bindings?.SMART_MONEY_DB) {
@@ -1220,7 +1248,12 @@ export const commitWalletImport = async (
             name: label.name,
             value: label.value,
             kind: label.kind,
-            evidence: isWalletAiPreviewRow(commitRow) ? commitRow.sourceExcerpt : undefined
+            source: request.mode === "ai" ? "system" : (label.source ?? "user"),
+            evidence:
+              label.evidence ||
+              (isWalletAiPreviewRow(commitRow) ? commitRow.sourceExcerpt : undefined),
+            verificationNote: label.verificationNote,
+            sourceNote: label.sourceNote
           },
           actor
         );

@@ -2,8 +2,10 @@ import type { Env } from "./env";
 import {
   handleAdminApprovalEmail,
   handleAuthExchange,
+  handleAuthLogin,
   handleAuthLogout,
   handleAuthRefresh,
+  handleAuthRegister,
   handleAddressSearch,
   handleExtensionHealth,
   handleLabelsLookup,
@@ -14,6 +16,8 @@ import { withCors } from "./utils";
 const ROUTES: Record<string, (request: Request, env: Env) => Promise<Response>> = {
   "/api/internal/admin/send-approval-email": handleAdminApprovalEmail,
   "/api/extension/auth/exchange": handleAuthExchange,
+  "/api/extension/auth/login": handleAuthLogin,
+  "/api/extension/auth/register": handleAuthRegister,
   "/api/extension/auth/refresh": handleAuthRefresh,
   "/api/extension/auth/logout": handleAuthLogout,
   "/api/extension/market-annotations": handleMarketAnnotations,

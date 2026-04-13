@@ -65,7 +65,10 @@ walletLabels
         kind,
         source,
         evidence,
-        created_at
+        verification_note,
+        source_note,
+        created_at,
+        updated_at
       ) VALUES (
         '${escapeSql(label.id)}',
         '${escapeSql(label.walletId)}',
@@ -74,7 +77,10 @@ walletLabels
         '${escapeSql(label.kind)}',
         '${escapeSql(label.source)}',
         ${sqlValue(label.evidence)},
-        '${escapeSql(label.createdAt)}'
+        ${sqlValue(label.verificationNote)},
+        ${sqlValue(label.sourceNote)},
+        '${escapeSql(label.createdAt)}',
+        '${escapeSql(label.updatedAt ?? label.createdAt)}'
       );`
     );
   });

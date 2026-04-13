@@ -421,16 +421,37 @@ const ensureD1Database = async (commandEnv, name, location) => {
   };
 };
 
-const renderWorkerConfig = ({ adminUrl, appUrl, kvId, d1Id, appHost }) => `name = "smart-money-edge"
+const renderWorkerConfig = ({
+  adminUrl,
+  appUrl,
+  kvId,
+  d1Id,
+  appHost,
+  approvalOwnerEmail,
+  approvalSenderEmail,
+  approvalSenderName,
+  approvalCodeTtlMinutes,
+  approvalResendCooldownSeconds
+}) => `name = "smart-money-edge"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
 routes = [{ pattern = "${appHost}", custom_domain = true }]
 
 [vars]
 ADMIN_BASE_URL = "${adminUrl}"
+ADMIN_APPROVAL_OWNER_EMAIL = "${approvalOwnerEmail}"
+ADMIN_APPROVAL_SENDER_EMAIL = "${approvalSenderEmail}"
+ADMIN_APPROVAL_SENDER_NAME = "${approvalSenderName}"
+ADMIN_APPROVAL_CODE_TTL_MINUTES = "${approvalCodeTtlMinutes}"
+ADMIN_APPROVAL_RESEND_COOLDOWN_SECONDS = "${approvalResendCooldownSeconds}"
 PUBLIC_EXTENSION_BASE_URL = "${appUrl}"
 POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
 POLYMARKET_DATA_URL = "https://data-api.polymarket.com"
+
+[[send_email]]
+name = "ADMIN_APPROVAL_EMAIL"
+destination_address = "${approvalOwnerEmail}"
+allowed_sender_addresses = ["${approvalSenderEmail}"]
 
 [[kv_namespaces]]
 binding = "SMART_MONEY_CACHE"
@@ -443,7 +464,18 @@ database_name = "${DEFAULTS.d1Name}"
 database_id = "${d1Id}"
 `;
 
-const renderWebConfig = ({ adminUrl, appUrl, kvId, d1Id, adminHost }) =>
+const renderWebConfig = ({
+  adminUrl,
+  appUrl,
+  kvId,
+  d1Id,
+  adminHost,
+  approvalOwnerEmail,
+  approvalSenderEmail,
+  approvalSenderName,
+  approvalCodeTtlMinutes,
+  approvalResendCooldownSeconds
+}) =>
   `${JSON.stringify(
     {
       $schema: "../../node_modules/wrangler/config-schema.json",
@@ -457,6 +489,11 @@ const renderWebConfig = ({ adminUrl, appUrl, kvId, d1Id, adminHost }) =>
       },
       vars: {
         ADMIN_BASE_URL: adminUrl,
+        ADMIN_APPROVAL_OWNER_EMAIL: approvalOwnerEmail,
+        ADMIN_APPROVAL_SENDER_EMAIL: approvalSenderEmail,
+        ADMIN_APPROVAL_SENDER_NAME: approvalSenderName,
+        ADMIN_APPROVAL_CODE_TTL_MINUTES: approvalCodeTtlMinutes,
+        ADMIN_APPROVAL_RESEND_COOLDOWN_SECONDS: approvalResendCooldownSeconds,
         PUBLIC_EXTENSION_BASE_URL: appUrl,
         POLYMARKET_GAMMA_URL: "https://gamma-api.polymarket.com",
         POLYMARKET_DATA_URL: "https://data-api.polymarket.com"
@@ -621,6 +658,16 @@ const main = async () => {
   ).trim();
   const appUrl = `https://${appHost}`;
   const adminUrl = `https://${adminHost}`;
+  const approvalOwnerEmail =
+    envValue("ADMIN_APPROVAL_OWNER_EMAIL") ?? "owner@example.com";
+  const approvalSenderEmail =
+    envValue("ADMIN_APPROVAL_SENDER_EMAIL") ?? `noreply@${zone.domain}`;
+  const approvalSenderName =
+    envValue("ADMIN_APPROVAL_SENDER_NAME") ?? "Smart Money Admin";
+  const approvalCodeTtlMinutes =
+    envValue("ADMIN_APPROVAL_CODE_TTL_MINUTES") ?? "10";
+  const approvalResendCooldownSeconds =
+    envValue("ADMIN_APPROVAL_RESEND_COOLDOWN_SECONDS") ?? "60";
 
   printStep("Cloudflare authentication");
   process.stdout.write(`Auth mode: ${auth.mode}\n`);
@@ -649,7 +696,12 @@ const main = async () => {
       appUrl,
       kvId: kv.id,
       d1Id: d1.id,
-      appHost
+      appHost,
+      approvalOwnerEmail,
+      approvalSenderEmail,
+      approvalSenderName,
+      approvalCodeTtlMinutes,
+      approvalResendCooldownSeconds
     }),
     "utf8"
   );
@@ -660,7 +712,12 @@ const main = async () => {
       appUrl,
       kvId: kv.id,
       d1Id: d1.id,
-      adminHost
+      adminHost,
+      approvalOwnerEmail,
+      approvalSenderEmail,
+      approvalSenderName,
+      approvalCodeTtlMinutes,
+      approvalResendCooldownSeconds
     }),
     "utf8"
   );

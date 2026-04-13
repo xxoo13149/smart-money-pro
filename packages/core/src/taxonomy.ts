@@ -61,6 +61,8 @@ export const PRIMARY_SIGNAL_LABEL_KINDS = new Set<WalletLabelKind>([
 const BADGE_TONE_PRIORITY: Record<AddressLabelBadge["tone"], number> = {
   alert: 40,
   watch: 30,
+  danger: 25,
+  "ai-review": 22,
   accent: 20,
   neutral: 10
 };

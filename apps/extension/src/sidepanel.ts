@@ -1,41 +1,12 @@
-interface PopupViewState {
-  runtimeConfig: {
-    mode: "dev" | "release";
-    backendBaseUrl: string;
-    adminBaseUrl: string;
-    workbenchPath: string;
-    showDebugControls: boolean;
-    privacyPolicyUrl?: string;
-  };
-  config: {
-    enabled: boolean;
-    debugMode: boolean;
-  };
-  auth: {
-    status: "connected" | "signed_out" | "expired";
-    isAuthenticated: boolean;
-    memberLabel?: string;
-    expiresAt?: string;
-    refreshExpiresAt?: string;
-  };
-  sync: {
-    lastSyncAt?: string;
-    lastError?: string;
-  };
-  runtime: {
-    status: "idle" | "bootstrap" | "wake" | "ready" | "degraded" | "disabled" | "signed_out";
-    detail?: string;
-    lastEventAt: string;
-    lastBootstrapAt?: string;
-    lastWakeAt?: string;
-    lastReadyAt?: string;
-    lastDegradedAt?: string;
-    lastHealthAt?: string;
-    lastHealthUploadAt?: string;
-    lastHealthUploadError?: string;
-    lastLabelsVersion?: string;
-  };
-}
+import {
+  type ExtensionStorageChange,
+  type PageSurfaceState,
+  type PopupViewState,
+  hasRelevantStorageChange,
+  readStoredPageSurfaceState,
+  readStoredPopupState,
+  sendExtensionMessage
+} from "./ui-state.js";
 
 interface AddressSearchResult {
   address: string;
@@ -43,6 +14,14 @@ interface AddressSearchResult {
   displayName: string;
   alias?: string;
   badges: Array<{ id: string; text: string; tone: string }>;
+  hoverBadges?: Array<{ id: string; text: string; tone: string }>;
+  statusBadges?: Array<{ id: string; text: string; tone: string }>;
+  hoverCard?: {
+    officialTags: Array<{ id: string; text: string; tone: string }>;
+    officialNoteText?: string;
+    aiTags: Array<{ id: string; text: string; tone: string }>;
+    aiStatsNoteText?: string;
+  };
   noteSnippet?: string;
   watchlisted: boolean;
   detailUrl: string;
@@ -51,35 +30,6 @@ interface AddressSearchResult {
   bio?: string;
   strategyFocus?: string;
   teamNote?: string;
-}
-
-interface PageSurfaceState {
-  slug?: string;
-  marketSlug?: string;
-  surfaceKind?: "market-main-holders" | "feed-top-holders";
-  surfaceFound: boolean;
-  surfaceActive: boolean;
-  fallbackMode: boolean;
-  rowsDetected: number;
-  rowsAnnotated: number;
-  visibleAddressCount: number;
-  sourceStatus?: "live" | "stale" | "error";
-  labelsVersion?: string;
-  resolvedBy?: "event_slug" | "market_slug" | "next_data_event" | "error";
-  errorCode?: string;
-  language?: string;
-  runtimeStatus?: "bootstrap" | "wake" | "ready" | "degraded" | "disabled";
-  runtimeMessage?: string;
-  lastStageAt?: string;
-  lastBootstrapAt?: string;
-  lastWakeAt?: string;
-  lastReadyAt?: string;
-  lastDegradedAt?: string;
-  lastHealthAt?: string;
-  healthStatus?: "ok" | "error" | "skipped";
-  healthLabelsVersion?: string;
-  healthError?: string;
-  lastUpdatedAt: string;
 }
 
 const healthPill = document.querySelector<HTMLElement>("#health-pill");
@@ -96,21 +46,6 @@ const sidepanelCard = document.querySelector<HTMLElement>(".sidepanel-card");
 
 let searchTimer: number | null = null;
 let surfaceRefreshTimer: number | null = null;
-
-const sendMessage = <T = unknown>(message: unknown): Promise<T> =>
-  new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(message, (response: { ok?: boolean; error?: string; payload?: T }) => {
-      if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
-        return;
-      }
-      if (response?.ok === false) {
-        reject(new Error(response.error ?? "unknown"));
-        return;
-      }
-      resolve((response as { payload?: T }).payload ?? (response as T));
-    });
-  });
 
 const setHealth = (text: string, tone: "neutral" | "success" | "error") => {
   if (!healthPill) {
@@ -314,6 +249,16 @@ const renderState = (state: PopupViewState) => {
   }
 };
 
+const hydrateStoredState = async () => {
+  const [state, surfaceState] = await Promise.all([readStoredPopupState(), readStoredPageSurfaceState()]);
+  renderState(state);
+  renderSurfaceInfo(surfaceState);
+  return {
+    state,
+    surfaceState
+  };
+};
+
 const renderResults = (items: AddressSearchResult[]) => {
   if (!resultsList || !resultsMeta) {
     return;
@@ -355,31 +300,44 @@ const renderResults = (items: AddressSearchResult[]) => {
 
 const refreshSurfaceInfo = async () => {
   try {
-    const payload = await sendMessage<PageSurfaceState | null>({ type: "wsm:getPageSurfaceState" });
+    const payload = await sendExtensionMessage<PageSurfaceState | null>({ type: "wsm:getPageSurfaceState" });
     renderSurfaceInfo(payload ?? null);
   } catch (error) {
     console.error("surface info fetch", error);
-    renderSurfaceInfo(null);
+    try {
+      renderSurfaceInfo(await readStoredPageSurfaceState());
+    } catch (fallbackError) {
+      console.error("surface info storage fallback", fallbackError);
+      renderSurfaceInfo(null);
+    }
   }
 };
 
 const refreshState = async () => {
   try {
-    const state = await sendMessage<PopupViewState>({ type: "wsm:getPopupState" });
+    const state = await sendExtensionMessage<PopupViewState>({ type: "wsm:getPopupState" });
     renderState(state);
     await refreshSurfaceInfo();
   } catch (error) {
     console.error(error);
-    setHealth("Read failed", "error");
-    if (syncLabel) {
-      syncLabel.textContent = "Unable to read extension state.";
+    try {
+      const fallback = await hydrateStoredState();
+      if (!fallback.state.auth.isAuthenticated && syncLabel) {
+        syncLabel.textContent = "Waiting for background runtime to wake up.";
+      }
+    } catch (fallbackError) {
+      console.error("sidepanel storage fallback", fallbackError);
+      setHealth("Read failed", "error");
+      if (syncLabel) {
+        syncLabel.textContent = "Unable to read extension state.";
+      }
     }
   }
 };
 
 const refreshCurrentTabAnnotations = async () => {
   try {
-    await sendMessage({ type: "wsm:refreshActiveTab" });
+    await sendExtensionMessage({ type: "wsm:refreshActiveTab" });
   } catch (error) {
     console.error(error);
   }
@@ -402,7 +360,7 @@ const runSearch = async () => {
   }
 
   try {
-    const items = await sendMessage<AddressSearchResult[]>({
+    const items = await sendExtensionMessage<AddressSearchResult[]>({
       type: "wsm:searchAddresses",
       query,
       limit: 12
@@ -417,7 +375,7 @@ const runSearch = async () => {
 };
 
 toggleEnabledInput?.addEventListener("change", () => {
-  void sendMessage<{ state?: PopupViewState }>({
+  void sendExtensionMessage<{ state?: PopupViewState }>({
     type: "wsm:updateConfig",
     patch: { enabled: Boolean(toggleEnabledInput.checked) }
   })
@@ -453,7 +411,7 @@ searchInput?.addEventListener("input", () => {
 });
 
 openWorkbenchButton?.addEventListener("click", () => {
-  void sendMessage({ type: "wsm:openWorkbench" }).catch((error) => {
+  void sendExtensionMessage({ type: "wsm:openWorkbench" }).catch((error) => {
     console.error(error);
     setHealth("Open failed", "error");
     if (syncLabel) {
@@ -463,7 +421,7 @@ openWorkbenchButton?.addEventListener("click", () => {
 });
 
 openPolymarketButton?.addEventListener("click", () => {
-  void sendMessage({ type: "wsm:openPolymarket" }).catch((error) => {
+  void sendExtensionMessage({ type: "wsm:openPolymarket" }).catch((error) => {
     console.error(error);
     setHealth("Open failed", "error");
     if (syncLabel) {
@@ -481,7 +439,23 @@ const startSurfaceInfoPoll = () => {
   }, 30_000);
 };
 
-void refreshState();
+chrome.storage.onChanged.addListener((changes: Record<string, ExtensionStorageChange>, areaName: string) => {
+  if (!hasRelevantStorageChange(changes, areaName)) {
+    return;
+  }
+
+  void hydrateStoredState().catch((error) => {
+    console.error("sidepanel storage sync", error);
+  });
+});
+
+void hydrateStoredState()
+  .catch((error) => {
+    console.error("sidepanel initial storage", error);
+  })
+  .finally(() => {
+    void refreshState();
+  });
 startSurfaceInfoPoll();
 
 export {};

@@ -6,24 +6,34 @@ const currentDir = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(currentDir, "..");
 const publicDir = path.join(appDir, "public");
 const distDir = path.join(appDir, "dist");
+const workerConfigPath = path.resolve(appDir, "..", "worker", "wrangler.toml");
 
 const buildTarget = (process.env.EXTENSION_BUILD_TARGET ?? "dev").trim() === "release" ? "release" : "dev";
 const defaultBackendUrl = "https://app.example.com";
 const defaultAdminUrl = "https://admin.example.com";
+const workbenchPath = process.env.EXTENSION_WORKBENCH_PATH?.trim() || "/wallets";
+const privacyPath = process.env.EXTENSION_PRIVACY_PATH?.trim() || "/extension/privacy";
+const workerConfigText = await readFile(workerConfigPath, "utf8").catch(() => "");
+
+const readWorkerVar = (name) => {
+  const match = workerConfigText.match(new RegExp(`^${name}\\s*=\\s*"([^"]+)"`, "m"));
+  return match?.[1]?.trim();
+};
+
 const backendUrl =
   (
     process.env.EXTENSION_BACKEND_URL?.trim() ||
     process.env.PUBLIC_EXTENSION_BASE_URL?.trim() ||
+    readWorkerVar("PUBLIC_EXTENSION_BASE_URL") ||
     defaultBackendUrl
   ).replace(/\/+$/, "");
 const adminUrl =
   (
     process.env.EXTENSION_ADMIN_BASE_URL?.trim() ||
     process.env.ADMIN_BASE_URL?.trim() ||
+    readWorkerVar("ADMIN_BASE_URL") ||
     defaultAdminUrl
   ).replace(/\/+$/, "");
-const workbenchPath = process.env.EXTENSION_WORKBENCH_PATH?.trim() || "/wallets";
-const privacyPath = process.env.EXTENSION_PRIVACY_PATH?.trim() || "/extension/privacy";
 
 const dedupe = (values) => [...new Set(values.filter(Boolean))];
 

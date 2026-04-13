@@ -22,6 +22,15 @@ import styles from "./WalletsConsole.module.css";
 type ColumnPreset = "compact" | "standard" | "review";
 type InspectorSection = "overview" | "labels" | "records" | "analysis";
 type DensityMode = "compact" | "comfortable";
+type LabelDraft = {
+  name: string;
+  value: string;
+  kind: string;
+  source: string;
+  evidence: string;
+  verificationNote: string;
+  sourceNote: string;
+};
 
 const DENSITY_STORAGE_KEY = "wallet-workspace-density";
 const PANEL_PINNED_STORAGE_KEY = "wallet-workspace-panel-pinned";
@@ -149,16 +158,6 @@ const getSystemViewId = (query: WalletListQuery) => {
 
 const isWideEnoughToPin = (width: number) => width >= 1600;
 
-const splitQuickLabels = (value: string) =>
-  Array.from(
-    new Set(
-      value
-        .split(/[，,]/)
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  );
-
 const fetchJson = async <T,>(url: string, init?: RequestInit) => {
   const response = await fetch(url, init);
   const payload = (await response.json().catch(() => ({}))) as { data?: T; error?: string };
@@ -199,6 +198,16 @@ const renderStatusBadge = (badge: WalletStatusBadge) => (
     {badge.text}
   </span>
 );
+
+const toLabelDraft = (label: WalletAdminRow["labels"][number]): LabelDraft => ({
+  name: label.name,
+  value: label.value,
+  kind: label.kind,
+  source: label.source,
+  evidence: label.evidence ?? "",
+  verificationNote: label.verificationNote ?? "",
+  sourceNote: label.sourceNote ?? ""
+});
 
 export const WalletsConsole = ({
   initialData,
@@ -243,8 +252,11 @@ export const WalletsConsole = ({
     alias: "",
     strategyFocus: "",
     teamNote: "",
-    labelText: ""
+    labelValue: "",
+    labelVerificationNote: "",
+    labelSourceNote: ""
   });
+  const [labelDrafts, setLabelDrafts] = useState<Record<string, LabelDraft>>({});
   const [viewportWidth, setViewportWidth] = useState(0);
 
   const sectionRefs = useRef<Record<InspectorSection, HTMLDivElement | null>>({
@@ -609,43 +621,122 @@ export const WalletsConsole = ({
       return;
     }
 
-    const labels = splitQuickLabels(editForm.labelText);
-    if (labels.length === 0) {
+    const value = editForm.labelValue.trim();
+    if (!value) {
       return;
     }
 
-    const results = await Promise.all(
-      labels.map((label) =>
-        fetch(`/api/wallets/${panelTargetId}/user-tags`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: "标签",
-            value: label,
-            kind: "group"
-          })
-        })
-      )
-    );
-
-    const failed = await Promise.all(
-      results.map(async (response) => {
-        if (response.ok) {
-          return null;
-        }
-        const payload = (await response.json().catch(() => ({}))) as { error?: string };
-        return payload.error ?? "标签写入失败";
+    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "官方标签",
+        value,
+        kind: "group",
+        source: "user",
+        verificationNote: editForm.labelVerificationNote.trim() || undefined,
+        sourceNote: editForm.labelSourceNote.trim() || undefined
       })
-    );
+    });
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
 
-    const firstError = failed.find(Boolean);
-    if (firstError) {
-      pushFeedback(firstError);
+    if (!response.ok) {
+      pushFeedback(payload.error ?? "标签写入失败");
       return;
     }
 
-    setEditForm((current) => ({ ...current, labelText: "" }));
-    pushFeedback(`已新增 ${labels.length} 个标签`);
+    setEditForm((current) => ({
+      ...current,
+      labelValue: "",
+      labelVerificationNote: "",
+      labelSourceNote: ""
+    }));
+    pushFeedback("已新增官方标签并写入备注");
+    refreshWorkspace();
+  };
+
+  const updateLabelDraftField = (
+    tagId: string,
+    field: keyof LabelDraft,
+    value: string
+  ) => {
+    setLabelDrafts((current) => {
+      const draft = current[tagId];
+      if (!draft) {
+        return current;
+      }
+      return {
+        ...current,
+        [tagId]: {
+          ...draft,
+          [field]: value
+        }
+      };
+    });
+  };
+
+  const saveLabelDraft = async (tagId: string) => {
+    if (!panelTargetId) {
+      return;
+    }
+
+    const draft = labelDrafts[tagId];
+    if (!draft?.name.trim() || !draft.value.trim()) {
+      pushFeedback("标签名称和值不能为空");
+      return;
+    }
+    if (draft.source !== "user") {
+      pushFeedback("仅官方标签支持在线编辑，AI/系统标签请通过导入流程调整。");
+      return;
+    }
+
+    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags/${tagId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: draft.name.trim(),
+        value: draft.value.trim(),
+        kind: draft.kind,
+        source: draft.source,
+        evidence: draft.evidence.trim() || undefined,
+        verificationNote: draft.verificationNote.trim() || undefined,
+        sourceNote: draft.sourceNote.trim() || undefined
+      })
+    });
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    if (!response.ok) {
+      pushFeedback(payload.error ?? "标签更新失败");
+      return;
+    }
+
+    pushFeedback("标签已更新");
+    refreshWorkspace();
+  };
+
+  const removeLabelDraft = async (tagId: string) => {
+    if (!panelTargetId) {
+      return;
+    }
+
+    const draft = labelDrafts[tagId];
+    if (!draft) {
+      return;
+    }
+    if (draft.source !== "user") {
+      pushFeedback("仅官方标签支持删除。");
+      return;
+    }
+
+    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags/${tagId}`, {
+      method: "DELETE"
+    });
+    const payload = (await response.json().catch(() => ({}))) as { error?: string };
+    if (!response.ok) {
+      pushFeedback(payload.error ?? "标签删除失败");
+      return;
+    }
+
+    pushFeedback("标签已删除");
     refreshWorkspace();
   };
 
@@ -867,7 +958,10 @@ export const WalletsConsole = ({
       ...current,
       alias: wallet.alias ?? wallet.displayName,
       strategyFocus: wallet.strategyFocus ?? "",
-      teamNote: wallet.teamNote ?? ""
+      teamNote: wallet.teamNote ?? "",
+      labelValue: "",
+      labelVerificationNote: "",
+      labelSourceNote: ""
     }));
   }, [
     detail?.wallet.alias,
@@ -878,6 +972,12 @@ export const WalletsConsole = ({
     panelTargetId,
     panelWallet
   ]);
+
+  useEffect(() => {
+    setLabelDrafts(() =>
+      Object.fromEntries(panelLabels.map((label) => [label.id, toLabelDraft(label)]))
+    );
+  }, [panelLabels]);
 
   useEffect(() => {
     if (focusRowId && !visibleRows.some((row) => row.wallet.id === focusRowId)) {
@@ -1710,29 +1810,97 @@ export const WalletsConsole = ({
                 }}
                 className={styles.panelSection}
               >
-                <div className={styles.panelSectionTitle}>标签</div>
+                <div className={styles.panelSectionTitle}>标签维护</div>
                 <div className={styles.metaCard}>
-                  <div className={styles.tagGrid}>
+                  <div className={styles.labelCreateGrid}>
+                    <input
+                      className={styles.textInput}
+                      value={editForm.labelValue}
+                      placeholder="新增官方标签值，例如：高胜率-首尔"
+                      onChange={(event) =>
+                        setEditForm((current) => ({ ...current, labelValue: event.target.value }))
+                      }
+                    />
+                    <input
+                      className={styles.textInput}
+                      value={editForm.labelVerificationNote}
+                      placeholder="验证说明（可选）"
+                      onChange={(event) =>
+                        setEditForm((current) => ({ ...current, labelVerificationNote: event.target.value }))
+                      }
+                    />
+                    <input
+                      className={styles.textInput}
+                      value={editForm.labelSourceNote}
+                      placeholder="数据来源备注（可选）"
+                      onChange={(event) =>
+                        setEditForm((current) => ({ ...current, labelSourceNote: event.target.value }))
+                      }
+                    />
+                    <button type="button" className={styles.primaryButton} onClick={() => void addQuickLabel()}>
+                      新增官方标签
+                    </button>
+                  </div>
+
+                  <div className={styles.labelEditorList}>
                     {panelLabels.length > 0 ? (
-                      panelLabels.map((label) => (
-                        <span key={label.id} className={styles.panelTag}>
-                          {label.value || label.name}
-                        </span>
-                      ))
+                      panelLabels.map((label) => {
+                        const draft = labelDrafts[label.id] ?? toLabelDraft(label);
+                        const editable = label.source === "user";
+                        return (
+                          <div key={label.id} className={styles.labelEditorCard}>
+                            <div className={styles.labelEditorTop}>
+                              <span className={styles.panelTag}>{label.source === "user" ? "官方" : "AI"}</span>
+                              <span className={styles.identitySubtle}>{label.kind}</span>
+                            </div>
+                            <input
+                              className={styles.textInput}
+                              value={draft.value}
+                              readOnly={!editable}
+                              onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
+                            />
+                            <input
+                              className={styles.textInput}
+                              value={draft.verificationNote}
+                              placeholder="验证说明（官方标签建议填写）"
+                              readOnly={!editable}
+                              onChange={(event) =>
+                                updateLabelDraftField(label.id, "verificationNote", event.target.value)
+                              }
+                            />
+                            <input
+                              className={styles.textInput}
+                              value={draft.sourceNote}
+                              placeholder="来源备注（如 NOAA/NWS 或团队校验来源）"
+                              readOnly={!editable}
+                              onChange={(event) => updateLabelDraftField(label.id, "sourceNote", event.target.value)}
+                            />
+                            {editable ? (
+                              <div className={styles.inlineForm}>
+                                <button
+                                  type="button"
+                                  className={styles.ghostButton}
+                                  onClick={() => void saveLabelDraft(label.id)}
+                                >
+                                  保存
+                                </button>
+                                <button
+                                  type="button"
+                                  className={styles.dangerTextButton}
+                                  onClick={() => void removeLabelDraft(label.id)}
+                                >
+                                  删除
+                                </button>
+                              </div>
+                            ) : (
+                              <span className={styles.identitySubtle}>AI/系统标签为只读展示</span>
+                            )}
+                          </div>
+                        );
+                      })
                     ) : (
                       <span className={styles.identitySubtle}>暂时还没有标签。</span>
                     )}
-                  </div>
-                  <div className={styles.inlineForm}>
-                    <input
-                      className={styles.textInput}
-                      value={editForm.labelText}
-                      placeholder="用中文逗号分隔，例如：天气，亚洲，快进快出"
-                      onChange={(event) => setEditForm((current) => ({ ...current, labelText: event.target.value }))}
-                    />
-                    <button type="button" className={styles.ghostButton} onClick={() => void addQuickLabel()}>
-                      添加标签
-                    </button>
                   </div>
                 </div>
               </div>
