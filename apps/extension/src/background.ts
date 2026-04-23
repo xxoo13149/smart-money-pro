@@ -479,6 +479,10 @@ const inferDegradedReason = (
     return undefined;
   }
 
+  if (isSurfaceWaitingError(normalizedError)) {
+    return undefined;
+  }
+
   if (normalizedError === "panel_missing" || normalizedError === "slug_missing") {
     return "surface_not_found";
   }
@@ -750,9 +754,23 @@ const buildApiUrl = (backendBaseUrl: string, pathname: string, query?: Record<st
   return url.toString();
 };
 
+const isSurfaceWaitingError = (errorCode?: string) => {
+  const normalized = errorCode?.trim().toLowerCase();
+  return normalized === "panel_missing" || normalized === "panel_inactive" || normalized === "slug_missing";
+};
+
 const describeSurfaceRuntime = (state: PageSurfaceState) => {
   if (state.runtimeMessage?.trim()) {
     return state.runtimeMessage.trim();
+  }
+  if (state.errorCode === "panel_missing") {
+    return "Waiting for the holders surface to appear.";
+  }
+  if (state.errorCode === "panel_inactive") {
+    return "Open the holders panel to start annotations.";
+  }
+  if (state.errorCode === "slug_missing") {
+    return "Open a market page to start annotations.";
   }
   if (state.errorCode?.trim()) {
     return state.errorCode.trim();
@@ -770,6 +788,9 @@ const deriveRuntimeStatusFromSurface = (state: PageSurfaceState): ExtensionRunti
   if (state.runtimeStatus) {
     return state.runtimeStatus;
   }
+  if (isSurfaceWaitingError(state.errorCode)) {
+    return "wake";
+  }
   if (state.errorCode || state.fallbackMode || state.sourceStatus === "stale" || state.sourceStatus === "error") {
     return "degraded";
   }
@@ -779,9 +800,10 @@ const deriveRuntimeStatusFromSurface = (state: PageSurfaceState): ExtensionRunti
 const deriveRuntimeStatusFromHealthEvent = (event: RuntimeHealthEvent): ExtensionRuntimeStatus =>
   event.runtimeStatus ?? (event.errorCode ? "degraded" : "ready");
 
-const syncRuntimeStateFromSurface = async (state: PageSurfaceState) =>
-  writeRuntimeState({
-    status: deriveRuntimeStatusFromSurface(state),
+const syncRuntimeStateFromSurface = async (state: PageSurfaceState) => {
+  const status = deriveRuntimeStatusFromSurface(state);
+  return writeRuntimeState({
+    status,
     detail: describeSurfaceRuntime(state),
     tabId: state.tabId,
     tabUrl: state.tabUrl,
@@ -793,8 +815,10 @@ const syncRuntimeStateFromSurface = async (state: PageSurfaceState) =>
     lastBootstrapAt: state.lastBootstrapAt,
     lastWakeAt: state.lastWakeAt,
     lastReadyAt: state.lastReadyAt,
-    lastDegradedAt: state.lastDegradedAt
+    lastDegradedAt: state.lastDegradedAt,
+    lastHealthUploadError: undefined
   });
+};
 
 const createDeviceLabel = () => {
   const manifest = chrome.runtime.getManifest();
@@ -1680,9 +1704,12 @@ const handleMessage = async (message: BackgroundMessage, sender?: { tab?: Browse
           inviteCode: message.inviteCode,
           deviceLabel: message.deviceLabel
         });
+        await writePageSurfaceState(null);
         await writeRuntimeState({
           status: "bootstrap",
-          detail: "Account authenticated. Coordinating open Polymarket tabs."
+          detail: "Account authenticated. Coordinating open Polymarket tabs.",
+          errorCode: undefined,
+          lastHealthUploadError: undefined
         });
         await refreshSupportedTabs();
         return {
@@ -1696,9 +1723,12 @@ const handleMessage = async (message: BackgroundMessage, sender?: { tab?: Browse
     case "wsm:authExchange":
       {
         const session = await exchangeInviteCode(message.inviteCode, message.deviceLabel);
+        await writePageSurfaceState(null);
         await writeRuntimeState({
           status: "bootstrap",
-          detail: "Session connected. Coordinating open Polymarket tabs."
+          detail: "Session connected. Coordinating open Polymarket tabs.",
+          errorCode: undefined,
+          lastHealthUploadError: undefined
         });
         await refreshSupportedTabs();
         return {

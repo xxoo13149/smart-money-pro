@@ -58,12 +58,23 @@ export const PRIMARY_SIGNAL_LABEL_KINDS = new Set<WalletLabelKind>([
   "trader_archetype"
 ]);
 
+export const LABEL_KIND_PRIORITY: Partial<Record<WalletLabelKind, number>> = {
+  payout_region: 700,
+  winrate_region: 620,
+  frequency_region: 540,
+  geo_specialty: 460,
+  trader_archetype: 380,
+  new_wallet_signal: 300,
+  early_entry_signal: 220,
+  activity_level: 120
+};
+
 const BADGE_TONE_PRIORITY: Record<AddressLabelBadge["tone"], number> = {
   alert: 40,
   watch: 30,
   danger: 25,
   "ai-review": 22,
-  accent: 20,
+  accent: 50,
   neutral: 10
 };
 
@@ -77,12 +88,25 @@ export const isPrimarySignalLabelKind = (
 export const getPrimarySignalPriority = (kind?: WalletLabelKind) =>
   isPrimarySignalLabelKind(kind) ? PRIMARY_SIGNAL_KIND_PRIORITY[kind] : FALLBACK_PRIORITY;
 
+export const getLabelKindPriority = (kind?: WalletLabelKind) =>
+  kind ? LABEL_KIND_PRIORITY[kind] ?? getPrimarySignalPriority(kind) : FALLBACK_PRIORITY;
+
+export const normalizeWalletLabelText = (value: string) =>
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/gu, "")
+    .replace(/[、，,;；:：/|()[\]{}【】<>《》"'`]/gu, "");
+
+export const getWalletLabelDisplayKey = (kind: WalletLabelKind | undefined, text: string) =>
+  `${kind ?? "group"}:${normalizeWalletLabelText(text)}`;
+
 export const getAddressBadgePriority = (badge: Pick<
   AddressLabelBadge,
   "priority" | "kind" | "isPrimary" | "tone"
 >) =>
   (badge.priority ?? 0) +
-  getPrimarySignalPriority(badge.kind) +
+  getLabelKindPriority(badge.kind) +
   (badge.isPrimary ? 200 : 0) +
   (BADGE_TONE_PRIORITY[badge.tone] ?? 0);
 
@@ -92,3 +116,16 @@ export const compareAddressBadges = (left: AddressLabelBadge, right: AddressLabe
 
 export const sortAddressBadges = <T extends AddressLabelBadge>(badges: readonly T[]) =>
   [...badges].sort(compareAddressBadges);
+
+export const dedupeAddressBadges = <T extends AddressLabelBadge>(badges: readonly T[]) => {
+  const seen = new Set<string>();
+  return badges.filter((badge) => {
+    const key = getWalletLabelDisplayKey(badge.kind, badge.text);
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+};

@@ -62,7 +62,7 @@ const formatRuntimeStatus = (
     case "bootstrap":
       return "Bootstrap";
     case "wake":
-      return "Wake";
+      return "Waiting";
     case "ready":
       return "Ready";
     case "degraded":
@@ -156,6 +156,26 @@ const setSurfaceValue = (key: string, value: string) => {
   }
 };
 
+const formatSurfaceStatus = (state: PageSurfaceState) => {
+  if (!state.surfaceFound) {
+    return state.errorCode === "slug_missing" ? "Waiting for market" : "Waiting for holders";
+  }
+
+  if (!state.surfaceActive) {
+    return state.errorCode === "panel_inactive" ? "Open holders panel" : "Waiting";
+  }
+
+  if (state.rowsAnnotated > 0) {
+    return "Annotated";
+  }
+
+  if (state.errorCode === "fallback_list") {
+    return "Fallback list";
+  }
+
+  return "Watching";
+};
+
 const renderSurfaceInfo = (state: PageSurfaceState | null) => {
   if (!state) {
     setSurfaceValue("runtime", "Waiting");
@@ -170,10 +190,7 @@ const renderSurfaceInfo = (state: PageSurfaceState | null) => {
   }
 
   setSurfaceValue("runtime", formatRuntimeStatus(state.runtimeStatus));
-  setSurfaceValue(
-    "status",
-    !state.surfaceFound ? "Surface missing" : state.rowsAnnotated > 0 ? "Annotated" : state.errorCode || "Waiting"
-  );
+  setSurfaceValue("status", formatSurfaceStatus(state));
   setSurfaceValue("kind", formatSurfaceKind(state.surfaceKind));
   setSurfaceValue("rows", String(state.rowsDetected));
   setSurfaceValue("annotated", String(state.rowsAnnotated));

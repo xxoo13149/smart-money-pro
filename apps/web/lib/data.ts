@@ -1,4 +1,8 @@
 export type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
+export type {
+  WalletReviewAction,
+  WalletReviewActionInput
+} from "./data-service";
 export { getWalletsPageData } from "./wallets-page-data";
 export {
   clampWalletListLimit,
@@ -13,6 +17,7 @@ export {
 
 export {
   createAdminExtensionInvite,
+  applyWalletReviewAction,
   createManualWallet,
   createUserTag,
   updateUserTag,

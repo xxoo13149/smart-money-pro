@@ -5,7 +5,8 @@
   computeWalletMetrics,
   deriveSystemLabels,
   generateAlertEvents,
-  getPrimarySignalPriority,
+  getLabelKindPriority,
+  getWalletLabelDisplayKey,
   isPrimarySignalLabelKind,
   markets as seedMarkets,
   normalizeAddress,
@@ -43,6 +44,7 @@ import {
   createWalletSavedView as createPersistedWalletSavedView,
   createWallet as createPersistedWallet,
   createWalletLabel as createPersistedWalletLabel,
+  replaceSystemLabelsForWallet as replacePersistedSystemLabelsForWallet,
   createWalletNote as createPersistedWalletNote,
   deleteWalletLabel as deletePersistedWalletLabel,
   deleteWalletSavedView as deletePersistedWalletSavedView,
@@ -95,7 +97,6 @@ import {
   buildWeatherLabels,
   buildWeatherStrategyFocus,
   extractWalletsWithAi,
-  filterWeatherHighlightLabels,
   normalizeWeatherSignals
 } from "./wallet-ai";
 import {
@@ -131,33 +132,11 @@ const MAX_IMPORT_ALIAS_LENGTH = 18;
 const MAX_IMPORT_SUMMARY_LENGTH = 84;
 const MAX_IMPORT_NOTE_LENGTH = 320;
 const MAX_IMPORT_EXCERPT_LENGTH = 320;
-const LABEL_VALUE_BLACKLIST = new Set([
-  "天气",
-  "weather",
-  "亚洲",
-  "美国",
-  "欧洲",
-  "asia",
-  "us",
-  "usa",
-  "europe",
-  "高频",
-  "稳健",
-  "激进",
-  "聪明钱",
-  "经验丰富",
-  "smartmoney",
-  "smart money",
-  "experienced"
-]);
 const compactImportText = (value: string | null | undefined) =>
   (value ?? "").replace(/\s+/g, " ").trim();
 
 const truncateImportText = (value: string, maxLength: number) =>
   value.length <= maxLength ? value : `${value.slice(0, maxLength - 3).trimEnd()}...`;
-
-const normalizeLabelBlacklistKey = (value: string) =>
-  compactImportText(value).toLowerCase().replace(/[、，,;；/|]/g, "").trim();
 
 const isWalletAiPreviewRow = (
   row: WalletImportPreviewRow
@@ -173,17 +152,17 @@ const normalizeImportLabelDrafts = (labels: WalletImportPreviewRow["labels"]) =>
       return;
     }
 
-    if (LABEL_VALUE_BLACKLIST.has(normalizeLabelBlacklistKey(value))) {
-      return;
-    }
-
-    const key = `${label.kind}:${value.toLowerCase()}`;
-    if (!deduped.has(key)) {
-      deduped.set(key, {
-        ...label,
-        name,
-        value
-      });
+    const kind = label.kind ?? "strategy";
+    const key = getWalletLabelDisplayKey(kind, value);
+    const nextLabel = {
+      ...label,
+      kind,
+      name,
+      value
+    };
+    const existing = deduped.get(key);
+    if (!existing || (label.source ?? "system") === "user") {
+      deduped.set(key, nextLabel);
     }
   });
 
@@ -282,7 +261,7 @@ const sanitizeWalletImportRowForCommit = (
 
 const resolveImportCurationStatus = (row: WalletImportPreviewRow): Wallet["curationStatus"] => {
   if (isWalletAiPreviewRow(row)) {
-    return row.signalQuality === "high_signal" ? "active" : "review_needed";
+    return "review_needed";
   }
 
   return row.warnings.length > 0 ? "review_needed" : "active";
@@ -353,17 +332,25 @@ const buildPersistedAlertItems = (wallets: Wallet[]): AlertListItem[] => {
 };
 
 const buildHighlightBadges = (wallet: Wallet, labels: WalletLabel[]): AddressLabelBadge[] => {
-  const preferredLabels = filterWeatherHighlightLabels(labels).filter(
-    (label) => label.kind !== "signal_quality" && label.kind !== "market_scope"
+  const preferredLabels = labels.filter(
+    (label) =>
+      label.kind !== "signal_quality" &&
+      label.kind !== "market_scope" &&
+      label.kind !== "confidence"
   );
 
   return sortAddressBadges(
     preferredLabels.map((label, index) => ({
       id: `${wallet.id}-${label.id}-${index}`,
       text: label.value || label.name,
-      tone: label.source === "user" ? "accent" : "neutral",
+      tone:
+        label.source === "user"
+          ? "accent"
+          : label.kind === "activity_level" && label.value.includes("正常")
+            ? "watch"
+            : "neutral",
       kind: label.kind,
-      priority: getPrimarySignalPriority(label.kind),
+      priority: getLabelKindPriority(label.kind) + (label.source === "user" ? 2000 : 0),
       detailText: label.name,
       metricText: label.evidence,
       isPrimary: isPrimarySignalLabelKind(label.kind)
@@ -1099,6 +1086,148 @@ export const deleteUserTag = async (walletId: string, tagId: string, actor?: str
   return deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, tagId, actor);
 };
 
+export type WalletReviewAction =
+  | "promote_ai_to_official"
+  | "edit_and_promote_ai_label"
+  | "dismiss_ai_label"
+  | "complete_wallet_review";
+
+export interface WalletReviewActionInput {
+  action: WalletReviewAction;
+  labelId?: string;
+  name?: string;
+  value?: string;
+  kind?: WalletLabel["kind"];
+  evidence?: string;
+  verificationNote?: string;
+  sourceNote?: string;
+}
+
+const normalizeReviewField = (value: string | undefined) => {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const trimmed = compactImportText(value);
+  return trimmed || undefined;
+};
+
+export const applyWalletReviewAction = async (
+  walletId: string,
+  input: WalletReviewActionInput,
+  actor = "Team Alpha"
+) => {
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    throw new Error("review actions require persisted database");
+  }
+
+  const wallet = await getPersistedWalletById(bindings.SMART_MONEY_DB, walletId, {
+    includeDeleted: true
+  });
+  if (!wallet) {
+    return undefined;
+  }
+
+  const storedLabels = (await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, [walletId])).get(walletId) ?? [];
+
+  if (input.action === "complete_wallet_review") {
+    await updatePersistedWallet(
+      bindings.SMART_MONEY_DB,
+      walletId,
+      { curationStatus: "active" },
+      actor
+    );
+    return getWalletDetail(walletId);
+  }
+
+  if (!input.labelId) {
+    throw new Error("labelId is required");
+  }
+
+  const targetLabel = storedLabels.find((label) => label.id === input.labelId);
+  if (!targetLabel) {
+    throw new Error("tag not found");
+  }
+
+  if (targetLabel.source === "user") {
+    throw new Error("only AI/system labels can enter review actions");
+  }
+
+  const nextName = normalizeReviewField(input.name) ?? targetLabel.name;
+  const nextValue = normalizeReviewField(input.value) ?? targetLabel.value;
+  const nextKind = input.kind ?? targetLabel.kind;
+  const nextEvidence = normalizeReviewField(input.evidence) ?? targetLabel.evidence;
+  const nextVerificationNote =
+    normalizeReviewField(input.verificationNote) ?? targetLabel.verificationNote;
+  const nextSourceNote = normalizeReviewField(input.sourceNote) ?? targetLabel.sourceNote;
+  const dedupeKey = getWalletLabelDisplayKey(nextKind, nextValue);
+
+  if (input.action === "dismiss_ai_label") {
+    const duplicates = storedLabels.filter(
+      (label) =>
+        label.source !== "user" &&
+        getWalletLabelDisplayKey(label.kind, label.value || label.name) ===
+          getWalletLabelDisplayKey(targetLabel.kind, targetLabel.value || targetLabel.name)
+    );
+    for (const label of duplicates) {
+      await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
+    }
+    return getWalletDetail(walletId);
+  }
+
+  const existingOfficial = storedLabels.find(
+    (label) =>
+      label.source === "user" &&
+      getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey
+  );
+
+  if (existingOfficial) {
+    await updatePersistedWalletLabel(
+      bindings.SMART_MONEY_DB,
+      walletId,
+      existingOfficial.id,
+      {
+        name: nextName,
+        value: nextValue,
+        kind: nextKind,
+        source: "user",
+        evidence: nextEvidence,
+        verificationNote: nextVerificationNote,
+        sourceNote: nextSourceNote
+      },
+      actor
+    );
+  } else {
+    await createPersistedWalletLabel(
+      bindings.SMART_MONEY_DB,
+      walletId,
+      {
+        name: nextName,
+        value: nextValue,
+        kind: nextKind,
+        source: "user",
+        evidence: nextEvidence,
+        verificationNote: nextVerificationNote,
+        sourceNote: nextSourceNote
+      },
+      actor
+    );
+  }
+
+  const duplicateAiLabels = storedLabels.filter(
+    (label) =>
+      label.source !== "user" &&
+      (label.id === targetLabel.id ||
+        getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey)
+  );
+  for (const label of duplicateAiLabels) {
+    await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
+  }
+
+  return getWalletDetail(walletId);
+};
+
 export const upsertWatchlistEntry = async (walletId: string, note?: string, actor?: string) => {
   const bindings = await ensurePersistedBindings();
   if (!bindings?.SMART_MONEY_DB) {
@@ -1181,6 +1310,11 @@ export const commitWalletImport = async (
       (row) => [normalizeAddress(row.wallet.address) ?? row.wallet.normalizedAddress, row.wallet] as const
     )
   );
+  const existingLabelsByAddress = new Map(
+    existingRows.map(
+      (row) => [normalizeAddress(row.wallet.address) ?? row.wallet.normalizedAddress, row.labels] as const
+    )
+  );
 
   let createdCount = 0;
   let updatedCount = 0;
@@ -1241,13 +1375,42 @@ export const commitWalletImport = async (
         createdCount += 1;
       }
 
+      let preservedLabels = normalizedAddress
+        ? (existingLabelsByAddress.get(normalizedAddress) ?? [])
+        : [];
+
+      if (request.mode === "ai" && bindings?.SMART_MONEY_DB) {
+        await replacePersistedSystemLabelsForWallet(bindings.SMART_MONEY_DB, wallet.id);
+        preservedLabels =
+          (await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, [wallet.id])).get(wallet.id) ?? [];
+      }
+
+      const officialLabelKeys = new Set(
+        preservedLabels
+          .filter((label) => label.source === "user")
+          .map((label) => getWalletLabelDisplayKey(label.kind, label.value || label.name))
+      );
+      const insertedLabelKeys = new Set<string>();
+      const writtenImportLabels: WalletLabel[] = [];
       for (const label of commitRow.labels) {
+        const labelKind = label.kind ?? "strategy";
+        const labelValue = label.value?.trim() || "";
+        if (!labelValue) {
+          continue;
+        }
+
+        const labelKey = getWalletLabelDisplayKey(labelKind, labelValue);
+        if (insertedLabelKeys.has(labelKey) || officialLabelKeys.has(labelKey)) {
+          continue;
+        }
+
+        insertedLabelKeys.add(labelKey);
         await createUserTag(
           wallet.id,
           {
             name: label.name,
-            value: label.value,
-            kind: label.kind,
+            value: labelValue,
+            kind: labelKind,
             source: request.mode === "ai" ? "system" : (label.source ?? "user"),
             evidence:
               label.evidence ||
@@ -1257,6 +1420,21 @@ export const commitWalletImport = async (
           },
           actor
         );
+        writtenImportLabels.push({
+          id: `${wallet.id}-import-${writtenImportLabels.length}`,
+          walletId: wallet.id,
+          kind: labelKind,
+          source: request.mode === "ai" ? "system" : (label.source ?? "user"),
+          name: label.name,
+          value: labelValue,
+          evidence:
+            label.evidence ||
+            (isWalletAiPreviewRow(commitRow) ? commitRow.sourceExcerpt : undefined),
+          verificationNote: label.verificationNote,
+          sourceNote: label.sourceNote,
+          createdAt: importedAt,
+          updatedAt: importedAt
+        });
       }
 
       if (commitRow.note?.trim()) {
@@ -1268,6 +1446,10 @@ export const commitWalletImport = async (
       }
 
       existingByAddress.set(wallet.normalizedAddress, wallet);
+      existingLabelsByAddress.set(wallet.normalizedAddress, [
+        ...preservedLabels.filter((label) => label.source === "user"),
+        ...writtenImportLabels
+      ]);
     } catch (error) {
       failedRows.push({
         rowNumber: row.rowNumber,

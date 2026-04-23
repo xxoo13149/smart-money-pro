@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
@@ -30,6 +30,14 @@ type LabelDraft = {
   evidence: string;
   verificationNote: string;
   sourceNote: string;
+};
+type ReviewAction = "promote" | "edit_and_promote" | "dismiss" | "complete_review";
+
+const REVIEW_ACTION_LABELS: Record<ReviewAction, string> = {
+  promote: "转官方",
+  edit_and_promote: "编辑后转官方",
+  dismiss: "忽略",
+  complete_review: "完成复核"
 };
 
 const DENSITY_STORAGE_KEY = "wallet-workspace-density";
@@ -257,6 +265,8 @@ export const WalletsConsole = ({
     labelSourceNote: ""
   });
   const [labelDrafts, setLabelDrafts] = useState<Record<string, LabelDraft>>({});
+  const [reviewTrayOpen, setReviewTrayOpen] = useState(initialQuery.status === "review_needed");
+  const [reviewPendingKey, setReviewPendingKey] = useState<string | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
 
   const sectionRefs = useRef<Record<InspectorSection, HTMLDivElement | null>>({
@@ -288,6 +298,21 @@ export const WalletsConsole = ({
     detail?.wallet.id === panelTargetId
       ? detail.labels
       : visibleRows.find((row) => row.wallet.id === panelTargetId)?.labels ?? [];
+  const reviewTargetId = panelTargetId ?? focusRowId;
+  const reviewRow = visibleRows.find((row) => row.wallet.id === reviewTargetId) ?? null;
+  const reviewWallet =
+    detail?.wallet.id === reviewTargetId ? detail.wallet : reviewRow?.wallet ?? null;
+  const reviewLabels =
+    detail?.wallet.id === reviewTargetId ? detail.labels : reviewRow?.labels ?? [];
+  const officialReviewLabels = useMemo(
+    () => reviewLabels.filter((label) => label.source === "user"),
+    [reviewLabels]
+  );
+  const aiReviewLabels = useMemo(
+    () => reviewLabels.filter((label) => label.source !== "user"),
+    [reviewLabels]
+  );
+  const reviewTrayVisible = Boolean(reviewTrayOpen && reviewWallet && !reviewWallet.deletedAt);
   const allCurrentPageSelected =
     currentPageIds.length > 0 && currentPageIds.every((walletId) => selectedIds.includes(walletId));
   const showSummaryColumn = columnPreset !== "compact";
@@ -617,7 +642,8 @@ export const WalletsConsole = ({
   };
 
   const addQuickLabel = async () => {
-    if (!panelTargetId) {
+    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    if (!targetWalletId) {
       return;
     }
 
@@ -626,7 +652,7 @@ export const WalletsConsole = ({
       return;
     }
 
-    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags`, {
+    const response = await fetch(`/api/wallets/${targetWalletId}/user-tags`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -676,7 +702,8 @@ export const WalletsConsole = ({
   };
 
   const saveLabelDraft = async (tagId: string) => {
-    if (!panelTargetId) {
+    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    if (!targetWalletId) {
       return;
     }
 
@@ -690,7 +717,7 @@ export const WalletsConsole = ({
       return;
     }
 
-    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags/${tagId}`, {
+    const response = await fetch(`/api/wallets/${targetWalletId}/user-tags/${tagId}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -714,7 +741,8 @@ export const WalletsConsole = ({
   };
 
   const removeLabelDraft = async (tagId: string) => {
-    if (!panelTargetId) {
+    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    if (!targetWalletId) {
       return;
     }
 
@@ -727,7 +755,7 @@ export const WalletsConsole = ({
       return;
     }
 
-    const response = await fetch(`/api/wallets/${panelTargetId}/user-tags/${tagId}`, {
+    const response = await fetch(`/api/wallets/${targetWalletId}/user-tags/${tagId}`, {
       method: "DELETE"
     });
     const payload = (await response.json().catch(() => ({}))) as { error?: string };
@@ -737,6 +765,62 @@ export const WalletsConsole = ({
     }
 
     pushFeedback("标签已删除");
+    refreshWorkspace();
+  };
+
+  const runReviewAction = async (action: ReviewAction, tagId?: string) => {
+    if (!reviewWallet) {
+      return;
+    }
+
+    const draft = tagId ? labelDrafts[tagId] : undefined;
+    const reviewKey = `${action}:${tagId ?? reviewWallet.id}`;
+    setReviewPendingKey(reviewKey);
+
+    const body =
+      action === "complete_review"
+        ? { action: "complete_wallet_review" }
+        : action === "dismiss"
+          ? { action: "dismiss_ai_label", labelId: tagId }
+          : action === "edit_and_promote"
+            ? {
+                action: "edit_and_promote_ai_label",
+                labelId: tagId,
+                name: draft?.name?.trim() || undefined,
+                value: draft?.value?.trim() || undefined,
+                kind: draft?.kind || undefined,
+                evidence: draft?.evidence?.trim() || undefined,
+                verificationNote: draft?.verificationNote?.trim() || undefined,
+                sourceNote: draft?.sourceNote?.trim() || undefined
+              }
+            : { action: "promote_ai_to_official", labelId: tagId };
+
+    const result = await fetchJson<WalletDetailData>(`/api/wallets/${reviewWallet.id}/review`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+
+    setReviewPendingKey(null);
+
+    if (!result.ok || !result.data) {
+      pushFeedback(result.error ?? "复核动作失败");
+      return;
+    }
+
+    setDetail(result.data);
+    if (tagId) {
+      setLabelDrafts((current) => {
+        const next = { ...current };
+        delete next[tagId];
+        return next;
+      });
+    }
+
+    pushFeedback(REVIEW_ACTION_LABELS[action]);
+    if (action === "complete_review") {
+      setReviewTrayOpen(false);
+    }
     refreshWorkspace();
   };
 
@@ -974,10 +1058,17 @@ export const WalletsConsole = ({
   ]);
 
   useEffect(() => {
-    setLabelDrafts(() =>
-      Object.fromEntries(panelLabels.map((label) => [label.id, toLabelDraft(label)]))
-    );
-  }, [panelLabels]);
+    setLabelDrafts((current) => ({
+      ...current,
+      ...Object.fromEntries(reviewLabels.map((label) => [label.id, toLabelDraft(label)]))
+    }));
+  }, [reviewLabels]);
+
+  useEffect(() => {
+    if (reviewTargetId) {
+      setReviewTrayOpen(true);
+    }
+  }, [reviewTargetId]);
 
   useEffect(() => {
     if (focusRowId && !visibleRows.some((row) => row.wallet.id === focusRowId)) {
@@ -1650,6 +1741,246 @@ export const WalletsConsole = ({
           </div>
         </div>
       </section>
+
+      {reviewTrayVisible ? (
+        <section className={styles.reviewTray}>
+          <div className={styles.reviewTrayHeader}>
+            <div>
+              <p className={styles.kicker}>Review Tray</p>
+              <h2>{reviewWallet?.alias ?? reviewWallet?.displayName ?? "待复核地址"}</h2>
+              <div className={styles.identityMeta}>
+                {reviewWallet ? <span className={styles.identityMono}>{reviewWallet.address}</span> : null}
+                {reviewRow?.statusBadges.map(renderStatusBadge)}
+              </div>
+            </div>
+            <div className={styles.reviewTrayActions}>
+              <button
+                type="button"
+                className={styles.ghostButton}
+                onClick={() => void runReviewAction("complete_review")}
+                disabled={reviewPendingKey === `complete_review:${reviewWallet?.id ?? ""}`}
+              >
+                {REVIEW_ACTION_LABELS.complete_review}
+              </button>
+              {reviewWallet ? (
+                <button
+                  type="button"
+                  className={styles.ghostButton}
+                  onClick={() => void toggleWatchlist(reviewWallet.id, !reviewWallet.watchlisted)}
+                >
+                  {reviewWallet.watchlisted ? "移出 Watchlist" : "加入 Watchlist"}
+                </button>
+              ) : null}
+              {reviewWallet ? (
+                <Link className={styles.ghostButton} href={`/wallets/${reviewWallet.id}`}>
+                  打开详情页
+                </Link>
+              ) : null}
+              <button type="button" className={styles.iconButton} onClick={() => setReviewTrayOpen(false)}>
+                暂时收起
+              </button>
+            </div>
+          </div>
+
+          <div className={styles.reviewTrayGrid}>
+            <div className={styles.reviewRail}>
+              <div className={styles.reviewRailTitle}>地址概览</div>
+              <div className={styles.metaCard}>
+                <div className={styles.metaRow}>
+                  <span>显示名</span>
+                  <strong>{reviewWallet?.displayName ?? "--"}</strong>
+                </div>
+                <div className={styles.metaRow}>
+                  <span>一句话摘要</span>
+                  <strong>{reviewWallet?.strategyFocus || reviewRow?.summaryText || "待补充摘要"}</strong>
+                </div>
+                <div className={styles.metaRow}>
+                  <span>更新时间</span>
+                  <strong>{formatDate(reviewWallet?.updatedAt)}</strong>
+                </div>
+                <div className={styles.metaRow}>
+                  <span>标签概况</span>
+                  <strong>官方 {officialReviewLabels.length} / AI {aiReviewLabels.length}</strong>
+                </div>
+              </div>
+
+              <div className={styles.metaCard}>
+                <div className={styles.editField}>
+                  <label className={styles.fieldLabel}>新增官方标签</label>
+                  <input
+                    className={styles.textInput}
+                    value={editForm.labelValue}
+                    placeholder="例如：高胜率-首尔 / 正常 / 提前埋伏"
+                    onChange={(event) =>
+                      setEditForm((current) => ({ ...current, labelValue: event.target.value }))
+                    }
+                  />
+                </div>
+                <div className={styles.editField}>
+                  <label className={styles.fieldLabel}>验证说明</label>
+                  <input
+                    className={styles.textInput}
+                    value={editForm.labelVerificationNote}
+                    placeholder="人工确认依据"
+                    onChange={(event) =>
+                      setEditForm((current) => ({
+                        ...current,
+                        labelVerificationNote: event.target.value
+                      }))
+                    }
+                  />
+                </div>
+                <div className={styles.editField}>
+                  <label className={styles.fieldLabel}>来源备注</label>
+                  <input
+                    className={styles.textInput}
+                    value={editForm.labelSourceNote}
+                    placeholder="数据来源或复核备注"
+                    onChange={(event) =>
+                      setEditForm((current) => ({ ...current, labelSourceNote: event.target.value }))
+                    }
+                  />
+                </div>
+                <button type="button" className={styles.primaryButton} onClick={() => void addQuickLabel()}>
+                  新增官方标签
+                </button>
+              </div>
+            </div>
+
+            <div className={styles.reviewRail}>
+              <div className={styles.reviewRailTitle}>官方标签轨道</div>
+              <div className={styles.reviewRailList}>
+                {officialReviewLabels.length > 0 ? (
+                  officialReviewLabels.map((label) => {
+                    const draft = labelDrafts[label.id] ?? toLabelDraft(label);
+                    return (
+                      <div key={label.id} className={styles.reviewCard}>
+                        <div className={styles.labelEditorTop}>
+                          <span className={styles.panelTag}>官方</span>
+                          <span className={styles.identitySubtle}>{label.kind}</span>
+                        </div>
+                        <input
+                          className={styles.textInput}
+                          value={draft.value}
+                          onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
+                        />
+                        <input
+                          className={styles.textInput}
+                          value={draft.verificationNote}
+                          placeholder="验证说明"
+                          onChange={(event) =>
+                            updateLabelDraftField(label.id, "verificationNote", event.target.value)
+                          }
+                        />
+                        <input
+                          className={styles.textInput}
+                          value={draft.sourceNote}
+                          placeholder="来源备注"
+                          onChange={(event) =>
+                            updateLabelDraftField(label.id, "sourceNote", event.target.value)
+                          }
+                        />
+                        <div className={styles.inlineForm}>
+                          <button
+                            type="button"
+                            className={styles.ghostButton}
+                            onClick={() => void saveLabelDraft(label.id)}
+                          >
+                            保存
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.dangerTextButton}
+                            onClick={() => void removeLabelDraft(label.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className={styles.emptyState}>还没有官方标签，可以先从右侧 AI 候选里转一批。</div>
+                )}
+              </div>
+            </div>
+
+            <div className={styles.reviewRail}>
+              <div className={styles.reviewRailTitle}>AI 候选标签轨道</div>
+              <div className={styles.reviewRailList}>
+                {aiReviewLabels.length > 0 ? (
+                  aiReviewLabels.map((label) => {
+                    const draft = labelDrafts[label.id] ?? toLabelDraft(label);
+                    return (
+                      <div key={label.id} className={styles.reviewCard}>
+                        <div className={styles.labelEditorTop}>
+                          <span className={styles.panelTag}>AI</span>
+                          <span className={styles.identitySubtle}>{label.kind}</span>
+                        </div>
+                        <input
+                          className={styles.textInput}
+                          value={draft.value}
+                          onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
+                        />
+                        <input
+                          className={styles.textInput}
+                          value={draft.evidence}
+                          placeholder="核心指标 / 证据摘录"
+                          onChange={(event) => updateLabelDraftField(label.id, "evidence", event.target.value)}
+                        />
+                        <input
+                          className={styles.textInput}
+                          value={draft.verificationNote}
+                          placeholder="转官方后的验证说明"
+                          onChange={(event) =>
+                            updateLabelDraftField(label.id, "verificationNote", event.target.value)
+                          }
+                        />
+                        <input
+                          className={styles.textInput}
+                          value={draft.sourceNote}
+                          placeholder="转官方后的来源备注"
+                          onChange={(event) =>
+                            updateLabelDraftField(label.id, "sourceNote", event.target.value)
+                          }
+                        />
+                        <div className={styles.reviewCardActions}>
+                          <button
+                            type="button"
+                            className={styles.primaryButton}
+                            disabled={reviewPendingKey === `promote:${label.id}`}
+                            onClick={() => void runReviewAction("promote", label.id)}
+                          >
+                            {REVIEW_ACTION_LABELS.promote}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.ghostButton}
+                            disabled={reviewPendingKey === `edit_and_promote:${label.id}`}
+                            onClick={() => void runReviewAction("edit_and_promote", label.id)}
+                          >
+                            {REVIEW_ACTION_LABELS.edit_and_promote}
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.dangerTextButton}
+                            disabled={reviewPendingKey === `dismiss:${label.id}`}
+                            onClick={() => void runReviewAction("dismiss", label.id)}
+                          >
+                            {REVIEW_ACTION_LABELS.dismiss}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <div className={styles.emptyState}>当前没有待处理 AI 标签，可以直接完成复核。</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </section>
+      ) : null}
 
       <div
         className={`${styles.panelScrim} ${!panelOpen || panelPinned ? styles.panelScrimPinned : ""}`}

@@ -1,8 +1,10 @@
 ﻿import type { D1Database } from "@cloudflare/workers-types";
 import {
-  getPrimarySignalPriority,
+  getLabelKindPriority,
+  getWalletLabelDisplayKey,
   isPrimarySignalLabelKind,
   sortAddressBadges,
+  dedupeAddressBadges,
   type AdminExtensionInviteEffectiveStatus,
   type AdminExtensionInviteItem,
   type AdminExtensionOverview,
@@ -800,57 +802,140 @@ const createAuditLog = async (
   return log;
 };
 
-const getLabelDisplayText = (label: WalletLabel) => label.value.length <= 18 ? label.value : label.name;
+const LABEL_DISPLAY_MAX = 18;
+const LABEL_METRIC_MAX = 56;
+const HOVER_NOTE_MAX = 88;
+const HOVER_NOTE_LIMIT = 3;
+
+const compactLabelText = (value?: string | null) =>
+  repairPossiblyMojibake(value ?? "").replace(/\s+/g, " ").trim();
+
+const clampLabelText = (value: string, maxLength: number) =>
+  value.length <= maxLength ? value : `${value.slice(0, maxLength - 1).trimEnd()}...`;
+
+const getLabelDisplayText = (label: WalletLabel) => {
+  const preferred = compactLabelText(label.value) || compactLabelText(label.name);
+  return preferred ? clampLabelText(preferred, LABEL_DISPLAY_MAX) : "";
+};
+
+const getLabelMetricText = (label: WalletLabel) => {
+  const metric = compactLabelText(label.evidence) || compactLabelText(label.sourceNote);
+  return metric ? clampLabelText(metric, LABEL_METRIC_MAX) : undefined;
+};
+
+const getLabelTone = (label: WalletLabel): AddressLabelBadge["tone"] => {
+  if (label.source === "user") {
+    return "accent";
+  }
+
+  if (label.kind === "activity_level") {
+    return compactLabelText(label.value).includes("正常") ? "watch" : "neutral";
+  }
+
+  if (label.kind === "signal_quality") {
+    return "ai-review";
+  }
+
+  return "neutral";
+};
+
+const getLabelSortPriority = (label: WalletLabel) =>
+  getLabelKindPriority(label.kind) +
+  (label.source === "user" ? 2000 : 0) +
+  ((label.verificationNote || label.sourceNote) && label.source === "user" ? 120 : 0);
 
 const shouldIncludeSummaryLabel = (kind: WalletLabelKind) =>
   kind !== "signal_quality" && kind !== "market_scope" && kind !== "confidence";
 
-const toLabelBadge = (label: WalletLabel): AddressLabelBadge => ({
-  id: label.id,
-  text: getLabelDisplayText(label),
-  tone: label.source === "user" ? "accent" : "neutral",
-  kind: label.kind,
-  priority: getPrimarySignalPriority(label.kind),
-  detailText: label.name,
-  metricText: label.evidence,
-  isPrimary: isPrimarySignalLabelKind(label.kind)
-});
+const toLabelBadge = (label: WalletLabel): AddressLabelBadge => {
+  const displayText = getLabelDisplayText(label);
+  return {
+    id: label.id,
+    text: displayText,
+    tone: getLabelTone(label),
+    kind: label.kind,
+    priority: getLabelSortPriority(label),
+    detailText: compactLabelText(label.name) || displayText,
+    metricText: getLabelMetricText(label),
+    isPrimary: isPrimarySignalLabelKind(label.kind)
+  };
+};
+
+type DisplayLabelEntry = {
+  label: WalletLabel;
+  badge: AddressLabelBadge;
+  dedupeKey: string;
+  updatedAt: number;
+};
+
+const compareDisplayLabelEntries = (left: DisplayLabelEntry, right: DisplayLabelEntry) =>
+  (right.badge.priority ?? 0) - (left.badge.priority ?? 0) ||
+  right.updatedAt - left.updatedAt ||
+  left.badge.text.localeCompare(right.badge.text, "zh-CN");
+
+const createDisplayLabelEntries = (labels: WalletLabel[]) => {
+  const deduped = new Map<string, DisplayLabelEntry>();
+
+  labels
+    .filter((label) => shouldIncludeSummaryLabel(label.kind))
+    .forEach((label) => {
+      const badge = toLabelBadge(label);
+      if (!badge.text) {
+        return;
+      }
+
+      const entry: DisplayLabelEntry = {
+        label,
+        badge,
+        dedupeKey: getWalletLabelDisplayKey(label.kind, badge.text),
+        updatedAt: toTimestamp(label.updatedAt ?? label.createdAt)
+      };
+      const existing = deduped.get(entry.dedupeKey);
+      if (!existing || compareDisplayLabelEntries(entry, existing) < 0) {
+        deduped.set(entry.dedupeKey, entry);
+      }
+    });
+
+  return Array.from(deduped.values()).sort(compareDisplayLabelEntries);
+};
 
 const createSummaryBadges = (labels: WalletLabel[]) =>
-  sortAddressBadges(
-    labels.filter((label) => shouldIncludeSummaryLabel(label.kind)).map(toLabelBadge)
-  ).slice(0, 2);
+  dedupeAddressBadges(createDisplayLabelEntries(labels).map((entry) => entry.badge)).slice(0, 2);
 
 const createHoverBadges = (labels: WalletLabel[]) =>
-  sortAddressBadges(
-    labels.filter((label) => shouldIncludeSummaryLabel(label.kind)).map(toLabelBadge)
-  ).slice(0, 6);
+  dedupeAddressBadges(createDisplayLabelEntries(labels).map((entry) => entry.badge)).slice(0, 6);
 
-const joinUniqueLabelTexts = (items: string[]) => {
-  const values = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+const joinUniqueLabelTexts = (items: string[], maxItems = HOVER_NOTE_LIMIT) => {
+  const values = Array.from(
+    new Set(
+      items
+        .map((item) => compactLabelText(item))
+        .filter(Boolean)
+        .map((item) => clampLabelText(item, HOVER_NOTE_MAX))
+    )
+  ).slice(0, maxItems);
+
   return values.length > 0 ? values.join(" | ") : undefined;
 };
 
+const buildAiMetricNote = (entry: DisplayLabelEntry) => {
+  const metric = entry.badge.metricText;
+  return metric ? clampLabelText(`${entry.badge.text}: ${metric}`, HOVER_NOTE_MAX) : entry.badge.text;
+};
+
 const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undefined => {
-  const filteredLabels = labels.filter((label) => shouldIncludeSummaryLabel(label.kind));
-  const officialTags = sortAddressBadges(
-    filteredLabels.filter((label) => label.source === "user").map(toLabelBadge)
-  ).slice(0, 8);
-  const aiTags = sortAddressBadges(
-    filteredLabels.filter((label) => label.source !== "user").map(toLabelBadge)
-  ).slice(0, 8);
+  const displayEntries = createDisplayLabelEntries(labels);
+  const officialEntries = displayEntries.filter((entry) => entry.label.source === "user");
+  const aiEntries = displayEntries.filter((entry) => entry.label.source !== "user");
 
-  const officialNoteText = joinUniqueLabelTexts([
-    ...filteredLabels
-      .filter((label) => label.source === "user")
-      .flatMap((label) => [label.verificationNote ?? "", label.sourceNote ?? ""])
-  ]);
+  const officialTags = officialEntries.map((entry) => entry.badge).slice(0, 6);
+  const aiTags = aiEntries.map((entry) => entry.badge).slice(0, 6);
 
-  const aiStatsNoteText = joinUniqueLabelTexts([
-    ...filteredLabels
-      .filter((label) => label.source !== "user")
-      .flatMap((label) => [label.evidence ?? "", label.sourceNote ?? ""])
-  ]);
+  const officialNoteText = joinUniqueLabelTexts(
+    officialEntries.flatMap((entry) => [entry.label.verificationNote ?? "", entry.label.sourceNote ?? ""])
+  );
+
+  const aiStatsNoteText = joinUniqueLabelTexts(aiEntries.map(buildAiMetricNote));
 
   if (officialTags.length === 0 && aiTags.length === 0 && !officialNoteText && !aiStatsNoteText) {
     return undefined;
@@ -1654,6 +1739,23 @@ export const createWalletLabel = async (
     updatedAt: nowIso()
   };
 
+  if (label.source === "system") {
+    const existingUserRow = await db
+      .prepare(
+        `SELECT * FROM wallet_user_labels
+         WHERE wallet_id = ?
+           AND source = 'user'
+           AND kind = ?
+           AND lower(value) = lower(?)`
+      )
+      .bind(walletId, label.kind, label.value.toLowerCase())
+      .first<Record<string, unknown>>();
+
+    if (existingUserRow) {
+      return mapWalletLabelRow(existingUserRow);
+    }
+  }
+
   await db
     .prepare(
       `INSERT INTO wallet_user_labels (
@@ -1691,6 +1793,22 @@ export const createWalletLabel = async (
   await incrementDatasetVersion(db, "address_labels");
 
   return label;
+};
+
+export const replaceSystemLabelsForWallet = async (
+  db: D1Database,
+  walletId: string
+) => {
+  await db
+    .prepare(
+      `DELETE FROM wallet_user_labels
+       WHERE wallet_id = ?
+         AND source = 'system'`
+    )
+    .bind(walletId)
+    .run();
+
+  await incrementDatasetVersion(db, "address_labels");
 };
 
 export const updateWalletLabel = async (

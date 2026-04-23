@@ -138,6 +138,7 @@ interface HolderPanelSnapshot {
 interface ResolvedInlineAnnotation {
   key: string;
   rowKey: string;
+  mountKey: string;
   normalizedAddress: string;
   surfaceKind: HolderSurfaceKind;
   source: InlineAnnotationSource;
@@ -232,12 +233,7 @@ type ContentRuntimeMessage =
   const PARSER_VERSION = "surface-adapter-v1";
   const REFRESH_TTL_MS = 90_000;
   const DIRECT_LOOKUP_TTL_MS = 60_000;
-  const BADGE_PRIORITY: Record<string, number> = {
-    alert: 4,
-    watch: 3,
-    accent: 2,
-    neutral: 1
-  };
+  const CONTENT_INSTANCE_ID = `wsm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const DEFAULT_CONFIG: ExtensionConfig = {
     enabled: true,
     debugMode: false,
@@ -366,6 +362,133 @@ type ContentRuntimeMessage =
   });
 
   const compactText = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
+
+  const normalizeBadgeText = (value: string | null | undefined) => compactText(value).toLowerCase();
+
+  const INLINE_BADGE_KIND_PRIORITY: Record<string, number> = {
+    payout_region: 900,
+    winrate_region: 820,
+    frequency_region: 740,
+    geo_specialty: 660,
+    trader_archetype: 580,
+    new_wallet_signal: 420,
+    early_entry_signal: 340,
+    activity_level: 80
+  };
+
+  const INLINE_BADGE_TONE_PRIORITY: Record<string, number> = {
+    accent: 2400,
+    watch: 120,
+    alert: 80,
+    danger: 60,
+    "ai-review": 20,
+    neutral: 0
+  };
+
+  let elementIdentitySeed = 0;
+  const elementIdentityMap = new WeakMap<HTMLElement, number>();
+
+  const getElementIdentity = (element: HTMLElement | null | undefined) => {
+    if (!element) {
+      return "0";
+    }
+
+    const current = elementIdentityMap.get(element);
+    if (current) {
+      return String(current);
+    }
+
+    elementIdentitySeed += 1;
+    elementIdentityMap.set(element, elementIdentitySeed);
+    return String(elementIdentitySeed);
+  };
+
+  const toDisplayBadge = <T extends AddressLabelBadge>(badge: T): T => {
+    const text = compactText(badge.text);
+    const kind = compactText(badge.kind).toLowerCase();
+    const normalizedText = normalizeBadgeText(text);
+    if (kind === "activity_level" || normalizedText === "正常" || normalizedText === "低活跃") {
+      const tone = normalizedText === "正常" ? "watch" : "neutral";
+      if (badge.tone === tone) {
+        return badge;
+      }
+      return { ...badge, tone } as T;
+    }
+    return badge;
+  };
+
+  const makeBadgeKey = (badge: AddressLabelBadge) => {
+    const kind = compactText(badge.kind).toLowerCase() || "unknown";
+    return `${kind}:${normalizeBadgeText(badge.text)}`;
+  };
+
+  const getInlineBadgePriority = (badge: AddressLabelBadge) => {
+    const kind = compactText(badge.kind).toLowerCase();
+    return (
+      (badge.priority ?? 0) +
+      (INLINE_BADGE_KIND_PRIORITY[kind] ?? 0) +
+      (INLINE_BADGE_TONE_PRIORITY[badge.tone] ?? 0) +
+      (badge.isPrimary ? 180 : 0) +
+      (kind === "activity_level" ? -900 : 0)
+    );
+  };
+
+  const compareInlineBadges = (left: AddressLabelBadge, right: AddressLabelBadge) =>
+    getInlineBadgePriority(right) - getInlineBadgePriority(left) ||
+    left.text.localeCompare(right.text, "zh-CN");
+
+  const dedupeBadges = <T extends AddressLabelBadge>(badges: T[]) => {
+    const seen = new Set<string>();
+    const unique: T[] = [];
+    badges.forEach((badge) => {
+      const normalized = normalizeBadgeText(badge.text);
+      if (!normalized) {
+        return;
+      }
+      const key = makeBadgeKey(badge);
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      unique.push(toDisplayBadge(badge));
+    });
+    return unique;
+  };
+
+  const isAliasDuplicateBadge = (badge: AddressLabelBadge, aliasText: string, holderDisplayName: string) => {
+    const normalizedBadge = normalizeBadgeText(badge.text);
+    if (!normalizedBadge) {
+      return true;
+    }
+    return (
+      normalizedBadge === normalizeBadgeText(aliasText) ||
+      normalizedBadge === normalizeBadgeText(holderDisplayName)
+    );
+  };
+
+  const getRowMountKey = (row: HolderRowSnapshot) =>
+    [
+      row.surfaceKind,
+      row.side,
+      row.normalizedAddress ?? "",
+      getElementIdentity(row.mount.row),
+      getElementIdentity(row.mount.mountTarget),
+      getElementIdentity(row.mount.nameLine ?? null)
+    ].join(":");
+
+  const dedupeHolderRowsByMount = (rows: HolderRowSnapshot[]) => {
+    const bestByKey = new Map<string, HolderRowSnapshot>();
+
+    rows.forEach((row) => {
+      const mountKey = getRowMountKey(row);
+      const current = bestByKey.get(mountKey);
+      if (!current || row.confidence > current.confidence) {
+        bestByKey.set(mountKey, row);
+      }
+    });
+
+    return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
+  };
 
   const truncateText = (value: string | null | undefined, maxLength: number) => {
     const text = compactText(value);
@@ -556,10 +679,12 @@ type ContentRuntimeMessage =
         card.append(summary);
       }
 
-      const officialTags = annotation.hoverCard?.officialTags ?? [];
-      const aiTags =
+      const officialTags = dedupeBadges(annotation.hoverCard?.officialTags ?? []);
+      const officialKeys = new Set(officialTags.map((badge) => makeBadgeKey(badge)));
+      const aiSource =
         annotation.hoverCard?.aiTags ??
         annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
+      const aiTags = dedupeBadges(aiSource).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
       const officialNoteText = annotation.hoverCard?.officialNoteText ?? "";
       const aiStatsNoteText = annotation.hoverCard?.aiStatsNoteText ?? "";
 
@@ -1418,10 +1543,10 @@ type ContentRuntimeMessage =
           return;
         }
 
-        const rows = [
+        const rows = dedupeHolderRowsByMount([
           ...extractHolderRowsFromColumn(yesColumn, surfaceKind),
           ...extractHolderRowsFromColumn(noColumn, surfaceKind)
-        ].sort((left, right) => right.confidence - left.confidence);
+        ]);
 
         if (rows.length < 2) {
           return;
@@ -1632,7 +1757,7 @@ type ContentRuntimeMessage =
         bestByKey.set(snapshot.rowKey, snapshot);
       }
     });
-    return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
+    return dedupeHolderRowsByMount([...bestByKey.values()]);
   };
 
   const extractHolderRowsFromColumn = (column: HolderColumnSnapshot, surfaceKind: HolderSurfaceKind) => {
@@ -1653,7 +1778,7 @@ type ContentRuntimeMessage =
       }
     });
 
-    return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
+    return dedupeHolderRowsByMount([...bestByKey.values()]);
   };
 
   const findMainSurfaceFallbackAnchor = (root: HTMLElement) => {
@@ -1749,29 +1874,22 @@ type ContentRuntimeMessage =
   };
 
   const selectPrimaryBadge = (summary: AddressSummary, aliasText: string, holderDisplayName: string) =>
-    summary.badges
-      .filter((badge) => {
-        const normalizedBadge = compactText(badge.text).toLowerCase();
-        return (
-          normalizedBadge.length > 0 &&
-          normalizedBadge !== compactText(aliasText).toLowerCase() &&
-          normalizedBadge !== compactText(holderDisplayName).toLowerCase()
-        );
-      })
-      .sort((left, right) => {
-        const toneDiff = (BADGE_PRIORITY[right.tone] ?? 0) - (BADGE_PRIORITY[left.tone] ?? 0);
-        if (toneDiff !== 0) {
-          return toneDiff;
-        }
-        return left.text.length - right.text.length;
-      })[0];
+    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+      .filter((badge) => !isAliasDuplicateBadge(badge, aliasText, holderDisplayName))
+      .sort(compareInlineBadges)[0];
 
   const selectSecondaryBadges = (
     summary: AddressSummary,
-    primaryBadge?: AddressSummary["badges"][number]
+    primaryBadge?: AddressSummary["badges"][number],
+    aliasText?: string,
+    holderDisplayName?: string
   ) =>
-    (summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
       .filter((badge) => badge.id !== primaryBadge?.id)
+      .filter((badge) =>
+        aliasText && holderDisplayName ? !isAliasDuplicateBadge(badge, aliasText, holderDisplayName) : true
+      )
+      .sort(compareInlineBadges)
       .slice(0, 5);
 
   const hasHoverPayload = (annotation: ResolvedInlineAnnotation) =>
@@ -1794,12 +1912,13 @@ type ContentRuntimeMessage =
     return {
       key: `${row.rowKey}:${row.normalizedAddress}`,
       rowKey: row.rowKey,
+      mountKey: getRowMountKey(row),
       normalizedAddress: row.normalizedAddress ?? "",
       surfaceKind: row.surfaceKind,
       source,
       aliasText: truncateText(aliasText, 22),
       primaryBadge,
-      secondaryBadges: selectSecondaryBadges(summary, primaryBadge),
+      secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
       summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
@@ -1822,12 +1941,13 @@ type ContentRuntimeMessage =
     return {
       key: `fallback:${holder.normalizedAddress}`,
       rowKey: `fallback:${holder.normalizedAddress}`,
+      mountKey: `fallback:${holder.normalizedAddress}`,
       normalizedAddress: holder.normalizedAddress,
       surfaceKind: panel.surfaceKind,
       source: "market_annotations",
       aliasText: truncateText(aliasText, 22),
       primaryBadge,
-      secondaryBadges: selectSecondaryBadges(summary, primaryBadge),
+      secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
       summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
@@ -1862,10 +1982,10 @@ type ContentRuntimeMessage =
       if (!holder?.summary) {
         return;
       }
-      resolved.set(
-        `${row.rowKey}:${row.normalizedAddress}`,
-        buildResolvedAnnotation(row, holder.summary, holder, "market_annotations")
-      );
+      const annotation = buildResolvedAnnotation(row, holder.summary, holder, "market_annotations");
+      if (!resolved.has(annotation.mountKey)) {
+        resolved.set(annotation.mountKey, annotation);
+      }
     });
 
     const missingVisibleAddresses = visibleAddresses.filter((address) => !payloadByAddress.has(address));
@@ -1884,18 +2004,18 @@ type ContentRuntimeMessage =
           if (!summary) {
             return;
           }
-          resolved.set(
-            `${row.rowKey}:${row.normalizedAddress}`,
-            buildResolvedAnnotation(
-              row,
-              summary,
-              {
-                proxyWallet: summary.address,
-                displayName: row.displayNameText || shortenAddress(summary.address)
-              },
-              "labels_lookup"
-            )
+          const annotation = buildResolvedAnnotation(
+            row,
+            summary,
+            {
+              proxyWallet: summary.address,
+              displayName: row.displayNameText || shortenAddress(summary.address)
+            },
+            "labels_lookup"
           );
+          if (!resolved.has(annotation.mountKey)) {
+            resolved.set(annotation.mountKey, annotation);
+          }
         });
       } catch (error) {
         logDebug("visible address lookup failed", error);
@@ -1942,6 +2062,62 @@ type ContentRuntimeMessage =
     }
   };
 
+  const findMountedAnnotationKeyByNode = (node: HTMLElement) =>
+    [...mountedAnnotations.entries()].find(([, entry]) => entry.node === node)?.[0];
+
+  const removeAnnotationDomNode = (node: HTMLElement) => {
+    const mountedKey = findMountedAnnotationKeyByNode(node);
+    if (mountedKey) {
+      removeMountedAnnotation(mountedKey);
+      return;
+    }
+
+    const annotationKey = node.dataset.annotationKey?.trim();
+    if (annotationKey && hoverOverlayManager?.getActiveKey() === annotationKey) {
+      hoverOverlayManager.close();
+    }
+    node.remove();
+  };
+
+  const pruneConflictingAnnotationDomNodes = (
+    row: HolderRowSnapshot,
+    annotation: ResolvedInlineAnnotation,
+    keepNode?: HTMLElement
+  ) => {
+    const scopes = Array.from(
+      new Set(
+        [row.mount.row, row.mount.mountTarget, row.mount.mainContainer].filter(
+          (element): element is HTMLElement => Boolean(element)
+        )
+      )
+    );
+    const nodes = Array.from(
+      new Set(scopes.flatMap((scope) => Array.from(scope.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`))))
+    ).filter(
+      (node) => !node.classList.contains(FALLBACK_CLASS)
+    );
+
+    nodes.forEach((node) => {
+      if (node === keepNode) {
+        return;
+      }
+
+      const nodeAddress = node.dataset.address?.trim();
+      const nodeKey = node.dataset.annotationKey?.trim();
+      const sameAddress = !nodeAddress || nodeAddress === annotation.normalizedAddress;
+      const sameKey = nodeKey === annotation.key;
+      if (sameAddress || sameKey) {
+        removeAnnotationDomNode(node);
+      }
+    });
+  };
+
+  const removeAllAnnotationDomNodes = () => {
+    document
+      .querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)
+      .forEach((node) => removeAnnotationDomNode(node));
+  };
+
   const removeMountedAnnotation = (key: string) => {
     const entry = mountedAnnotations.get(key);
     if (!entry) {
@@ -1964,6 +2140,7 @@ type ContentRuntimeMessage =
     [...mountedAnnotations.keys()].forEach((key) => removeMountedAnnotation(key));
     fallbackHoverAnnotations.clear();
     clearMountedFallback();
+    removeAllAnnotationDomNodes();
     setDebugState("Rendered", "0");
   };
 
@@ -1986,6 +2163,7 @@ type ContentRuntimeMessage =
     const row = document.createElement("div");
     row.className = `${ROOT_CLASS} ${ROW_CLASS}`;
     row.dataset.annotationKey = annotation.key;
+    row.dataset.wsmOwner = CONTENT_INSTANCE_ID;
     row.dataset.address = annotation.normalizedAddress;
     row.dataset.surfaceKind = annotation.surfaceKind;
     row.dataset.source = annotation.source;
@@ -2022,6 +2200,7 @@ type ContentRuntimeMessage =
 
   const upsertMountedAnnotation = (row: HolderRowSnapshot, annotation: ResolvedInlineAnnotation) => {
     const existing = mountedAnnotations.get(annotation.key);
+    pruneConflictingAnnotationDomNodes(row, annotation, existing?.node);
     if (
       existing &&
       existing.row === row.mount.row &&
@@ -2035,6 +2214,16 @@ type ContentRuntimeMessage =
     if (existing) {
       removeMountedAnnotation(annotation.key);
     }
+
+    [...mountedAnnotations.entries()].forEach(([key, entry]) => {
+      if (key === annotation.key) {
+        return;
+      }
+
+      if (entry.annotation.mountKey === annotation.mountKey) {
+        removeMountedAnnotation(key);
+      }
+    });
 
     ensureMountClasses(row.mount);
     row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
@@ -2071,6 +2260,7 @@ type ContentRuntimeMessage =
 
     const shell = document.createElement("div");
     shell.className = `${ROOT_CLASS} ${FALLBACK_CLASS}`;
+    shell.dataset.wsmOwner = CONTENT_INSTANCE_ID;
     shell.dataset.surfaceKind = panel.surfaceKind;
 
     const title = document.createElement("div");
@@ -2167,6 +2357,26 @@ type ContentRuntimeMessage =
     }, 80);
   };
 
+  const getClosestAnnotationRoot = (node: Node) => {
+    if (!(node instanceof HTMLElement)) {
+      return null;
+    }
+
+    if (node.classList.contains(ROOT_CLASS)) {
+      return node;
+    }
+
+    return node.closest<HTMLElement>(`.${ROOT_CLASS}`);
+  };
+
+  const isCurrentInstanceAnnotationNode = (node: Node) =>
+    getClosestAnnotationRoot(node)?.dataset.wsmOwner === CONTENT_INSTANCE_ID;
+
+  const hasExternalMutationNodes = (mutations: MutationRecord[]) =>
+    mutations.some((mutation) =>
+      [...mutation.addedNodes, ...mutation.removedNodes].some((node) => !isCurrentInstanceAnnotationNode(node))
+    );
+
   const syncSurfaceObserver = (root: HTMLElement | null) => {
     if (observedSurfaceRoot === root) {
       return;
@@ -2180,10 +2390,7 @@ type ContentRuntimeMessage =
     }
 
     surfaceObserver = new MutationObserver((mutations) => {
-      const hasExternalMutation = mutations.some((mutation) =>
-        [...mutation.addedNodes, ...mutation.removedNodes].some((node) => !(node instanceof HTMLElement) || !node.closest(`.${ROOT_CLASS}`))
-      );
-      if (hasExternalMutation) {
+      if (hasExternalMutationNodes(mutations)) {
         queueRender();
       }
     });
@@ -2200,10 +2407,7 @@ type ContentRuntimeMessage =
     }
 
     discoveryObserver = new MutationObserver((mutations) => {
-      const hasExternalMutation = mutations.some((mutation) =>
-        [...mutation.addedNodes, ...mutation.removedNodes].some((node) => !(node instanceof HTMLElement) || !node.closest(`.${ROOT_CLASS}`))
-      );
-      if (hasExternalMutation) {
+      if (hasExternalMutationNodes(mutations)) {
         queueRender();
       }
     });
@@ -2255,7 +2459,7 @@ type ContentRuntimeMessage =
       clearAnnotations();
       setDebugState("Panel", "missing");
       setDebugState("PanelKind", "none");
-      markRuntimeStatus("degraded", "Holder surface not found.");
+      markRuntimeStatus("wake", "Waiting for the holders surface to appear.");
       await publishPageState(buildPageState({
         slug: currentSlug ?? undefined,
         surfaceFound: false,
@@ -2287,7 +2491,7 @@ type ContentRuntimeMessage =
       clearAnnotations();
       setDebugState("Panel", "inactive");
       setDebugState("PanelKind", panel.surfaceKind);
-      markRuntimeStatus("degraded", "Holder surface is inactive.");
+      markRuntimeStatus("wake", "Open the holders panel to start annotations.");
       await publishPageState(buildPageState({
         slug: currentSlug ?? undefined,
         surfaceKind: panel.surfaceKind,
@@ -2421,7 +2625,7 @@ type ContentRuntimeMessage =
 
     if (!slug) {
       clearAnnotations();
-      markRuntimeStatus("degraded", "Market slug missing.");
+      markRuntimeStatus("wake", "Open a market page to start annotations.");
       await publishPageState(buildPageState({
         surfaceFound: false,
         surfaceActive: false,
@@ -2791,6 +2995,7 @@ type ContentRuntimeMessage =
   };
 
   void (async () => {
+    document.documentElement.dataset.wsmContentInstance = CONTENT_INSTANCE_ID;
     currentConfig = await getConfig();
     setDebugState("Boot", "starting");
     if (!isHostEnabled(currentConfig)) {
