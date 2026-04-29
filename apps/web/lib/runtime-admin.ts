@@ -13,6 +13,7 @@ const ACCESS_HEADER_KEYS = [
 ] as const;
 
 const APP_VERSION = process.env.npm_package_version ?? "0.1.0";
+const SCHEMA_READY = new Map<string, Promise<void>>();
 
 type RuntimeMode = "cloudflare" | "demo";
 
@@ -20,6 +21,31 @@ interface RuntimeContext {
   mode: RuntimeMode;
   bindings: SmartMoneyBindings | null;
 }
+
+const ensureRuntimeSchema = async (bindings: SmartMoneyBindings) => {
+  if (!bindings.SMART_MONEY_DB) {
+    return;
+  }
+
+  const scopeKey = [
+    bindings.ADMIN_BASE_URL ?? "admin",
+    bindings.PUBLIC_EXTENSION_BASE_URL ?? "app"
+  ].join("|");
+
+  if (!SCHEMA_READY.has(scopeKey)) {
+    const ready = (async () => {
+      await bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB!);
+    })();
+    SCHEMA_READY.set(scopeKey, ready);
+    ready.catch(() => {
+      if (SCHEMA_READY.get(scopeKey) === ready) {
+        SCHEMA_READY.delete(scopeKey);
+      }
+    });
+  }
+
+  await SCHEMA_READY.get(scopeKey);
+};
 
 const countRows = async (bindings: SmartMoneyBindings, sql: string, values: unknown[] = []) => {
   if (!bindings.SMART_MONEY_DB) {
@@ -62,7 +88,7 @@ const getRuntimeContext = async (): Promise<RuntimeContext> => {
     };
   }
 
-  await bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB);
+  await ensureRuntimeSchema(bindings);
   return {
     mode: "cloudflare",
     bindings

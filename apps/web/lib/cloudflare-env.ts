@@ -16,6 +16,8 @@ export interface SmartMoneyBindings {
   WALLET_AI_PROVIDER_ORDER?: string;
   WALLET_AI_GEMINI_MODEL?: string;
   WALLET_AI_GROQ_MODEL?: string;
+  FINDER_SYNC_TOKEN?: string;
+  FINDER_ALLOWED_ORIGINS?: string;
 }
 
 export const getSmartMoneyBindings = async (): Promise<SmartMoneyBindings | null> => {

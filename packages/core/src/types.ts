@@ -117,7 +117,7 @@ export interface WalletWeatherSignalDraft {
   evidenceQuality: "explicit_numeric" | "source_named" | "qualitative_only" | "insufficient";
 }
 
-export type WalletSourceType = "manual" | "ai" | "file" | "system";
+export type WalletSourceType = "manual" | "finder" | "ai" | "file" | "system";
 export type WalletCurationStatus = "active" | "review_needed" | "deleted";
 export type WalletListSort = "updated_desc" | "created_desc" | "name_asc";
 export type WalletListStatus = "all" | "active" | "watchlist" | "review_needed" | "deleted";
@@ -388,7 +388,9 @@ export interface WalletAiExtractPreviewRow extends WalletImportPreviewRow {
 export interface WalletImportCommitRequest {
   rows: WalletImportPreviewRow[];
   mode?: "file" | "text" | "ai";
+  sourceType?: WalletSourceType;
   sourceName?: string;
+  preserveExistingManualFields?: boolean;
 }
 
 export interface WalletManualCreateInput {
@@ -410,6 +412,11 @@ export interface WalletAdminRow {
     label: string;
     importedAt?: string;
     importBatchId?: string;
+    sourceName?: string;
+    provider?: WalletAiProviderMeta["provider"];
+    model?: string;
+    fallbackUsed?: boolean;
+    batchCreatedAt?: string;
   };
   lastActivityAt: string;
 }
@@ -419,6 +426,7 @@ export interface WalletListQuery {
   view?: string;
   status?: WalletListStatus;
   source?: WalletSourceType | "all";
+  batch?: string;
   labels?: string[];
   sort?: WalletListSort;
   cursor?: string;

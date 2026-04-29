@@ -3,6 +3,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { NextResponse } from "next/server";
+import { cache } from "react";
 
 import { getSmartMoneyBindings, type SmartMoneyBindings } from "./cloudflare-env";
 
@@ -97,6 +98,13 @@ export interface AdminAuthState {
   session: AdminSessionContext | null;
   accessEmail?: string;
   hasAccountForAccessEmail: boolean;
+  registrationApproval: AdminRegistrationApprovalConfig;
+}
+
+interface AdminAuthRequestState {
+  authReady: boolean;
+  session: AdminSessionContext | null;
+  accessEmail?: string;
   registrationApproval: AdminRegistrationApprovalConfig;
 }
 
@@ -692,7 +700,7 @@ export const getAccessVerifiedEmailFromRequest = (request: Request) =>
 
 export const getAccessVerifiedEmail = async () => extractAccessEmail(await headers());
 
-export const getAdminAuthState = async (): Promise<AdminAuthState> => {
+const resolveAdminRequestState = cache(async (): Promise<AdminAuthRequestState> => {
   const auth = await ensureAuthDb();
   const headerStore = await headers();
   const cookieStore = await cookies();
@@ -705,7 +713,6 @@ export const getAdminAuthState = async (): Promise<AdminAuthState> => {
       authReady: false,
       session: null,
       accessEmail,
-      hasAccountForAccessEmail: false,
       registrationApproval
     };
   }
@@ -719,27 +726,52 @@ export const getAdminAuthState = async (): Promise<AdminAuthState> => {
     }
   }
 
-  const hasAccountForAccessEmail = accessEmail
-    ? Boolean(await findUserByNormalizedEmail(auth.db, accessEmail))
-    : false;
-
   return {
     authReady: true,
     session,
     accessEmail,
-    hasAccountForAccessEmail,
     registrationApproval
+  };
+});
+
+const resolveHasAccountForAccessEmail = cache(async (accessEmail?: string) => {
+  if (!accessEmail) {
+    return false;
+  }
+
+  const auth = await ensureAuthDb();
+  if (!auth) {
+    return false;
+  }
+
+  return Boolean(await findUserByNormalizedEmail(auth.db, accessEmail));
+});
+
+export const getAdminAuthState = async (): Promise<AdminAuthState> => {
+  const state = await resolveAdminRequestState();
+  const hasAccountForAccessEmail =
+    state.authReady && !state.session && state.accessEmail
+      ? await resolveHasAccountForAccessEmail(state.accessEmail)
+      : false;
+
+  return {
+    ...state,
+    hasAccountForAccessEmail
   };
 };
 
 export const requireAdminPageSession = async (nextPath = "/") => {
-  const state = await getAdminAuthState();
+  const state = await resolveAdminRequestState();
   if (state.session) {
     return state.session;
   }
 
+  const hasAccountForAccessEmail =
+    state.authReady && state.accessEmail
+      ? await resolveHasAccountForAccessEmail(state.accessEmail)
+      : false;
   const target = state.accessEmail
-    ? state.hasAccountForAccessEmail
+    ? hasAccountForAccessEmail
       ? "/auth/login"
       : "/auth/register"
     : "/auth/login";
@@ -1120,7 +1152,13 @@ export const clearAdminSessionCookie = (response: NextResponse, request: Request
   clearSessionCookie(response, request);
 };
 
-export const getAdminLayoutState = async () => getAdminAuthState();
+export const getAdminLayoutState = async (): Promise<AdminAuthState> => {
+  const state = await resolveAdminRequestState();
+  return {
+    ...state,
+    hasAccountForAccessEmail: false
+  };
+};
 
 export const getAdminSessionSnapshot = async () => {
   const state = await getAdminAuthState();

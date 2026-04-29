@@ -12,10 +12,21 @@ import type {
 import { WALLET_IMPORT_FIELD_GUIDE, type WalletImportPreview } from "../lib/wallet-import";
 
 type PreviewMode = "ai" | "text";
-type SourceMode = "file" | "paste";
+export type WalletImportSourceMode = "file" | "paste" | "finder";
 
 interface AiPreviewResponse {
   rows: WalletAiExtractPreviewRow[];
+  providerMeta?: WalletAiProviderMeta;
+  fallbackReason?: string;
+}
+
+interface FinderPreviewResponse {
+  rows: WalletImportPreviewRow[];
+  sourceName: string;
+  runId?: string;
+  finderBaseUrl?: string;
+  totalRows: number;
+  validRows: number;
   providerMeta?: WalletAiProviderMeta;
   fallbackReason?: string;
 }
@@ -73,6 +84,8 @@ const TEMPLATE_TEXT = `地址: 0x...
 重点观察原因: 持续跟踪样本
 原文证据摘录: Uses NWS/NOAA obs, watches D1 ensemble spread, leans upper tail when cloud cover clears late.`;
 
+const DEFAULT_FINDER_BASE_URL = "http://127.0.0.1:41874";
+
 const countValidRows = (rows: WalletImportPreviewRow[]) =>
   rows.filter((row) => row.errors.length === 0).length;
 
@@ -128,21 +141,27 @@ const getPreviewSignals = (row: WalletImportPreviewRow): WalletPrimarySignal[] =
   isAiPreviewRow(row) ? row.primarySignals.slice(0, 4) : [];
 
 export const WalletImportPanel = ({
-  onCommitted
+  onCommitted,
+  initialSourceMode = "file"
 }: {
   onCommitted?: () => void;
+  initialSourceMode?: WalletImportSourceMode;
 }) => {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [sourceMode, setSourceMode] = useState<SourceMode>("file");
+  const [sourceMode, setSourceMode] = useState<WalletImportSourceMode>(initialSourceMode);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("ai");
   const [file, setFile] = useState<File | null>(null);
   const [pastedText, setPastedText] = useState("");
+  const [finderBaseUrl, setFinderBaseUrl] = useState(DEFAULT_FINDER_BASE_URL);
+  const [finderRunId, setFinderRunId] = useState("");
   const [preview, setPreview] = useState<WalletImportPreviewRow[] | null>(null);
   const [previewMeta, setPreviewMeta] = useState<{
     sourceName: string;
     detectedFormat?: string;
+    finderRunId?: string;
+    finderBaseUrl?: string;
     providerMeta?: WalletAiProviderMeta;
     fallbackReason?: string;
   } | null>(null);
@@ -160,6 +179,10 @@ export const WalletImportPanel = ({
     setResult(null);
     setStatus(null);
   }, [previewMode, sourceMode]);
+
+  useEffect(() => {
+    setSourceMode(initialSourceMode);
+  }, [initialSourceMode]);
 
   const resolveSource = async () => {
     if (sourceMode === "file") {
@@ -187,12 +210,47 @@ export const WalletImportPanel = ({
     setPending("preview");
     setResult(null);
     setStatus(
-      previewMode === "ai"
+      sourceMode === "finder"
+        ? "正在读取 Finder 候选地址并生成 AI 预览..."
+        : previewMode === "ai"
         ? "正在调用 AI 做天气交易结构化提取..."
         : "正在生成文本预览..."
     );
 
     try {
+      if (sourceMode === "finder") {
+        const response = await fetch("/api/finder/import/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            finderBaseUrl,
+            runId: finderRunId.trim() || "latest",
+            limit: 100
+          })
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          data?: FinderPreviewResponse;
+          error?: string;
+        };
+
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error ?? "Finder 预览生成失败，请确认 Finder API 已启动。");
+        }
+
+        setPreview(payload.data.rows ?? []);
+        setPreviewMeta({
+          sourceName: payload.data.sourceName,
+          finderRunId: payload.data.runId,
+          finderBaseUrl: payload.data.finderBaseUrl,
+          providerMeta: payload.data.providerMeta,
+          fallbackReason: payload.data.fallbackReason
+        });
+        setStatus(
+          `Finder 预览完成：共识别 ${payload.data.totalRows} 条，${payload.data.validRows} 条可导入。`
+        );
+        return;
+      }
+
       const source = await resolveSource();
       const response = await fetch(
         previewMode === "ai" ? "/api/wallets/import/ai-preview" : "/api/wallets/import/text",
@@ -248,7 +306,11 @@ export const WalletImportPanel = ({
     }
 
     setPending("commit");
-    setStatus("正在提交地址资料并写入地址库...");
+    setStatus(
+      sourceMode === "finder"
+        ? "正在提交 Finder 地址资料并写入地址库..."
+        : "正在提交地址资料并写入地址库..."
+    );
 
     try {
       const response = await fetch("/api/wallets/import/commit", {
@@ -257,12 +319,16 @@ export const WalletImportPanel = ({
         body: JSON.stringify({
           rows: preview,
           mode:
-            previewMode === "ai" && previewMeta.providerMeta?.provider !== "none"
+            sourceMode === "finder"
+              ? "ai"
+              : previewMode === "ai" && previewMeta.providerMeta?.provider !== "none"
               ? "ai"
               : sourceMode === "paste"
                 ? "text"
                 : "file",
-          sourceName: previewMeta.sourceName
+          sourceType: sourceMode === "finder" ? "finder" : undefined,
+          sourceName: previewMeta.sourceName,
+          preserveExistingManualFields: sourceMode === "finder"
         })
       });
       const payload = (await response.json().catch(() => ({}))) as {
@@ -280,7 +346,7 @@ export const WalletImportPanel = ({
 
       setResult(payload.data);
       setStatus(
-        `导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条，失败 ${payload.data.failedRows.length} 条。`
+        `${sourceMode === "finder" ? "Finder " : ""}导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条，失败 ${payload.data.failedRows.length} 条。`
       );
 
       if (onCommitted) {
@@ -323,24 +389,33 @@ export const WalletImportPanel = ({
         >
           粘贴文本
         </button>
+        <button
+          type="button"
+          className={`segmented__item${sourceMode === "finder" ? " segmented__item--active" : ""}`}
+          onClick={() => setSourceMode("finder")}
+        >
+          Finder
+        </button>
       </div>
 
-      <div className="segmented">
-        <button
-          type="button"
-          className={`segmented__item${previewMode === "ai" ? " segmented__item--active" : ""}`}
-          onClick={() => setPreviewMode("ai")}
-        >
-          AI 结构化预览
-        </button>
-        <button
-          type="button"
-          className={`segmented__item${previewMode === "text" ? " segmented__item--active" : ""}`}
-          onClick={() => setPreviewMode("text")}
-        >
-          文本解析预览
-        </button>
-      </div>
+      {sourceMode !== "finder" ? (
+        <div className="segmented">
+          <button
+            type="button"
+            className={`segmented__item${previewMode === "ai" ? " segmented__item--active" : ""}`}
+            onClick={() => setPreviewMode("ai")}
+          >
+            AI 结构化预览
+          </button>
+          <button
+            type="button"
+            className={`segmented__item${previewMode === "text" ? " segmented__item--active" : ""}`}
+            onClick={() => setPreviewMode("text")}
+          >
+            文本解析预览
+          </button>
+        </div>
+      ) : null}
 
       <div className="import-grid">
         <div>
@@ -381,6 +456,27 @@ export const WalletImportPanel = ({
                 onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               />
             </>
+          ) : sourceMode === "finder" ? (
+            <div className="stack-list">
+              <label className="field-shell">
+                <span className="field-label">Finder API 地址</span>
+                <input
+                  value={finderBaseUrl}
+                  onChange={(event) => setFinderBaseUrl(event.target.value)}
+                  placeholder={DEFAULT_FINDER_BASE_URL}
+                  className="field-input"
+                />
+              </label>
+              <label className="field-shell">
+                <span className="field-label">分析任务 ID</span>
+                <input
+                  value={finderRunId}
+                  onChange={(event) => setFinderRunId(event.target.value)}
+                  placeholder="留空读取最近完成的 Finder 任务"
+                  className="field-input"
+                />
+              </label>
+            </div>
           ) : (
             <label className="field-shell">
               <span className="field-label">粘贴地址资料</span>
@@ -395,7 +491,9 @@ export const WalletImportPanel = ({
 
           <div className="subtle-row" style={{ marginTop: "0.85rem" }}>
             <span>
-              {previewMode === "ai"
+              {sourceMode === "finder"
+                ? "读取 Finder 的 selected_wallets 和钱包详情，先走 AI 识别预览，再确认写库。"
+                : previewMode === "ai"
                 ? "默认按 Gemini → Groq → 文本解析 的顺序降级，尽量保留搜索系统 AI 返回的重点结果。"
                 : "跳过 AI，直接用本地解析规则生成预览。"}
             </span>
@@ -407,18 +505,27 @@ export const WalletImportPanel = ({
                 void loadPreview();
               }}
             >
-              {pending === "preview" ? "生成中..." : "生成预览"}
+              {pending === "preview"
+                ? sourceMode === "finder"
+                  ? "读取中..."
+                  : "生成中..."
+                : sourceMode === "finder"
+                  ? "读取 Finder 候选"
+                  : "生成预览"}
             </button>
           </div>
 
           <div className="status-line" style={{ marginTop: "0.85rem" }}>
-            {status ?? "导入前会先生成预览，不会直接写库。"}
+            {status ??
+              (sourceMode === "finder"
+                ? "Finder 导入会保护已有人工字段，不会直接覆盖人工备注和人工标签。"
+                : "导入前会先生成预览，不会直接写库。")}
           </div>
         </div>
 
         <div className="stack-item import-guide">
           <h4 className="inline-title" style={{ marginBottom: "0.5rem" }}>
-            AI 导入指南
+            {sourceMode === "finder" ? "Finder 导入指南" : "AI 导入指南"}
           </h4>
           <div className="stack-list">
             {WEATHER_GUIDE_BLOCKS.map((block) => (
@@ -473,6 +580,7 @@ export const WalletImportPanel = ({
             {previewMeta?.detectedFormat ? (
               <span>格式 {previewMeta.detectedFormat.toUpperCase()}</span>
             ) : null}
+            {previewMeta?.finderRunId ? <span>Finder {previewMeta.finderRunId}</span> : null}
             {previewMeta?.providerMeta ? (
               <span>
                 Provider {previewMeta.providerMeta.provider} / {previewMeta.providerMeta.model}
@@ -583,7 +691,11 @@ export const WalletImportPanel = ({
                 void commitImport();
               }}
             >
-              {pending === "commit" ? "导入中..." : "确认导入"}
+              {pending === "commit"
+                ? "导入中..."
+                : sourceMode === "finder"
+                  ? "确认导入 Finder 地址"
+                  : "确认导入"}
             </button>
           </div>
         </div>

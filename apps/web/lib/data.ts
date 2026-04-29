@@ -1,5 +1,10 @@
 export type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
 export type {
+  WalletImportBatchDetail,
+  WalletImportBatchSummary,
+  WalletImportOverview,
+  WalletImportWorkflowSummary,
+  WalletImportsPageData,
   WalletReviewAction,
   WalletReviewActionInput
 } from "./data-service";
@@ -30,6 +35,7 @@ export {
   getAlerts,
   getDashboardData,
   getSmartMoneySchemaStatusReport,
+  getWalletImportsPageData,
   getWalletDetail as getWalletById,
   getWalletList,
   listWalletAdminRows,

@@ -1,0 +1,392 @@
+.page {
+  display: grid;
+  gap: 16px;
+  color: #f3f7ff;
+  --imports-panel: rgba(10, 14, 20, 0.96);
+  --imports-surface: rgba(255, 255, 255, 0.035);
+  --imports-surface-strong: rgba(255, 255, 255, 0.06);
+  --imports-line: rgba(255, 255, 255, 0.08);
+  --imports-line-strong: rgba(115, 165, 255, 0.34);
+  --imports-text-soft: rgba(216, 226, 238, 0.74);
+  --imports-text-mute: rgba(216, 226, 238, 0.48);
+  --imports-accent: #72a5ff;
+  --imports-watch: #67d6aa;
+  --imports-warning: #ffd27a;
+}
+
+.header,
+.metrics,
+.importPanel,
+.sidePanel,
+.flowSection,
+.batchList,
+.walletList {
+  border: 1px solid var(--imports-line);
+  background: linear-gradient(180deg, rgba(13, 18, 26, 0.96), rgba(8, 12, 18, 0.98));
+  box-shadow: 0 22px 54px rgba(0, 0, 0, 0.28);
+}
+
+.header,
+.metrics,
+.importPanel,
+.sidePanel,
+.flowSection,
+.batchList,
+.walletList {
+  border-radius: 8px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 24px;
+  align-items: flex-start;
+  padding: 24px;
+}
+
+.headerCopy,
+.sectionHeader > div {
+  display: grid;
+  gap: 8px;
+}
+
+.kicker {
+  color: var(--imports-text-soft);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.title,
+.sectionHeader h2 {
+  margin: 0;
+  letter-spacing: -0.03em;
+}
+
+.title {
+  font-size: clamp(28px, 3vw, 34px);
+  line-height: 1;
+}
+
+.sectionHeader h2 {
+  font-size: 20px;
+}
+
+.description,
+.subtleText,
+.emptyState,
+.batchRow p,
+.batchRowActive p,
+.walletRow p {
+  color: var(--imports-text-soft);
+}
+
+.description {
+  margin: 0;
+  max-width: 68ch;
+  line-height: 1.65;
+}
+
+.headerActions,
+.sectionHeader,
+.modeSwitch,
+.resultStrip,
+.batchNumbers,
+.walletMeta,
+.labelCloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sectionHeader {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.primaryButton,
+.ghostButton,
+.modeLink,
+.modeActive {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  padding: 9px 12px;
+  border: 1px solid var(--imports-line);
+  border-radius: 8px;
+  color: #eff4ff;
+  text-decoration: none;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.primaryButton {
+  background: linear-gradient(135deg, #72a5ff, #5d82ff);
+  border-color: rgba(114, 165, 255, 0.35);
+}
+
+.ghostButton,
+.modeLink {
+  background: var(--imports-surface);
+}
+
+.modeActive {
+  background: rgba(114, 165, 255, 0.18);
+  border-color: rgba(114, 165, 255, 0.34);
+}
+
+.primaryButton:hover,
+.ghostButton:hover,
+.modeLink:hover,
+.modeActive:hover {
+  transform: translateY(-1px);
+  border-color: var(--imports-line-strong);
+}
+
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  padding: 12px;
+}
+
+.metric {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.metric span,
+.detailList span,
+.resultStrip span,
+.batchNumbers span,
+.walletMeta span {
+  color: var(--imports-text-soft);
+  font-size: 12px;
+}
+
+.metric strong {
+  font-size: 28px;
+  line-height: 1;
+}
+
+.workspace,
+.batchGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.importPanel,
+.sidePanel,
+.sidePanelWide,
+.flowSection,
+.batchList,
+.walletList {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+}
+
+.sidePanelWide {
+  grid-column: 1 / -1;
+}
+
+.detailList {
+  display: grid;
+  gap: 10px;
+}
+
+.detailList > div {
+  display: grid;
+  gap: 4px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.detailList strong {
+  overflow-wrap: anywhere;
+}
+
+.resultStrip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.resultStrip > div {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.labelCloud span,
+.sourceBadge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 5px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  color: #dce8f6;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 12px;
+}
+
+.sourceBadge[data-source="finder"] {
+  border-color: rgba(103, 214, 170, 0.32);
+  color: #aef0d7;
+  background: rgba(103, 214, 170, 0.1);
+}
+
+.flowRail {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.flowStep {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  min-height: 118px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.025);
+  color: #f3f7ff;
+  text-decoration: none;
+  transition:
+    transform 140ms ease,
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.flowStep:hover {
+  transform: translateY(-1px);
+  border-color: var(--imports-line-strong);
+  background: rgba(114, 165, 255, 0.07);
+}
+
+.flowStep::after {
+  content: "";
+  position: absolute;
+  top: 32px;
+  right: -10px;
+  width: 10px;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.flowStep:last-child::after {
+  display: none;
+}
+
+.flowStep span {
+  color: var(--imports-text-mute);
+  font-size: 12px;
+}
+
+.flowStep strong {
+  font-size: 28px;
+}
+
+.flowStep p {
+  margin: 0;
+  color: var(--imports-text-soft);
+}
+
+.flowStep[data-tone="finder"] {
+  border-color: rgba(103, 214, 170, 0.26);
+}
+
+.flowStep[data-tone="review"] {
+  border-color: rgba(255, 210, 122, 0.28);
+}
+
+.batchRows,
+.walletRows {
+  display: grid;
+  gap: 10px;
+}
+
+.batchRow,
+.batchRowActive,
+.walletRow {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  color: #f3f7ff;
+  text-decoration: none;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.batchRowActive {
+  border-color: rgba(114, 165, 255, 0.42);
+  background: rgba(114, 165, 255, 0.1);
+}
+
+.batchRow strong,
+.batchRowActive strong,
+.walletRow strong {
+  display: block;
+  margin-top: 8px;
+}
+
+.batchRow p,
+.batchRowActive p,
+.walletRow p {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.batchNumbers,
+.walletMeta {
+  justify-content: space-between;
+}
+
+.emptyState {
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+@media (max-width: 1180px) {
+  .workspace,
+  .batchGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .flowRail,
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .flowStep::after {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .header,
+  .sectionHeader {
+    flex-direction: column;
+  }
+
+  .metrics,
+  .flowRail,
+  .resultStrip {
+    grid-template-columns: 1fr;
+  }
+}

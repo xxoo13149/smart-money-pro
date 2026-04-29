@@ -429,6 +429,11 @@ const buildWalletFilterClauses = (input?: WalletListFilters) => {
     values.push(filters.source);
   }
 
+  if (filters.batch?.trim()) {
+    clauses.push("import_batch_id = ?");
+    values.push(filters.batch.trim());
+  }
+
   if (filters.createdAfter) {
     clauses.push("created_at >= ?");
     values.push(filters.createdAfter);
@@ -1121,6 +1126,7 @@ export const listWalletPage = async (
     createdBefore: input?.createdBefore,
     labels: input?.labels,
     source: input?.source,
+    batch: input?.batch,
     status: input?.status
   };
   const { where, values } = buildWalletFilterClauses(filters);
@@ -1166,6 +1172,7 @@ export const getWalletFacetSummary = async (
   const baseFilters: WalletListFilters = {
     q: filters?.q,
     source: filters?.source,
+    batch: filters?.batch,
     labels: filters?.labels,
     createdAfter: filters?.createdAfter,
     createdBefore: filters?.createdBefore
@@ -1181,6 +1188,7 @@ export const getWalletFacetSummary = async (
 
   const sourceCounts: Record<WalletSourceType, number> = {
     manual: 0,
+    finder: 0,
     ai: 0,
     file: 0,
     system: 0
@@ -2169,6 +2177,90 @@ export const updateWalletImportBatch = async (
     .first<Record<string, unknown>>();
 
   return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
+};
+
+export const getWalletImportBatchById = async (db: D1Database, batchId: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM wallet_import_batches WHERE id = ?`)
+    .bind(batchId)
+    .first<Record<string, unknown>>();
+
+  return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
+};
+
+export const listWalletImportBatches = async (
+  db: D1Database,
+  input?: {
+    limit?: number;
+  }
+) => {
+  const limit = Math.max(1, Math.min(100, Math.trunc(input?.limit ?? 20)));
+  const result = await db
+    .prepare(
+      `SELECT *
+       FROM wallet_import_batches
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<Record<string, unknown>>();
+
+  return (result.results ?? []).map((row) => toWalletImportBatch(mapImportBatchRow(row)));
+};
+
+export const listWalletImportBatchesByIds = async (db: D1Database, batchIds: string[]) => {
+  if (batchIds.length === 0) {
+    return new Map<string, WalletImportBatch>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(batchIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT *
+             FROM wallet_import_batches
+             WHERE id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return rows.reduce((map, row) => {
+    const batch = toWalletImportBatch(mapImportBatchRow(row));
+    map.set(batch.id, batch);
+    return map;
+  }, new Map<string, WalletImportBatch>());
+};
+
+export const listWalletsByImportBatchIds = async (db: D1Database, batchIds: string[]) => {
+  if (batchIds.length === 0) {
+    return [];
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(batchIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT *
+             FROM wallets
+             WHERE import_batch_id IN (${buildPlaceholders(chunk)})
+             ORDER BY updated_at DESC, created_at DESC`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return rows.map(mapWalletRow);
 };
 
 export const getExtensionUserByNormalizedEmail = async (db: D1Database, normalizedEmail: string) => {

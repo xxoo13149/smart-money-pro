@@ -3,8 +3,11 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "predev": "npm run build --workspace @weather-smart-money/core && npm run build --workspace @weather-smart-money/data",
     "dev": "next dev",
+    "prebuild": "npm run build --workspace @weather-smart-money/core && npm run build --workspace @weather-smart-money/data",
     "build": "next build",
+    "prebuild:cloudflare": "npm run build --workspace @weather-smart-money/core && npm run build --workspace @weather-smart-money/data",
     "build:cloudflare": "opennextjs-cloudflare build",
     "preview:cloudflare": "opennextjs-cloudflare preview",
     "deploy": "npm run build:cloudflare && node ../../scripts/wrangler-cli.mjs deploy -c wrangler.jsonc",

@@ -1,6 +1,7 @@
 import "./globals.css";
 import Link from "next/link";
 
+import { AdminNav } from "../components/AdminNav";
 import { getAdminLayoutState } from "../lib/admin-auth";
 
 export const dynamic = "force-dynamic";
@@ -22,13 +23,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
             <div className="header__actions">
               {authState.session ? (
                 <>
-                  <nav className="nav">
-                    <Link href="/">首页</Link>
-                    <Link href="/wallets">地址库</Link>
-                    <Link href="/alerts">预警</Link>
-                    <Link href="/runtime">运行时</Link>
-                    <Link href="/extension">扩展</Link>
-                  </nav>
+                  <AdminNav />
                   <div className="header__session">
                     <span className="header__session-label">{authState.session.user.email}</span>
                     <form action="/api/auth/logout" method="post">

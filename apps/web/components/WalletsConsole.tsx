@@ -16,7 +16,7 @@ import type { WalletDetailData } from "../lib/data";
 import { stringifyWalletListQuery } from "../lib/wallets-query";
 import { Modal } from "./Modal";
 import { WalletCreateForm } from "./WalletCreateForm";
-import { WalletImportPanel } from "./WalletImportPanel";
+import { WalletImportPanel, type WalletImportSourceMode } from "./WalletImportPanel";
 import styles from "./WalletsConsole.module.css";
 
 type ColumnPreset = "compact" | "standard" | "review";
@@ -56,6 +56,7 @@ const LIMIT_OPTIONS = [50, 100, 200] as const;
 const SOURCE_OPTIONS = [
   { value: "all", label: "全部来源" },
   { value: "manual", label: "手动录入" },
+  { value: "finder", label: "Finder 导入" },
   { value: "ai", label: "AI 导入" },
   { value: "file", label: "文件导入" },
   { value: "system", label: "系统内置" }
@@ -251,6 +252,7 @@ export const WalletsConsole = ({
   const [helpOpen, setHelpOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [importSourceMode, setImportSourceMode] = useState<WalletImportSourceMode>("file");
   const [optimisticDeletedIds, setOptimisticDeletedIds] = useState<string[]>([]);
   const [armedDeleteId, setArmedDeleteId] = useState<string | null>(null);
   const [deletePendingId, setDeletePendingId] = useState<string | null>(null);
@@ -1225,8 +1227,21 @@ export const WalletsConsole = ({
           </p>
         </div>
         <div className={styles.headerActions}>
-          <button type="button" className={styles.primaryButton} onClick={() => setImportOpen(true)}>
-            AI 导入
+          <Link href="/imports" className={styles.primaryButton}>
+            导入中心
+          </Link>
+          <Link href="/imports/finder" className={styles.ghostButton}>
+            Finder 对接
+          </Link>
+          <button
+            type="button"
+            className={styles.ghostButton}
+            onClick={() => {
+              setImportSourceMode("file");
+              setImportOpen(true);
+            }}
+          >
+            快速导入
           </button>
           <button type="button" className={styles.ghostButton} onClick={() => setCreateOpen(true)}>
             手动新增
@@ -1598,6 +1613,14 @@ export const WalletsConsole = ({
                               <span className={styles.sourcePill}>{row.sourceMeta.label}</span>
                               {row.wallet.watchlisted ? <span className={styles.panelTag}>Watchlist</span> : null}
                             </div>
+                            {row.sourceMeta.sourceName || row.sourceMeta.importBatchId ? (
+                              <div className={styles.identitySubtle}>
+                                {row.sourceMeta.sourceName ?? "未命名批次"}
+                                {row.sourceMeta.importBatchId
+                                  ? ` · 批次 ${row.sourceMeta.importBatchId.slice(0, 8)}`
+                                  : ""}
+                              </div>
+                            ) : null}
                           </div>
 
                           <div className={styles.rowActions} data-delete-scope={row.wallet.id}>
@@ -2080,6 +2103,28 @@ export const WalletsConsole = ({
                     </strong>
                   </div>
                   <div className={styles.metaRow}>
+                    <span>来源批次</span>
+                    <strong>
+                      {visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.importBatchId ??
+                        "未关联"}
+                    </strong>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>来源名称</span>
+                    <strong>
+                      {visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.sourceName ??
+                        "未记录"}
+                    </strong>
+                  </div>
+                  <div className={styles.metaRow}>
+                    <span>导入时间</span>
+                    <strong>
+                      {formatDate(
+                        visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.importedAt
+                      )}
+                    </strong>
+                  </div>
+                  <div className={styles.metaRow}>
                     <span>创建时间</span>
                     <strong>{formatDate(panelWallet.createdAt)}</strong>
                   </div>
@@ -2314,11 +2359,16 @@ export const WalletsConsole = ({
 
       <Modal
         open={importOpen}
-        title="AI 导入地址"
-        description="支持文件上传和文本粘贴，固定走“先预览再确认写库”，不会直接自动入库。"
+        title={importSourceMode === "finder" ? "从 Finder 导入地址" : "AI 导入地址"}
+        description={
+          importSourceMode === "finder"
+            ? "读取 Finder 当前候选地址，先生成预览，确认后再写入地址库。"
+            : "支持文件上传和文本粘贴，固定走“先预览再确认写库”，不会直接自动入库。"
+        }
         onClose={() => setImportOpen(false)}
       >
         <WalletImportPanel
+          initialSourceMode={importSourceMode}
           onCommitted={() => {
             setImportOpen(false);
             refreshWorkspace();

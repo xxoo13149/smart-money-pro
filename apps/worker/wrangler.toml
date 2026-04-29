@@ -1,28 +1,30 @@
 name = "smart-money-edge"
 main = "src/index.ts"
 compatibility_date = "2026-04-07"
-routes = [{ pattern = "app.example.com", custom_domain = true }]
+routes = [{ pattern = "app.lukaluka.fun", custom_domain = true }]
 
 [vars]
-ADMIN_BASE_URL = "https://admin.example.com"
-ADMIN_APPROVAL_OWNER_EMAIL = "owner@example.com"
-ADMIN_APPROVAL_SENDER_EMAIL = "noreply@example.com"
+ADMIN_BASE_URL = "https://admin.lukaluka.fun"
+ADMIN_APPROVAL_OWNER_EMAIL = "3236064212@qq.com"
+ADMIN_APPROVAL_SENDER_EMAIL = "noreply@lukaluka.fun"
 ADMIN_APPROVAL_SENDER_NAME = "Smart Money Admin"
-PUBLIC_EXTENSION_BASE_URL = "https://app.example.com"
+ADMIN_APPROVAL_CODE_TTL_MINUTES = "10"
+ADMIN_APPROVAL_RESEND_COOLDOWN_SECONDS = "60"
+PUBLIC_EXTENSION_BASE_URL = "https://app.lukaluka.fun"
 POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
 POLYMARKET_DATA_URL = "https://data-api.polymarket.com"
 
 [[send_email]]
 name = "ADMIN_APPROVAL_EMAIL"
-destination_address = "owner@example.com"
-allowed_sender_addresses = ["noreply@example.com"]
+destination_address = "3236064212@qq.com"
+allowed_sender_addresses = ["noreply@lukaluka.fun"]
 
 [[kv_namespaces]]
 binding = "SMART_MONEY_CACHE"
-id = "kv_namespace_id"
-preview_id = "kv_namespace_preview_id"
+id = "330bf98ab1f5497da68fba5c37152e02"
+preview_id = "330bf98ab1f5497da68fba5c37152e02"
 
 [[d1_databases]]
 binding = "SMART_MONEY_DB"
 database_name = "smart-money-prod"
-database_id = "d1_database_id"
+database_id = "04eb8a8b-1479-4ad3-b2af-901f356ab64c"

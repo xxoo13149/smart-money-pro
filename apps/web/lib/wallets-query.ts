@@ -23,6 +23,7 @@ const VALID_STATUSES = new Set<WalletListStatus>([
 const VALID_SOURCES = new Set<WalletSourceType | "all">([
   "all",
   "manual",
+  "finder",
   "ai",
   "file",
   "system"
@@ -76,6 +77,7 @@ export const normalizeWalletListQuery = (input?: Partial<WalletListQuery>): Wall
     view: input?.view?.trim() || undefined,
     status: normalizedStatus,
     source: normalizedSource,
+    batch: input?.batch?.trim() || undefined,
     labels: normalizedLabels.length > 0 ? normalizedLabels : undefined,
     sort: normalizedSort,
     cursor: input?.cursor?.trim() || undefined,
@@ -107,6 +109,7 @@ export const parseWalletListQueryInput = (
     source: sourceRaw && VALID_SOURCES.has(sourceRaw as WalletSourceType | "all")
       ? (sourceRaw as WalletSourceType | "all")
       : undefined,
+    batch: readSingleValue(source, "batch"),
     labels: readValues(source, "labels"),
     sort: sortRaw && VALID_SORTS.has(sortRaw as WalletListSort)
       ? (sortRaw as WalletListSort)
@@ -136,6 +139,7 @@ export const resolveWalletListQuery = (
     q: input?.q !== undefined ? input.q : savedViewQuery?.q,
     status: input?.status !== undefined ? input.status : savedViewQuery?.status,
     source: input?.source !== undefined ? input.source : savedViewQuery?.source,
+    batch: input?.batch !== undefined ? input.batch : savedViewQuery?.batch,
     labels: input?.labels !== undefined ? input.labels : savedViewQuery?.labels,
     sort: input?.sort !== undefined ? input.sort : savedViewQuery?.sort,
     cursor: input?.cursor,
@@ -169,6 +173,7 @@ export const sanitizeWalletSavedViewQuery = (
     q: normalized.q,
     status: normalized.status,
     source: normalized.source,
+    batch: normalized.batch,
     labels: normalized.labels,
     sort: normalized.sort,
     limit: normalized.limit,
@@ -186,6 +191,7 @@ export const stringifyWalletListQuery = (query?: WalletListQuery) => {
   if (normalized.view) params.set("view", normalized.view);
   if (normalized.status && normalized.status !== "all") params.set("status", normalized.status);
   if (normalized.source && normalized.source !== "all") params.set("source", normalized.source);
+  if (normalized.batch) params.set("batch", normalized.batch);
   if (normalized.sort && normalized.sort !== DEFAULT_SORT) params.set("sort", normalized.sort);
   if (normalized.cursor) params.set("cursor", normalized.cursor);
   if (normalized.limit && normalized.limit !== DEFAULT_LIMIT) {
