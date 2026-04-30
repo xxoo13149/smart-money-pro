@@ -7,6 +7,8 @@ import {
   type WalletMetrics
 } from "@weather-smart-money/core";
 
+import { AppLink } from "./AppLink";
+
 export const WalletPreview = ({
   wallet,
   metrics,
@@ -18,7 +20,7 @@ export const WalletPreview = ({
   labels: WalletLabel[];
   alerts: AlertEvent[];
 }) => (
-  <Link href={`/wallets/${wallet.id}`} className="wallet-link">
+  <AppLink href={`/wallets/${wallet.id}`} className="wallet-link">
     <article className="wallet-preview">
       <div className="subtle-row">
         <span className="eyebrow">{wallet.watchlisted ? "Watchlisted" : "Observation"}</span>
@@ -47,5 +49,5 @@ export const WalletPreview = ({
         <span>{wallet.strategyFocus}</span>
       </div>
     </article>
-  </Link>
+  </AppLink>
 );

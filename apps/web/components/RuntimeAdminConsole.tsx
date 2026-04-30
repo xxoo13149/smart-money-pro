@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
+import { AppLink } from "./AppLink";
 import { Metric } from "./Metric";
 import { Section } from "./Section";
 
@@ -291,7 +291,7 @@ const KeyValueRow = ({
 );
 
 const InlineActionLink = ({ href, children }: { href: string; children: React.ReactNode }) => (
-  <Link
+  <AppLink
     href={href}
     className="secondary-button"
     style={{
@@ -301,7 +301,7 @@ const InlineActionLink = ({ href, children }: { href: string; children: React.Re
     }}
   >
     {children}
-  </Link>
+  </AppLink>
 );
 
 export function RuntimeAdminConsole() {

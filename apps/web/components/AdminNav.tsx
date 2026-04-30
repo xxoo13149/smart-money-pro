@@ -1,8 +1,9 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+
+import { AppLink } from "./AppLink";
 
 const navItems = [
   { href: "/", label: "首页" },
@@ -38,14 +39,14 @@ export function AdminNav() {
           .join(" ");
 
         return (
-          <Link
+          <AppLink
             key={item.href}
             href={item.href}
             className={className}
             onClick={() => setPendingHref(item.href)}
           >
             {item.label}
-          </Link>
+          </AppLink>
         );
       })}
     </nav>

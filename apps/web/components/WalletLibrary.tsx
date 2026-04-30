@@ -1,9 +1,10 @@
 "use client";
 
 import { startTransition, useDeferredValue, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { WalletAdminRow } from "@weather-smart-money/core";
+
+import { AppLink } from "./AppLink";
 
 const shortAddress = (address: string) =>
   address.length > 18 ? `${address.slice(0, 8)}...${address.slice(-6)}` : address;
@@ -140,9 +141,9 @@ export const WalletLibrary = ({ rows }: { rows: WalletAdminRow[] }) => {
                   </td>
                   <td>
                     <div className="row-actions">
-                      <Link href={`/wallets/${row.wallet.id}`} className="secondary-button small-button">
+                      <AppLink href={`/wallets/${row.wallet.id}`} className="secondary-button small-button">
                         查看详情
-                      </Link>
+                      </AppLink>
                       <button
                         type="button"
                         className="danger-button small-icon-button"

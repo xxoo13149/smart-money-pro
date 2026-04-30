@@ -1,7 +1,6 @@
 ﻿"use client";
 
 import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type {
   WalletAdminRow,
@@ -14,6 +13,7 @@ import type {
 
 import type { WalletDetailData } from "../lib/data";
 import { stringifyWalletListQuery } from "../lib/wallets-query";
+import { AppLink } from "./AppLink";
 import { Modal } from "./Modal";
 import { WalletCreateForm } from "./WalletCreateForm";
 import { WalletImportPanel, type WalletImportSourceMode } from "./WalletImportPanel";
@@ -1227,12 +1227,12 @@ export const WalletsConsole = ({
           </p>
         </div>
         <div className={styles.headerActions}>
-          <Link href="/imports" className={styles.primaryButton}>
+          <AppLink href="/imports" className={styles.primaryButton}>
             导入中心
-          </Link>
-          <Link href="/imports/finder" className={styles.ghostButton}>
+          </AppLink>
+          <AppLink href="/imports/finder" className={styles.ghostButton}>
             Finder 对接
-          </Link>
+          </AppLink>
           <button
             type="button"
             className={styles.ghostButton}
@@ -1795,9 +1795,9 @@ export const WalletsConsole = ({
                 </button>
               ) : null}
               {reviewWallet ? (
-                <Link className={styles.ghostButton} href={`/wallets/${reviewWallet.id}`}>
+                <AppLink className={styles.ghostButton} href={`/wallets/${reviewWallet.id}`}>
                   打开详情页
-                </Link>
+                </AppLink>
               ) : null}
               <button type="button" className={styles.iconButton} onClick={() => setReviewTrayOpen(false)}>
                 暂时收起
@@ -2333,9 +2333,9 @@ export const WalletsConsole = ({
               </div>
 
               <div className={styles.panelFooter}>
-                <Link className={styles.detailLink} href={`/wallets/${panelWallet.id}`}>
+                <AppLink className={styles.detailLink} href={`/wallets/${panelWallet.id}`}>
                   打开完整详情页
-                </Link>
+                </AppLink>
               </div>
             </>
           ) : null}

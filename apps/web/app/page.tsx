@@ -1,6 +1,7 @@
 ﻿import Link from "next/link";
 
 import { AlertRow } from "../components/AlertRow";
+import { AppLink } from "../components/AppLink";
 import { Metric } from "../components/Metric";
 import { Section } from "../components/Section";
 import { WalletPreview } from "../components/WalletPreview";
@@ -19,7 +20,7 @@ export default async function HomePage() {
       <Section
         title="今日 Polymarket 工作台"
         description="把重点市场、聪明钱地址和红旗预警放在一屏内，先判断，再跟踪。"
-        action={<Link href="/wallets">管理地址库</Link>}
+        action={<AppLink href="/wallets">管理地址库</AppLink>}
       >
         <div className="grid">
           <Metric label="活跃市场" value={data.summary.activeWeatherMarkets} />
@@ -45,7 +46,11 @@ export default async function HomePage() {
         </div>
       </Section>
 
-      <Section title="核心地址" description="优先盯稳曲线、专精和已加入观察列表的钱包。" action={<Link href="/wallets">查看全部</Link>}>
+      <Section
+        title="核心地址"
+        description="优先盯稳曲线、专精和已加入观察列表的钱包。"
+        action={<AppLink href="/wallets">查看全部</AppLink>}
+      >
         <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
           {spotlightWallets.map((item) => (
             <WalletPreview
@@ -61,7 +66,11 @@ export default async function HomePage() {
         </div>
       </Section>
 
-      <Section title="待处理红旗" description="高分事件优先处理，点进地址详情后可以继续写备注、打标签和加入 watchlist。" action={<Link href="/alerts">前往预警中心</Link>}>
+      <Section
+        title="待处理红旗"
+        description="高分事件优先处理，点进地址详情后可以继续写备注、打标签和加入 watchlist。"
+        action={<AppLink href="/alerts">前往预警中心</AppLink>}
+      >
         <div className="stack-list">
           {data.alerts.slice(0, 4).map((item) => (
             <div key={item.alert.id} className="alert-shell">

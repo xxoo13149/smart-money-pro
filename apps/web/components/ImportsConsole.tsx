@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { WalletImportBatch, WalletSourceType } from "@weather-smart-money/core";
 
 import type { WalletImportsPageData, WalletImportBatchSummary } from "../lib/data";
+import { AppLink } from "./AppLink";
 import { WalletImportPanel, type WalletImportSourceMode } from "./WalletImportPanel";
 import styles from "./ImportsConsole.module.css";
 
@@ -148,12 +149,12 @@ export function ImportsConsole({
           <p className={styles.description}>{pageCopy.description}</p>
         </div>
         <div className={styles.headerActions}>
-          <Link href={pageCopy.primaryHref} className={styles.primaryButton}>
+          <AppLink href={pageCopy.primaryHref} className={styles.primaryButton}>
             {pageCopy.primaryLabel}
-          </Link>
-          <Link href={pageCopy.secondaryHref} className={styles.ghostButton}>
+          </AppLink>
+          <AppLink href={pageCopy.secondaryHref} className={styles.ghostButton}>
             {pageCopy.secondaryLabel}
-          </Link>
+          </AppLink>
         </div>
       </section>
 
@@ -189,24 +190,24 @@ export function ImportsConsole({
                 <h2>{view === "finder" ? "同步 Finder 候选" : "发起导入"}</h2>
               </div>
               <div className={styles.modeSwitch}>
-                <Link
+                <AppLink
                   href={getModeHref("finder")}
                   className={initialSourceMode === "finder" ? styles.modeActive : styles.modeLink}
                 >
                   Finder
-                </Link>
-                <Link
+                </AppLink>
+                <AppLink
                   href={getModeHref("file")}
                   className={initialSourceMode === "file" ? styles.modeActive : styles.modeLink}
                 >
                   文件
-                </Link>
-                <Link
+                </AppLink>
+                <AppLink
                   href={getModeHref("paste")}
                   className={initialSourceMode === "paste" ? styles.modeActive : styles.modeLink}
                 >
                   粘贴
-                </Link>
+                </AppLink>
               </div>
             </div>
             <WalletImportPanel initialSourceMode={initialSourceMode} />
@@ -294,11 +295,11 @@ export function ImportsConsole({
         </div>
         <div className={styles.flowRail}>
           {workflow.map((step, index) => (
-            <Link key={step.label} href={step.href} className={styles.flowStep} data-tone={step.tone}>
+            <AppLink key={step.label} href={step.href} className={styles.flowStep} data-tone={step.tone}>
               <span>{String(index + 1).padStart(2, "0")}</span>
               <strong>{step.value}</strong>
               <p>{step.label}</p>
-            </Link>
+            </AppLink>
           ))}
         </div>
       </section>
@@ -317,7 +318,7 @@ export function ImportsConsole({
               data.batches.map((summary) => {
                 const active = selectedBatch?.batch.id === summary.batch.id;
                 return (
-                  <Link
+                  <AppLink
                     key={summary.batch.id}
                     href={getBatchHref(summary.batch.id)}
                     className={active ? styles.batchRowActive : styles.batchRow}
@@ -334,7 +335,7 @@ export function ImportsConsole({
                       <span>{summary.batch.updatedCount} 更新</span>
                       <span>{summary.batch.failedCount} 失败</span>
                     </div>
-                  </Link>
+                  </AppLink>
                 );
               })
             ) : (
@@ -362,7 +363,7 @@ export function ImportsConsole({
           <div className={styles.walletRows}>
             {data.selectedBatchRows.length > 0 ? (
               data.selectedBatchRows.map((row) => (
-                <Link
+                <AppLink
                   key={row.wallet.id}
                   href={getWalletBatchHref(
                     selectedBatch?.batch.id ?? row.wallet.importBatchId ?? "",
@@ -381,7 +382,7 @@ export function ImportsConsole({
                     <span>{row.labels.filter((label) => label.source !== "user").length} AI 标签</span>
                     <span>{row.wallet.curationStatus === "review_needed" ? "去审阅" : "查看链路"}</span>
                   </div>
-                </Link>
+                </AppLink>
               ))
             ) : (
               <div className={styles.emptyState}>当前批次没有可展示的地址行。</div>
