@@ -14,13 +14,12 @@ This repository can publish the admin Worker through Cloudflare Workers Builds i
 - The admin app now completes `npm run build:cloudflare -w apps/web` locally with the current working tree.
 - The `apps/web` package now rebuilds `@weather-smart-money/core` and `@weather-smart-money/data` automatically before `dev`, `build`, and `build:cloudflare`, which fixes the stale-internal-package runtime breakage that caused page switching failures.
 - Direct deploys from this Windows machine still fail while uploading the Worker script body to Cloudflare with `ECONNRESET` / `socket hang up`, even after retrying with a minified bundle.
-- The existing Worker `smart-money-admin` is present in Cloudflare, and Workers Builds is now partially wired:
+- The existing Worker `smart-money-admin` is present in Cloudflare, and Workers Builds is now active:
   - repo connection is active for `xxoo13149/smart-money-pro`
   - a user-owned build token exists
   - both production and non-production triggers exist and were updated through the Cloudflare API
-- The deployment snapshot commit exists locally on branch `codex/workers-builds-admin-2026-04-30`, but pushing that branch to GitHub from this Windows machine currently fails with `Recv failure: Connection was reset`.
-- The older remote branch `codex/backup-2026-04-09` does not include the current local fixes, so Workers Builds should point at the deployment snapshot branch above after that branch is pushed successfully.
-- A manual production build triggered from the older remote branch fails in Cloudflare because that branch does not contain the later `prebuild` / `prebuild:cloudflare` fix in `apps/web/package.json`.
+- The deployment snapshot branch `codex/workers-builds-admin-2026-04-30` now exists on GitHub and is the current production branch configured in Cloudflare Workers Builds.
+- Cloudflare production build `9f625865-cc93-4b18-95e5-e75289f2ec3b` completed successfully on `2026-04-30T04:32:39.601Z`.
 
 ## Recommended Workers Builds settings
 
@@ -66,10 +65,10 @@ The bindings already declared in `apps/web/wrangler.jsonc` should continue to po
 ## First rollout checklist
 
 1. In Cloudflare, open the Worker `smart-money-admin`.
-2. Enable Workers Builds and connect or reconnect `xxoo13149/smart-money-pro`.
-3. Fill in the branch, root directory, build command, and deploy command above.
+2. Ensure Workers Builds stays connected to `xxoo13149/smart-money-pro`.
+3. Keep the branch, root directory, build command, and deploy command above.
 4. Verify the existing Worker secrets are still present.
-5. Trigger the first production build from `codex/workers-builds-admin-2026-04-30`.
+5. Trigger a production build from `codex/workers-builds-admin-2026-04-30` when admin app changes are ready.
 6. After the build succeeds, confirm `admin.lukaluka.fun` is serving the new deployment.
 
 ## Why this route
