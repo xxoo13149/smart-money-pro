@@ -244,6 +244,7 @@ type ContentRuntimeMessage =
   };
   const FEED_TOP_HOLDERS_TITLES = ["Top Holders", "顶级持仓者"];
   const FEED_COMMENTS_TITLES = ["Comments", "评论"];
+  const FEED_POSITIONS_TITLES = ["Positions", "持仓"];
   const FEED_ACTIVITY_TITLES = ["Activity", "活动"];
   const MAIN_YES_TITLES = ["Yes holders", "Yes Holders", "Yes 持仓者"];
   const MAIN_NO_TITLES = ["No holders", "No Holders", "No 持仓者"];
@@ -260,6 +261,7 @@ type ContentRuntimeMessage =
   const TITLE_SELECTOR = "button,div,span,p,h2,h3,h4";
   const FEED_TOP_HOLDERS_LABELS = ["Top Holders", "顶级持仓者"];
   const FEED_COMMENTS_LABELS = ["Comments", "评论"];
+  const FEED_POSITIONS_LABELS = ["Positions", "持仓"];
   const FEED_ACTIVITY_LABELS = ["Activity", "活动"];
   const MAIN_YES_LABELS = ["Yes holders", "Yes Holders", "Yes 持仓者"];
   const MAIN_NO_LABELS = ["No holders", "No Holders", "No 持仓者"];
@@ -488,6 +490,18 @@ type ContentRuntimeMessage =
     });
 
     return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
+  };
+
+  const getTextWithoutInjectedAnnotations = (element: HTMLElement) => {
+    const clone = element.cloneNode(true);
+    if (!(clone instanceof HTMLElement)) {
+      return compactText(element.textContent);
+    }
+
+    clone
+      .querySelectorAll(`.${ROOT_CLASS}, [data-wsmx-hover-trigger='1']`)
+      .forEach((node) => node.remove());
+    return compactText(clone.textContent);
   };
 
   const truncateText = (value: string | null | undefined, maxLength: number) => {
@@ -1013,9 +1027,21 @@ type ContentRuntimeMessage =
       (anchor) => !anchor.closest(`.${ROOT_CLASS}`) && isVisible(anchor)
     );
 
+  const collectProfileAnchors = (root: ParentNode) =>
+    Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href*="/profile/"]')).filter(
+      (anchor) => !anchor.closest(`.${ROOT_CLASS}`)
+    );
+
   const countUniqueProfileAddresses = (element: ParentNode) =>
     new Set(
       collectVisibleProfileAnchors(element)
+        .map((anchor) => resolveProfileAddress(anchor))
+        .filter((address): address is string => Boolean(address))
+    ).size;
+
+  const countAllProfileAddresses = (element: ParentNode) =>
+    new Set(
+      collectProfileAnchors(element)
         .map((anchor) => resolveProfileAddress(anchor))
         .filter((address): address is string => Boolean(address))
     ).size;
@@ -1233,20 +1259,32 @@ type ContentRuntimeMessage =
     return texts.some((label) => text === label || text.includes(label));
   };
 
+  const getFeedStripButtons = (element: HTMLElement) => {
+    const directButtons = Array.from(element.querySelectorAll<HTMLButtonElement>(":scope > button")).filter((button) =>
+      isVisible(button)
+    );
+    if (directButtons.length >= 3) {
+      return directButtons;
+    }
+
+    return Array.from(element.querySelectorAll<HTMLButtonElement>(":scope > * > button")).filter((button) =>
+      isVisible(button)
+    );
+  };
+
   const findFeedTabStrip = () =>
     Array.from(document.querySelectorAll<HTMLElement>("div")).find((element) => {
       if (!isVisible(element)) {
         return false;
       }
-      const buttons = Array.from(element.querySelectorAll<HTMLButtonElement>("button")).filter((button) =>
-        isVisible(button)
-      );
-      return (
-        buttons.length >= 3 &&
-        buttons.some((button) => hasTabText(button, FEED_COMMENTS_LABELS)) &&
-        buttons.some((button) => hasTabText(button, FEED_TOP_HOLDERS_LABELS)) &&
+      const buttons = getFeedStripButtons(element);
+      const matchedCount = [
+        buttons.some((button) => hasTabText(button, FEED_COMMENTS_LABELS)),
+        buttons.some((button) => hasTabText(button, FEED_TOP_HOLDERS_LABELS)),
+        buttons.some((button) => hasTabText(button, FEED_POSITIONS_LABELS)),
         buttons.some((button) => hasTabText(button, FEED_ACTIVITY_LABELS))
-      );
+      ].filter(Boolean).length;
+      return buttons.length >= 3 && buttons.length <= 6 && matchedCount >= 3;
     }) ?? null;
 
   const findTopHoldersTabButton = () => {
@@ -1255,7 +1293,7 @@ type ContentRuntimeMessage =
       return null;
     }
     return (
-      Array.from(strip.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+      getFeedStripButtons(strip).find((button) =>
         isVisible(button) && hasTabText(button, FEED_TOP_HOLDERS_LABELS)
       ) ?? null
     );
@@ -1291,7 +1329,8 @@ type ContentRuntimeMessage =
 
     const text = compactText(element.textContent);
     const profileCount = countUniqueProfileAddresses(element);
-    if (!text || profileCount < 2 || text.length > 3200) {
+    const allProfileCount = countAllProfileAddresses(element);
+    if (!text || Math.max(profileCount, allProfileCount) < 2 || text.length > 4200) {
       return false;
     }
 
@@ -1343,6 +1382,87 @@ type ContentRuntimeMessage =
     }
 
     return scoredCandidates.sort((left, right) => right.score - left.score)[0]?.element ?? null;
+  };
+
+  const collectFeedPanelCandidates = (strip: HTMLElement | null) => {
+    if (!strip) {
+      return [];
+    }
+
+    const stripRect = strip.getBoundingClientRect();
+    const stripTop = stripRect.top + window.scrollY;
+    const stripBottom = stripRect.bottom + window.scrollY;
+    const candidateElements = new Set<HTMLElement>();
+
+    const pushVisibleSiblings = (element: HTMLElement | null) => {
+      let current = element?.nextElementSibling;
+      while (current instanceof HTMLElement) {
+        if (isVisible(current)) {
+          candidateElements.add(current);
+        }
+        current = current.nextElementSibling;
+      }
+    };
+
+    pushVisibleSiblings(strip);
+    pushVisibleSiblings(strip.parentElement instanceof HTMLElement ? strip.parentElement : null);
+    pushVisibleSiblings(strip.parentElement?.parentElement instanceof HTMLElement ? strip.parentElement.parentElement : null);
+    pushVisibleSiblings(
+      strip.parentElement?.parentElement?.parentElement instanceof HTMLElement
+        ? strip.parentElement.parentElement.parentElement
+        : null
+    );
+
+    [...candidateElements].forEach((element) => {
+      Array.from(element.querySelectorAll<HTMLElement>("div, section, article"))
+        .filter((child) => child !== element && isVisible(child))
+        .forEach((child) => candidateElements.add(child));
+    });
+
+    Array.from(document.querySelectorAll<HTMLElement>("div, section, article"))
+      .filter((element) => isVisible(element))
+      .forEach((element) => {
+        if (element.contains(strip) || strip.contains(element)) {
+          return;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const top = rect.top + window.scrollY;
+        if (top < stripTop - 40 || top > stripBottom + 1600) {
+          return;
+        }
+
+        if (element.querySelector('a[href*="/profile/"]')) {
+          candidateElements.add(element);
+        }
+      });
+
+    return [...candidateElements]
+      .map((element) => {
+        const profileCount = countUniqueProfileAddresses(element);
+        const allProfileCount = countAllProfileAddresses(element);
+        const rowCount = extractHolderRows(element, "feed-top-holders").length;
+        const commentArticleCount = element.querySelectorAll("article.comment").length;
+        const className = getElementClassName(element);
+        const text = compactText(element.textContent);
+        let score = rowCount * 40 + profileCount * 16 + allProfileCount * 6;
+        score -= commentArticleCount * 300;
+        score -= element.querySelectorAll("button").length * 4;
+        score -= Math.max(0, Math.round(element.getBoundingClientRect().height) - 900) / 8;
+        if (
+          hasAnyTitle(text, FEED_COMMENTS_LABELS) ||
+          hasAnyTitle(text, FEED_POSITIONS_LABELS) ||
+          hasAnyTitle(text, FEED_ACTIVITY_LABELS)
+        ) {
+          score -= 80;
+        }
+        if (className.includes("overflow-x-auto")) {
+          score -= 40;
+        }
+        return { element, score, rowCount, profileCount, allProfileCount };
+      })
+      .filter((candidate) => Math.max(candidate.profileCount, candidate.allProfileCount) >= 2 || candidate.rowCount >= 2)
+      .sort((left, right) => right.score - left.score);
   };
 
   const resolveColumnHeader = (
@@ -1618,7 +1738,7 @@ type ContentRuntimeMessage =
 
   const findNameLineContainer = (anchor: HTMLAnchorElement, row: HTMLElement) =>
     findAncestor(anchor.parentElement, row, (element) => {
-      const text = compactText(element.textContent);
+      const text = getTextWithoutInjectedAnnotations(element);
       const className = getElementClassName(element);
       return (
         text.length > 0 &&
@@ -1811,12 +1931,14 @@ type ContentRuntimeMessage =
 
   const detectFeedTopHoldersSurface = (): HolderPanelSnapshot | null => {
     const button = findTopHoldersTabButton();
-    if (!button) {
+    const strip = findFeedTabStrip();
+    const panelCandidates = collectFeedPanelCandidates(strip);
+    const candidatePanel = panelCandidates[0]?.element ?? null;
+    if (!button && !strip && !candidatePanel) {
       return null;
     }
 
-    const strip = findFeedTabStrip();
-    const commentsSection = button.closest<HTMLElement>("#comments");
+    const commentsSection = button?.closest<HTMLElement>("#comments") ?? strip?.closest<HTMLElement>("#comments") ?? null;
     const panel = findFeedTopHoldersPanel(button);
     const fallbackScope = uniqueElements([
       commentsSection?.nextElementSibling instanceof HTMLElement ? commentsSection.nextElementSibling : null,
@@ -1830,25 +1952,34 @@ type ContentRuntimeMessage =
     ])[0] ?? null;
     const structured =
       (panel ? buildStructuredSurfaceCandidate(panel, "feed-top-holders") : null) ??
+      (candidatePanel ? buildStructuredSurfaceCandidate(candidatePanel, "feed-top-holders") : null) ??
       (fallbackScope ? buildStructuredSurfaceCandidate(fallbackScope, "feed-top-holders") : null);
-    const active = Boolean(panel || structured) || isTopHoldersTabActive(button);
+    const active = Boolean(panel || candidatePanel || structured) || isTopHoldersTabActive(button);
     const root =
       structured?.root ??
       panel ??
-      button.closest<HTMLElement>("section") ??
-      button.parentElement?.parentElement ??
-      button.parentElement ??
+      candidatePanel ??
+      button?.closest<HTMLElement>("section") ??
+      button?.parentElement?.parentElement ??
+      button?.parentElement ??
+      strip ??
       button;
+
+    if (!root) {
+      return null;
+    }
 
     return {
       panelKey: `feed:${buildDomPath(root, document.body)}`,
-      titleText: compactText(button.textContent) || "Top Holders",
+      titleText: compactText(button?.textContent) || "Top Holders",
       active,
       surfaceKind: "feed-top-holders",
-      confidence: structured ? structured.confidence : active && panel ? 0.86 : 0.52,
+      confidence: structured ? structured.confidence : active && (panel || candidatePanel) ? 0.86 : 0.52,
       root,
-      rows: structured?.rows ?? (panel ? extractHolderRows(panel, "feed-top-holders") : []),
-      fallbackAnchor: structured?.fallbackAnchor ?? panel ?? root
+      rows:
+        structured?.rows ??
+        (panel ? extractHolderRows(panel, "feed-top-holders") : candidatePanel ? extractHolderRows(candidatePanel, "feed-top-holders") : []),
+      fallbackAnchor: structured?.fallbackAnchor ?? panel ?? candidatePanel ?? root
     };
   };
 
@@ -1909,10 +2040,11 @@ type ContentRuntimeMessage =
   ): ResolvedInlineAnnotation => {
     const aliasText = summary.alias?.trim() || row.displayNameText || holder.displayName || shortenAddress(holder.proxyWallet);
     const primaryBadge = selectPrimaryBadge(summary, aliasText, holder.displayName);
+    const mountKey = getRowMountKey(row);
     return {
-      key: `${row.rowKey}:${row.normalizedAddress}`,
+      key: mountKey,
       rowKey: row.rowKey,
-      mountKey: getRowMountKey(row),
+      mountKey,
       normalizedAddress: row.normalizedAddress ?? "",
       surfaceKind: row.surfaceKind,
       source,

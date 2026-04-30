@@ -38,6 +38,9 @@ export interface FinderImportPreviewResult {
   finderBaseUrl?: string;
   totalRows: number;
   validRows: number;
+  pulledRows?: number;
+  matchedRows?: number;
+  filteredOutRows?: number;
   providerMeta?: WalletAiProviderMeta;
   fallbackReason?: string;
   pulledAt: string;
@@ -274,6 +277,9 @@ const getMatchedFinderEvaluations = (detail: JsonRecord) => {
     .filter((item) => item.matched !== false);
   return [...evaluations, ...labels];
 };
+
+const hasFinderMatchedLabels = (row: JsonRecord, detail: JsonRecord) =>
+  getMatchedFinderEvaluations(detail).length > 0 || asArray(row.labels).map(text).some(Boolean);
 
 const buildFinderLabels = (row: JsonRecord, detail: JsonRecord, sourceName: string) => {
   const labels = new Map<string, WalletImportLabelDraft>();
@@ -615,14 +621,17 @@ const pullFinderWallets = async (input: FinderImportRequest) => {
 
 const resolveWalletInputs = async (input: FinderImportRequest) => {
   if (Array.isArray(input.wallets) && input.wallets.length > 0) {
+    const wallets = input.wallets.map((item) => {
+      const record = asRecord(item);
+      return {
+        row: asRecord(record.row ?? record.finder_row ?? record.selection_record ?? record),
+        detail: asRecord(record.detail ?? record.finder_detail ?? record)
+      };
+    });
+
     return {
-      wallets: input.wallets.map((item) => {
-        const record = asRecord(item);
-        return {
-          row: asRecord(record.row ?? record.finder_row ?? record.selection_record ?? record),
-          detail: asRecord(record.detail ?? record.finder_detail ?? record)
-        };
-      }),
+      wallets,
+      pulledRows: wallets.length,
       runId: input.runId?.trim() || undefined,
       finderBaseUrl: input.finderBaseUrl?.trim() || undefined
     };
@@ -631,6 +640,7 @@ const resolveWalletInputs = async (input: FinderImportRequest) => {
   const pulled = await pullFinderWallets(input);
   return {
     wallets: pulled.wallets,
+    pulledRows: pulled.wallets.length,
     runId: pulled.runId,
     finderBaseUrl: pulled.baseUrl
   };
@@ -676,14 +686,34 @@ export const previewFinderImport = async (
   const resolved = await resolveWalletInputs(input);
   const resolvedSourceName =
     input.sourceName?.trim() || `Finder-app${resolved.runId ? `:${resolved.runId}` : ""}`;
-  const deterministicRows = buildFinderPreviewRows(resolved.wallets, {
+  const pulledRows = resolved.pulledRows ?? resolved.wallets.length;
+  const matchedWallets = resolved.wallets.filter(({ row, detail }) => hasFinderMatchedLabels(row, detail));
+  const matchedRows = matchedWallets.length;
+  const filteredOutRows = Math.max(0, pulledRows - matchedRows);
+  const deterministicRows = buildFinderPreviewRows(matchedWallets, {
     sourceName: resolvedSourceName,
     runId: resolved.runId
   });
-  const reportText = buildFinderReportText(resolved.wallets, {
+  const reportText = buildFinderReportText(matchedWallets, {
     sourceName: resolvedSourceName,
     runId: resolved.runId
   });
+
+  if (matchedWallets.length === 0) {
+    return {
+      rows: [],
+      sourceName: resolvedSourceName,
+      runId: resolved.runId,
+      finderBaseUrl: resolved.finderBaseUrl,
+      totalRows: 0,
+      validRows: 0,
+      pulledRows,
+      matchedRows,
+      filteredOutRows,
+      fallbackReason: "本次 Finder 结果里没有命中标签的钱包，已按规则全部跳过。",
+      pulledAt
+    };
+  }
 
   try {
     const aiPreview = await previewWalletImportAi({
@@ -699,6 +729,9 @@ export const previewFinderImport = async (
         finderBaseUrl: resolved.finderBaseUrl,
         totalRows: rows.length,
         validRows: countValidRows(rows),
+        pulledRows,
+        matchedRows,
+        filteredOutRows,
         providerMeta: aiPreview.providerMeta,
         pulledAt
       };
@@ -711,6 +744,9 @@ export const previewFinderImport = async (
       finderBaseUrl: resolved.finderBaseUrl,
       totalRows: deterministicRows.length,
       validRows: countValidRows(deterministicRows),
+      pulledRows,
+      matchedRows,
+      filteredOutRows,
       providerMeta: deterministicRows[0]?.providerMeta,
       fallbackReason: error instanceof Error ? error.message : "Finder AI 预览失败，已使用本地适配器",
       pulledAt
@@ -724,6 +760,9 @@ export const previewFinderImport = async (
     finderBaseUrl: resolved.finderBaseUrl,
     totalRows: deterministicRows.length,
     validRows: countValidRows(deterministicRows),
+    pulledRows,
+    matchedRows,
+    filteredOutRows,
     providerMeta: deterministicRows[0]?.providerMeta,
     fallbackReason: "AI 预览没有返回可导入地址，已使用 Finder 本地适配器",
     pulledAt

@@ -27,6 +27,9 @@ interface FinderPreviewResponse {
   finderBaseUrl?: string;
   totalRows: number;
   validRows: number;
+  pulledRows?: number;
+  matchedRows?: number;
+  filteredOutRows?: number;
   providerMeta?: WalletAiProviderMeta;
   fallbackReason?: string;
 }
@@ -162,6 +165,9 @@ export const WalletImportPanel = ({
     detectedFormat?: string;
     finderRunId?: string;
     finderBaseUrl?: string;
+    pulledRows?: number;
+    matchedRows?: number;
+    filteredOutRows?: number;
     providerMeta?: WalletAiProviderMeta;
     fallbackReason?: string;
   } | null>(null);
@@ -242,11 +248,14 @@ export const WalletImportPanel = ({
           sourceName: payload.data.sourceName,
           finderRunId: payload.data.runId,
           finderBaseUrl: payload.data.finderBaseUrl,
+          pulledRows: payload.data.pulledRows,
+          matchedRows: payload.data.matchedRows,
+          filteredOutRows: payload.data.filteredOutRows,
           providerMeta: payload.data.providerMeta,
           fallbackReason: payload.data.fallbackReason
         });
         setStatus(
-          `Finder 预览完成：共识别 ${payload.data.totalRows} 条，${payload.data.validRows} 条可导入。`
+          `Finder 预览完成：共拉取 ${payload.data.pulledRows ?? payload.data.totalRows} 条，命中标签 ${payload.data.matchedRows ?? payload.data.totalRows} 条，过滤 ${payload.data.filteredOutRows ?? 0} 条，${payload.data.validRows} 条可导入。`
         );
         return;
       }
@@ -577,6 +586,9 @@ export const WalletImportPanel = ({
             <span>总条数 {preview.length}</span>
             <span>可导入 {validRows}</span>
             <span>异常 {preview.length - validRows}</span>
+            {previewMeta?.pulledRows ? <span>Finder 拉取 {previewMeta.pulledRows}</span> : null}
+            {previewMeta?.matchedRows !== undefined ? <span>命中标签 {previewMeta.matchedRows}</span> : null}
+            {previewMeta?.filteredOutRows ? <span>已过滤 {previewMeta.filteredOutRows}</span> : null}
             {previewMeta?.detectedFormat ? (
               <span>格式 {previewMeta.detectedFormat.toUpperCase()}</span>
             ) : null}

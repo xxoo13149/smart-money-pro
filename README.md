@@ -179,6 +179,14 @@ npm run deploy:cloudflare -- --domain example.com
 - 同地址重复导入时，应保留最新地址主记录并替换旧 AI 系统标签
 - 人工标签优先级高于 AI 标签
 
+## 最近进展（2026-05-01）
+
+- Finder 同步导入已改为只保留“命中标签的钱包”，不再把整批候选地址无差别导入后台
+- Finder 预览状态新增 4 个关键计数：`拉取总数 / 命中标签 / 已过滤 / 可导入`
+- 当 Finder 本次结果没有命中标签钱包时，后台会直接给出跳过提示，不再生成误导性的空白导入结果
+- Polymarket 扩展加强了 feed 区域 `Top Holders / Positions / Activity / Comments` 相邻面板识别，降低切换或异步渲染时的挂载失败
+- 扩展侧对页内标注挂载 key 与文本提取做了稳定性修补，重点缓解个别地址出现的一闪一闪、重复挂载和识别漂移问题
+
 ## 文档与规范
 
 - [天气 AI 导入规范](./docs/spec/weather-ai-import-spec.md)
@@ -196,6 +204,7 @@ npm run deploy:cloudflare -- --domain example.com
 这个仓库仍在持续迭代中，当前重点是：
 
 - 提升扩展页内标签注入稳定性
+- 继续打磨 Finder 到后台地址库的筛选、同步反馈与去重更新链路
 - 优化地址库工作台的整理与复核体验
 - 提升 AI 导入结果的可读性、去重与可维护性
 - 完善 Cloudflare 原生部署、恢复和成本控制
