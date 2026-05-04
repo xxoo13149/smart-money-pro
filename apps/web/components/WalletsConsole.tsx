@@ -44,7 +44,6 @@ const DENSITY_STORAGE_KEY = "wallet-workspace-density";
 const PANEL_PINNED_STORAGE_KEY = "wallet-workspace-panel-pinned";
 const HELP_STORAGE_KEY = "wallet-workspace-help-open";
 const FLASH_STORAGE_KEY = "wallet-workspace-flash";
-const EXPORT_CURSOR_STORAGE_KEY = "wallet-library-export-last-request-at";
 
 const SORT_OPTIONS = [
   { value: "updated_desc", label: "最近更新" },
@@ -335,52 +334,9 @@ export const WalletsConsole = ({
     }, 2200);
   };
 
-  const rememberExportRequestAt = (value: string) => {
-    try {
-      window.localStorage.setItem(EXPORT_CURSOR_STORAGE_KEY, value);
-    } catch {}
-  };
-
-  const resolveDefaultChangedSince = () => {
-    try {
-      const stored = window.localStorage.getItem(EXPORT_CURSOR_STORAGE_KEY)?.trim();
-      if (stored && Number.isFinite(Date.parse(stored))) {
-        return new Date(stored).toISOString();
-      }
-    } catch {}
-
-    return new Date(Date.now() - 7 * 24 * 60 * 60 * 1_000).toISOString();
-  };
-
   const downloadFullLibraryExport = () => {
-    rememberExportRequestAt(new Date().toISOString());
     pushFeedback("正在准备地址库全量导出...");
     window.location.assign("/api/wallets/export?scope=all&includeDeleted=true");
-  };
-
-  const downloadDeltaLibraryExport = () => {
-    const rawValue = window.prompt(
-      "请输入增量导出的起始时间（ISO 时间）。建议直接使用上一次导出包里的 exportedAt。",
-      resolveDefaultChangedSince()
-    );
-
-    if (rawValue === null) {
-      return;
-    }
-
-    const changedSince = rawValue.trim();
-    const timestamp = Date.parse(changedSince);
-    if (!changedSince || !Number.isFinite(timestamp)) {
-      pushFeedback("增量时间格式不正确，请使用 ISO 时间。");
-      return;
-    }
-
-    const normalizedChangedSince = new Date(timestamp).toISOString();
-    rememberExportRequestAt(new Date().toISOString());
-    pushFeedback(`正在准备 ${normalizedChangedSince} 之后的增量导出...`);
-    window.location.assign(
-      `/api/wallets/export?scope=delta&includeDeleted=true&changedSince=${encodeURIComponent(normalizedChangedSince)}`
-    );
   };
 
   const scheduleDeletedRows = (walletIds: string[]) => {
@@ -1284,9 +1240,6 @@ export const WalletsConsole = ({
           </AppLink>
           <button type="button" className={styles.ghostButton} onClick={downloadFullLibraryExport}>
             导出全库 JSON
-          </button>
-          <button type="button" className={styles.ghostButton} onClick={downloadDeltaLibraryExport}>
-            导出增量 JSON
           </button>
           <button
             type="button"

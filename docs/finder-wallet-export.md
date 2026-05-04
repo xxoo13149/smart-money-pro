@@ -5,17 +5,10 @@
 ## 现在怎么导出
 
 - 后台地址库页面右上角新增 `导出全库 JSON`
-- 后台地址库页面右上角同时新增 `导出增量 JSON`
 - 下载接口：
 
 ```text
 GET /api/wallets/export?scope=all&includeDeleted=true
-```
-
-增量导出示例：
-
-```text
-GET /api/wallets/export?scope=delta&includeDeleted=true&changedSince=2026-05-04T00:00:00.000Z
 ```
 
 - 该接口需要管理员登录态
@@ -57,11 +50,8 @@ GET /api/wallets/export?scope=delta&includeDeleted=true&changedSince=2026-05-04T
 
 说明：
 
-- `exportMode = full` 表示全量导出
-- `exportMode = delta` 表示增量导出
-- `changedSince` 有值时，当前版本按 `wallet.updatedAt >= changedSince` 选出要导出的地址
-- 由于标签、备注、Watchlist、删除、编辑这些操作都会推进 `wallet.updatedAt`，所以这一版增量导出已经能覆盖绝大多数同步场景
-- 最稳妥的用法是：把上一次导出包里的 `exportedAt` 记下来，下一次直接作为 `changedSince`
+- 当前主流程只需要用 `exportMode = full` 的全量导出
+- `changedSince` 和 delta 能力已经预留在底层，但你当前这条 Finder 闭环不用依赖它
 
 每条地址记录里主要包含：
 
@@ -162,11 +152,11 @@ Finder 新跑完后，建议分两层回写：
 3. 把 `labels / notes / auditLogs` 全部落库
 4. 再在 Finder 内部跑新一轮分析
 5. 把 Finder 新标签作为新来源追加，不要覆盖原有后台标签
-6. 后续同步时，直接用上一次导出包的 `exportedAt` 作为 `changedSince` 拉增量
+6. 再把 Finder 处理后的结果整包同步回后台，按同地址更新
 
 ## 后续可以继续补的
 
-这一版已经解决“全量导出 + changedSince 增量导出”。下一步如果要继续顺滑，我建议再补两项：
+这一版已经先解决“全量导出可回灌”。下一步如果要继续顺滑，我建议再补两项：
 
 - Finder 回写后台时的双向同步接口
 - `sinceVersion` 或 webhook 级别的更细粒度同步
