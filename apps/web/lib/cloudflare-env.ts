@@ -4,6 +4,7 @@ export interface SmartMoneyBindings {
   SMART_MONEY_DB?: D1Database;
   SMART_MONEY_CACHE?: KVNamespace;
   ADMIN_BASE_URL?: string;
+  ADMIN_SESSION_TTL_DAYS?: string;
   ADMIN_APPROVAL_OWNER_EMAIL?: string;
   ADMIN_APPROVAL_SENDER_EMAIL?: string;
   ADMIN_APPROVAL_SENDER_NAME?: string;

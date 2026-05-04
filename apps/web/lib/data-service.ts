@@ -18,6 +18,9 @@
   type AdminExtensionOverview,
   type AdminExtensionSessionItem,
   type AlertEvent,
+  type NoteAuditLog,
+  type PositionSnapshot,
+  type Trade,
   type Wallet,
   type WalletAdminRow,
   type WalletAiExtractRequest,
@@ -33,7 +36,8 @@
   type WalletSavedView,
   type WalletSourceType,
   type WalletStatusBadge,
-  type WalletTableRow
+  type WalletTableRow,
+  type WatchlistEntry
 } from "@weather-smart-money/core";
 import {
   bootstrapSmartMoneyDb,
@@ -57,6 +61,7 @@ import {
   listWalletImportBatches as listPersistedWalletImportBatches,
   listWalletImportBatchesByIds,
   listWalletPage as listPersistedWalletPage,
+  listWalletNotesByWalletIds,
   listWalletSavedViews as listPersistedWalletSavedViews,
   listWalletAuditLogsByWalletIds,
   listWalletLabelsByWalletIds,
@@ -171,6 +176,51 @@ export interface WalletImportsPageData {
   batches: WalletImportBatchSummary[];
   selectedBatch: WalletImportBatchDetail | null;
   selectedBatchRows: WalletAdminRow[];
+}
+
+export interface WalletExportNoteRecord {
+  id: string;
+  content: string;
+  actor: string;
+  createdAt: string;
+}
+
+export interface WalletLibraryExportRecord {
+  wallet: Wallet;
+  summaryText: string;
+  highlights: AddressLabelBadge[];
+  statusBadges: WalletStatusBadge[];
+  sourceMeta: WalletAdminRow["sourceMeta"];
+  lastActivityAt: string;
+  labels: WalletLabel[];
+  notes: WalletExportNoteRecord[];
+  auditLogs: NoteAuditLog[];
+  watchlistEntry?: WatchlistEntry;
+  importBatch?: WalletImportBatch;
+  metrics: WalletDetailData["metrics"];
+  trades: Trade[];
+  positions: PositionSnapshot[];
+  alerts: AlertEvent[];
+}
+
+export interface WalletLibraryExportData {
+  schemaVersion: "wallet-library-export/v1";
+  source: "smart-money-admin";
+  exportMode: "full" | "delta";
+  exportedAt: string;
+  changedSince?: string;
+  totalWallets: number;
+  includeDeleted: boolean;
+  query: WalletListQuery;
+  mergeHints: {
+    primaryKey: "wallet.normalizedAddress";
+    deletedFlagField: "wallet.deletedAt";
+    walletUpdatedAtField: "wallet.updatedAt";
+    labelIdentityFields: readonly ["kind", "value", "source"];
+    noteIdentityField: "id";
+    auditLogIdentityField: "id";
+  };
+  wallets: WalletLibraryExportRecord[];
 }
 
 const demoSavedViews: WalletSavedView[] = [];
@@ -840,6 +890,208 @@ const applyWalletListQuery = (
   });
 
   return filtered;
+};
+
+const resolveWalletExportQuery = (
+  query?: Partial<WalletListQuery>,
+  includeDeleted = true
+): WalletListQuery => {
+  const normalized = toWalletListDataQuery(resolveWalletListQuery(query));
+  return {
+    ...normalized,
+    cursor: undefined,
+    limit: undefined,
+    includeDeleted
+  };
+};
+
+const normalizeChangedSince = (value?: string) => {
+  const candidate = value?.trim();
+  if (!candidate) {
+    return undefined;
+  }
+
+  const timestamp = Date.parse(candidate);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error("changedSince 必须是有效的 ISO 时间");
+  }
+
+  return new Date(timestamp).toISOString();
+};
+
+const sortByIsoDesc = <T,>(items: T[], pick: (item: T) => string | undefined | null) =>
+  [...items].sort((left, right) => {
+    const leftTime = Date.parse(pick(left) ?? "");
+    const rightTime = Date.parse(pick(right) ?? "");
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  });
+
+const buildAlertItemsByWalletId = (items: AlertListItem[]) => {
+  const map = new Map<string, AlertListItem[]>();
+  items.forEach((item) => {
+    const current = map.get(item.wallet.id) ?? [];
+    current.push(item);
+    map.set(item.wallet.id, current);
+  });
+  return map;
+};
+
+const buildWalletLibraryExportRecord = (
+  wallet: Wallet,
+  labels: WalletLabel[],
+  notes: WalletExportNoteRecord[],
+  auditLogs: NoteAuditLog[],
+  watchlistEntry: WatchlistEntry | undefined,
+  importBatch: WalletImportBatch | undefined,
+  alertItems: AlertListItem[],
+  trades: Trade[],
+  positions: PositionSnapshot[]
+): WalletLibraryExportRecord => {
+  const metrics = computeWalletMetrics(wallet, seedTrades);
+  const adminRow = buildWalletAdminRow(
+    {
+      wallet,
+      metrics,
+      labels,
+      activeAlertCount: alertItems.filter((item) => item.alert.status === "open").length,
+      latestTrade: sortByIsoDesc(trades, (trade) => trade.enteredAt)[0]
+    },
+    importBatch
+  );
+
+  return {
+    wallet,
+    summaryText: adminRow.summaryText,
+    highlights: adminRow.highlights,
+    statusBadges: adminRow.statusBadges,
+    sourceMeta: adminRow.sourceMeta,
+    lastActivityAt: adminRow.lastActivityAt,
+    labels,
+    notes,
+    auditLogs,
+    watchlistEntry,
+    importBatch,
+    metrics,
+    trades: sortByIsoDesc(trades, (trade) => trade.enteredAt),
+    positions: sortByIsoDesc(positions, (position) => position.capturedAt),
+    alerts: sortByIsoDesc(
+      alertItems.map((item) => item.alert),
+      (alert) => alert.occurredAt
+    )
+  };
+};
+
+export const exportWalletLibrary = async (input?: {
+  query?: Partial<WalletListQuery>;
+  includeDeleted?: boolean;
+  changedSince?: string;
+}): Promise<WalletLibraryExportData> => {
+  const includeDeleted = input?.includeDeleted ?? true;
+  const exportQuery = resolveWalletExportQuery(input?.query, includeDeleted);
+  const exportedAt = new Date().toISOString();
+  const changedSince = normalizeChangedSince(input?.changedSince);
+  const changedSinceMs = changedSince ? Date.parse(changedSince) : undefined;
+  const exportMode = changedSince ? "delta" : "full";
+  const tradesByWalletId = groupByWalletId(seedTrades);
+  const positionsByWalletId = groupByWalletId(seedPositions);
+  const mergeHints = {
+    primaryKey: "wallet.normalizedAddress",
+    deletedFlagField: "wallet.deletedAt",
+    walletUpdatedAtField: "wallet.updatedAt",
+    labelIdentityFields: ["kind", "value", "source"],
+    noteIdentityField: "id",
+    auditLogIdentityField: "id"
+  } as const;
+
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    const filteredRows = applyWalletListQuery(mapWalletRowsToAdminRows(listDemoWalletRows()), exportQuery).filter(
+      (row) =>
+        changedSinceMs === undefined || Date.parse(row.wallet.updatedAt) >= changedSinceMs
+    );
+    const records = filteredRows.map((row) => {
+      const detail = getDemoWalletDetail(row.wallet.id);
+      const auditLogs = detail?.notes ?? [];
+      const notes = auditLogs
+        .filter((log) => log.action === "create_note")
+        .map((log) => ({
+          id: log.id,
+          content: log.content,
+          actor: log.actor,
+          createdAt: log.createdAt
+        }));
+
+      return buildWalletLibraryExportRecord(
+        row.wallet,
+        row.labels,
+        notes,
+        auditLogs,
+        detail?.watchlistEntry,
+        undefined,
+        detail?.alerts ?? [],
+        detail?.trades ?? [],
+        detail?.positions ?? []
+      );
+    });
+
+    return {
+      schemaVersion: "wallet-library-export/v1",
+      source: "smart-money-admin",
+      exportMode,
+      exportedAt,
+      changedSince,
+      totalWallets: records.length,
+      includeDeleted,
+      query: exportQuery,
+      mergeHints,
+      wallets: records
+    };
+  }
+
+  const wallets = (await listPersistedWallets(bindings.SMART_MONEY_DB, exportQuery)).filter(
+    (wallet) => changedSinceMs === undefined || Date.parse(wallet.updatedAt) >= changedSinceMs
+  );
+  const walletIds = wallets.map((wallet) => wallet.id);
+  const [userLabelsByWalletId, notesByWalletId, auditLogsByWalletId, watchlistByWalletId, importBatchesById] =
+    await Promise.all([
+      listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWalletNotesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWalletAuditLogsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWatchlistEntriesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      getImportBatchMapForWallets(bindings.SMART_MONEY_DB, wallets)
+    ]);
+
+  const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
+  const allLabels = deriveSystemLabels(wallets, allUserLabels, seedTrades);
+  const labelsByWalletId = groupByWalletId(allLabels);
+  const alertItemsByWalletId = buildAlertItemsByWalletId(buildPersistedAlertItems(wallets));
+
+  const records = wallets.map((wallet) =>
+    buildWalletLibraryExportRecord(
+      wallet,
+      labelsByWalletId.get(wallet.id) ?? [],
+      notesByWalletId.get(wallet.id) ?? [],
+      auditLogsByWalletId.get(wallet.id) ?? [],
+      watchlistByWalletId.get(wallet.id),
+      wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined,
+      alertItemsByWalletId.get(wallet.id) ?? [],
+      tradesByWalletId.get(wallet.id) ?? [],
+      positionsByWalletId.get(wallet.id) ?? []
+    )
+  );
+
+  return {
+    schemaVersion: "wallet-library-export/v1",
+    source: "smart-money-admin",
+    exportMode,
+    exportedAt,
+    changedSince,
+    totalWallets: records.length,
+    includeDeleted,
+    query: exportQuery,
+    mergeHints,
+    wallets: records
+  };
 };
 
 export const getDashboardData = async (): Promise<DashboardData> => {

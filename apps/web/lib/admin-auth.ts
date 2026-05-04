@@ -17,7 +17,10 @@ const PASSWORD_ITERATIONS = 100_000;
 const PASSWORD_KEY_BITS = 256;
 const PASSWORD_SALT_BYTES = 16;
 const SESSION_TOKEN_BYTES = 32;
-const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1_000;
+const DEFAULT_ADMIN_SESSION_TTL_DAYS = 14;
+const MIN_ADMIN_SESSION_TTL_DAYS = 7;
+const MAX_ADMIN_SESSION_TTL_DAYS = 60;
+const DEFAULT_ADMIN_SESSION_TTL_MS = DEFAULT_ADMIN_SESSION_TTL_DAYS * 24 * 60 * 60 * 1_000;
 const SESSION_TOUCH_INTERVAL_MS = 5 * 60 * 1_000;
 const APPROVAL_CODE_DIGITS = 6;
 const DEFAULT_APPROVAL_CODE_TTL_MINUTES = 10;
@@ -117,6 +120,18 @@ const parsePositiveInt = (value: string | undefined, fallback: number) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const resolveSessionTtlMs = (bindings?: SmartMoneyBindings | null) => {
+  const ttlDays = Math.min(
+    MAX_ADMIN_SESSION_TTL_DAYS,
+    Math.max(
+      MIN_ADMIN_SESSION_TTL_DAYS,
+      parsePositiveInt(bindings?.ADMIN_SESSION_TTL_DAYS, DEFAULT_ADMIN_SESSION_TTL_DAYS)
+    )
+  );
+
+  return ttlDays * 24 * 60 * 60 * 1_000;
+};
+
 const encodeHex = (buffer: ArrayBuffer) =>
   Array.from(new Uint8Array(buffer), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -190,25 +205,34 @@ const getSecureRequest = (request: Request) => {
   }
 };
 
-const buildCookieOptions = (request: Request) => ({
+const buildCookieOptions = (request: Request, sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS) => ({
   name: ADMIN_SESSION_COOKIE_NAME,
   httpOnly: true,
   sameSite: "lax" as const,
   secure: getSecureRequest(request),
   path: "/",
-  maxAge: Math.floor(SESSION_TTL_MS / 1_000)
+  maxAge: Math.floor(sessionTtlMs / 1_000)
 });
 
-const setSessionCookie = (response: NextResponse, request: Request, token: string) => {
+const setSessionCookie = (
+  response: NextResponse,
+  request: Request,
+  token: string,
+  sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS
+) => {
   response.cookies.set({
-    ...buildCookieOptions(request),
+    ...buildCookieOptions(request, sessionTtlMs),
     value: token
   });
 };
 
-const clearSessionCookie = (response: NextResponse, request: Request) => {
+const clearSessionCookie = (
+  response: NextResponse,
+  request: Request,
+  sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS
+) => {
   response.cookies.set({
-    ...buildCookieOptions(request),
+    ...buildCookieOptions(request, sessionTtlMs),
     value: "",
     maxAge: 0
   });
@@ -475,24 +499,31 @@ const findSessionByToken = async (
   return result ?? null;
 };
 
-const touchSession = async (db: D1Database, session: AdminSessionRow) => {
+const touchSession = async (
+  db: D1Database,
+  session: AdminSessionRow,
+  sessionTtlMs: number
+) => {
   const lastSeenAt = Date.parse(session.last_seen_at);
-  if (Number.isNaN(lastSeenAt) || Date.now() - lastSeenAt < SESSION_TOUCH_INTERVAL_MS) {
+  if (!Number.isNaN(lastSeenAt) && Date.now() - lastSeenAt < SESSION_TOUCH_INTERVAL_MS) {
     return;
   }
 
   const touchedAt = nowIso();
+  const nextExpiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
   await db
     .prepare(
       `UPDATE admin_sessions
        SET last_seen_at = ?,
+           expires_at = ?,
            updated_at = ?
        WHERE id = ?`
     )
-    .bind(touchedAt, touchedAt, session.id)
+    .bind(touchedAt, nextExpiresAt, touchedAt, session.id)
     .run();
 
   session.last_seen_at = touchedAt;
+  session.expires_at = nextExpiresAt;
   session.updated_at = touchedAt;
 };
 
@@ -514,12 +545,13 @@ const revokeSessionByToken = async (db: D1Database, token: string) => {
 const createSessionRecord = async (
   db: D1Database,
   request: Request,
-  user: AdminUserRow
+  user: AdminUserRow,
+  sessionTtlMs: number
 ): Promise<{ token: string; session: AdminSessionContext }> => {
   const token = createSessionToken();
   const tokenHash = await hashSessionToken(token);
   const createdAt = nowIso();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  const expiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
   const sessionId = crypto.randomUUID();
 
   await db
@@ -686,7 +718,8 @@ const resolveSessionFromRequest = async (
     };
   }
 
-  await touchSession(auth.db, row);
+  const sessionTtlMs = resolveSessionTtlMs(auth.bindings);
+  await touchSession(auth.db, row, sessionTtlMs);
 
   return {
     session: buildSessionContext(row),
@@ -721,7 +754,7 @@ const resolveAdminRequestState = cache(async (): Promise<AdminAuthRequestState> 
   if (sessionToken) {
     const row = await findSessionByToken(auth.db, sessionToken);
     if (row && !row.revoked_at && !row.user_disabled_at && Date.parse(row.expires_at) > Date.now()) {
-      await touchSession(auth.db, row);
+      await touchSession(auth.db, row, resolveSessionTtlMs(auth.bindings));
       session = buildSessionContext(row);
     }
   }
@@ -1069,7 +1102,7 @@ export const registerAdminUser = async (
     disabled_at: null
   };
 
-  return createSessionRecord(auth.db, request, createdUser);
+  return createSessionRecord(auth.db, request, createdUser, resolveSessionTtlMs(auth.bindings));
 };
 
 export const loginAdminUser = async (
@@ -1129,7 +1162,7 @@ export const loginAdminUser = async (
     updated_at: loggedAt,
     last_login_at: loggedAt,
     access_verified_at: accessVerifiedEmail ?? user.access_verified_at
-  });
+  }, resolveSessionTtlMs(auth.bindings));
 };
 
 export const logoutAdminSession = async (request: Request) => {
@@ -1140,12 +1173,13 @@ export const logoutAdminSession = async (request: Request) => {
   }
 };
 
-export const attachAdminSessionCookie = (
+export const attachAdminSessionCookie = async (
   response: NextResponse,
   request: Request,
   token: string
 ) => {
-  setSessionCookie(response, request, token);
+  const bindings = await getSmartMoneyBindings();
+  setSessionCookie(response, request, token, resolveSessionTtlMs(bindings));
 };
 
 export const clearAdminSessionCookie = (response: NextResponse, request: Request) => {

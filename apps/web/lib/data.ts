@@ -1,5 +1,7 @@
 export type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
 export type {
+  WalletLibraryExportData,
+  WalletLibraryExportRecord,
   WalletImportBatchDetail,
   WalletImportBatchSummary,
   WalletImportOverview,
@@ -35,6 +37,7 @@ export {
   getAlerts,
   getDashboardData,
   getSmartMoneySchemaStatusReport,
+  exportWalletLibrary,
   getWalletImportsPageData,
   getWalletDetail as getWalletById,
   getWalletList,
