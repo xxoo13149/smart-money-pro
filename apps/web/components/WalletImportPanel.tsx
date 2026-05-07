@@ -176,6 +176,7 @@ export const WalletImportPanel = ({
   const [result, setResult] = useState<{
     createdCount: number;
     updatedCount: number;
+    finderAiUpsertedCount?: number;
     failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
   } | null>(null);
 
@@ -344,6 +345,7 @@ export const WalletImportPanel = ({
         data?: {
           createdCount: number;
           updatedCount: number;
+          finderAiUpsertedCount?: number;
           failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
         };
         error?: string;
@@ -354,8 +356,12 @@ export const WalletImportPanel = ({
       }
 
       setResult(payload.data);
+      const finderAiStatus =
+        sourceMode === "finder"
+          ? `，Finder AI 深度解读 ${payload.data.finderAiUpsertedCount ?? 0} 条`
+          : "";
       setStatus(
-        `${sourceMode === "finder" ? "Finder " : ""}导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条，失败 ${payload.data.failedRows.length} 条。`
+        `${sourceMode === "finder" ? "Finder " : ""}导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条${finderAiStatus}，失败 ${payload.data.failedRows.length} 条。`
       );
 
       if (onCommitted) {
@@ -680,6 +686,7 @@ export const WalletImportPanel = ({
               <div className="subtle-row">
                 <span>新增 {result.createdCount}</span>
                 <span>更新 {result.updatedCount}</span>
+                {sourceMode === "finder" ? <span>Finder AI {result.finderAiUpsertedCount ?? 0}</span> : null}
                 <span>失败 {result.failedRows.length}</span>
               </div>
               {result.failedRows.slice(0, 5).map((item) => (

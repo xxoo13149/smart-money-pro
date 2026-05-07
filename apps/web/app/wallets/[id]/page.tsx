@@ -30,7 +30,12 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ i
     notFound();
   }
 
-  const { wallet, metrics, labels, trades, alerts, notes, positions, watchlistEntry } = data;
+  const { wallet, metrics, labels, trades, alerts, notes, positions, watchlistEntry, finderAi } = data;
+  const finderAiMeta = [
+    finderAi?.providerMeta?.model,
+    finderAi?.providerMeta?.promptVersion,
+    finderAi?.evidenceLevel
+  ].filter(Boolean).join(" / ");
 
   return (
     <>
@@ -75,6 +80,104 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ i
           </div>
         </div>
       </Section>
+
+      {finderAi ? (
+        <Section
+          title="Finder AI v6"
+          description="Finder 同步过来的深度分析会原样保留在这里，扩展页内标注也会优先读取这组摘要。"
+          action={
+            <div className="badge-cluster">
+              <span className="action-pill">{finderAi.needsReview ? "需复核" : "已同步"}</span>
+              {finderAi.hasConflict ? <span className="eyebrow">有冲突</span> : null}
+              {finderAiMeta ? <span className="eyebrow">{finderAiMeta}</span> : null}
+            </div>
+          }
+        >
+          <div className="stack-list">
+            <div className="stack-item">
+              <div className="subtle-row">
+                <span>结论 / 策略结论</span>
+                <span>{formatDate(finderAi.updatedAt)}</span>
+              </div>
+              <div className="metric-inline">{finderAi.aiBriefShort || finderAi.strategyFocus || "待补充"}</div>
+            </div>
+
+            {finderAi.aiBriefNote ? (
+              <div className="stack-item">
+                <div className="subtle-row">
+                  <span>摘要说明</span>
+                </div>
+                <p>{finderAi.aiBriefNote}</p>
+              </div>
+            ) : null}
+
+            {finderAi.aiDeepNote ? (
+              <div className="stack-item">
+                <div className="subtle-row">
+                  <span>深度解读</span>
+                </div>
+                <p>{finderAi.aiDeepNote}</p>
+              </div>
+            ) : null}
+
+            <div className="detail-grid">
+              {finderAi.keyMetrics?.length ? (
+                <div className="stack-item">
+                  <h3 className="inline-title">关键指标</h3>
+                  <div className="badge-cluster">
+                    {finderAi.keyMetrics.map((metric, index) => (
+                      <span key={`${metric.key ?? metric.label}-${index}`} className="badge">
+                        {metric.label}: {String(metric.value ?? "--")}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {finderAi.labels?.length ? (
+                <div className="stack-item">
+                  <h3 className="inline-title">同步标签</h3>
+                  <div className="badge-cluster">
+                    {finderAi.labels.map((label, index) => (
+                      <span key={`${label.kind ?? "label"}-${label.value}-${index}`} className="badge">
+                        {label.kind ? `${label.kind}: ` : ""}
+                        {label.value}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {finderAi.primarySignals?.length ? (
+              <div className="stack-item">
+                <h3 className="inline-title">命中信号</h3>
+                <div className="stack-list">
+                  {finderAi.primarySignals.map((signal, index) => (
+                    <div key={`${signal.key ?? signal.label}-${index}`} className="stack-item">
+                      <div className="subtle-row">
+                        <span>{signal.label}</span>
+                        <span>{signal.matched === false ? "未命中" : "命中"}</span>
+                      </div>
+                      {signal.reason ? <p>{signal.reason}</p> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {finderAi.sourceExcerpt ? (
+              <div className="stack-item">
+                <div className="subtle-row">
+                  <span>来源摘录</span>
+                  <span>{finderAi.runId || "未记录 Run ID"}</span>
+                </div>
+                <p>{finderAi.sourceExcerpt}</p>
+              </div>
+            ) : null}
+          </div>
+        </Section>
+      ) : null}
 
       <Section
         title="资料"

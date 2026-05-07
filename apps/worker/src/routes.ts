@@ -39,6 +39,10 @@ import {
   writeMarketAnnotationCache
 } from "./data";
 import {
+  enrichAddressSummariesWithAiHoverNotes,
+  type WorkerWaitUntilContext
+} from "./hover-note-ai";
+import {
   buildJsonResponse,
   generateRandomToken,
   hashValue,
@@ -181,8 +185,13 @@ const buildRuntimeSnapshot = (
   };
 };
 
-const buildMarketAnnotationEnvelope = async (env: Env, slug: string, labelsVersion: string) => {
-  const payload = await buildMarketAnnotationPayload(env, slug);
+const buildMarketAnnotationEnvelope = async (
+  env: Env,
+  slug: string,
+  labelsVersion: string,
+  ctx?: WorkerWaitUntilContext
+) => {
+  const payload = await buildMarketAnnotationPayload(env, slug, ctx);
   const envelope = {
     etag: await getCacheEnvelopeEtag(payload),
     payload,
@@ -196,7 +205,8 @@ const buildMarketAnnotationEnvelope = async (env: Env, slug: string, labelsVersi
 const getOrBuildMarketAnnotationEnvelope = async (
   env: Env,
   slug: string,
-  labelsVersion: string
+  labelsVersion: string,
+  ctx?: WorkerWaitUntilContext
 ) => {
   const inflightKey = `${labelsVersion}:${slug}`;
   const existing = marketAnnotationInflight.get(inflightKey);
@@ -206,7 +216,7 @@ const getOrBuildMarketAnnotationEnvelope = async (
 
   const task = (async () => {
     try {
-      return await buildMarketAnnotationEnvelope(env, slug, labelsVersion);
+      return await buildMarketAnnotationEnvelope(env, slug, labelsVersion, ctx);
     } finally {
       marketAnnotationInflight.delete(inflightKey);
     }
@@ -684,7 +694,7 @@ export const handleAdminApprovalEmail = async (request: Request, env: Env) => {
   return buildJsonResponse({ ok: true });
 };
 
-export const handleMarketAnnotations = async (request: Request, env: Env) => {
+export const handleMarketAnnotations = async (request: Request, env: Env, ctx: WorkerWaitUntilContext) => {
   await ensureSchema(env);
   const session = await authenticateRequest(request, env);
   if (!session) {
@@ -726,7 +736,7 @@ export const handleMarketAnnotations = async (request: Request, env: Env) => {
   }
 
   try {
-    const envelope = await getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion);
+    const envelope = await getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion, ctx);
 
     if (etagMatches(envelope.etag, ifNoneMatch)) {
       return new Response(null, {
@@ -756,11 +766,16 @@ export const handleMarketAnnotations = async (request: Request, env: Env) => {
     });
     const stale = await readStaleMarketAnnotation(env, slug);
     if (stale) {
-      const payload = await refreshMarketAnnotationPayloadSummaries(env, stale.payload, {
-        labelsVersion,
-        refreshedAt: isoNow(),
-        sourceStatus: "stale"
-      });
+      const payload = await refreshMarketAnnotationPayloadSummaries(
+        env,
+        stale.payload,
+        {
+          labelsVersion,
+          refreshedAt: isoNow(),
+          sourceStatus: "stale"
+        },
+        ctx
+      );
       const etag = await getCacheEnvelopeEtag(payload);
 
       if (etagMatches(etag, ifNoneMatch)) {
@@ -801,7 +816,7 @@ export const handleMarketAnnotations = async (request: Request, env: Env) => {
   }
 };
 
-export const handleLabelsLookup = async (request: Request, env: Env) => {
+export const handleLabelsLookup = async (request: Request, env: Env, ctx: WorkerWaitUntilContext) => {
   await ensureSchema(env);
   const session = await authenticateRequest(request, env);
   if (!session) {
@@ -859,11 +874,18 @@ export const handleLabelsLookup = async (request: Request, env: Env) => {
     );
   }
 
-  const items = await listAddressSummaries(env.SMART_MONEY_DB, {
-    chain,
-    normalizedAddresses,
-    adminBaseUrl: env.ADMIN_BASE_URL
-  });
+  const items = await enrichAddressSummariesWithAiHoverNotes(
+    env,
+    await listAddressSummaries(env.SMART_MONEY_DB, {
+      chain,
+      normalizedAddresses,
+      adminBaseUrl: env.ADMIN_BASE_URL
+    }),
+    {
+      executionContext: ctx,
+      backgroundOnMiss: true
+    }
+  );
   const payload = { items, version };
   const etag = await getCacheEnvelopeEtag(payload);
 
@@ -885,7 +907,7 @@ export const handleLabelsLookup = async (request: Request, env: Env) => {
   );
 };
 
-export const handleAddressSearch = async (request: Request, env: Env) => {
+export const handleAddressSearch = async (request: Request, env: Env, ctx: WorkerWaitUntilContext) => {
   await ensureSchema(env);
   const session = await authenticateRequest(request, env);
   if (!session) {
@@ -931,11 +953,18 @@ export const handleAddressSearch = async (request: Request, env: Env) => {
     );
   }
 
-  const items = await searchAddressSummaries(env.SMART_MONEY_DB, {
-    query,
-    limit,
-    adminBaseUrl: env.ADMIN_BASE_URL
-  });
+  const items = await enrichAddressSummariesWithAiHoverNotes(
+    env,
+    await searchAddressSummaries(env.SMART_MONEY_DB, {
+      query,
+      limit,
+      adminBaseUrl: env.ADMIN_BASE_URL
+    }),
+    {
+      executionContext: ctx,
+      backgroundOnMiss: true
+    }
+  );
   const payload = { items, version };
   const etag = await getCacheEnvelopeEtag(payload);
 

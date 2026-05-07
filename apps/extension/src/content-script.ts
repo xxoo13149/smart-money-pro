@@ -22,7 +22,10 @@ interface AddressHoverCard {
   officialTags: AddressLabelBadge[];
   officialNoteText?: string;
   aiTags: AddressLabelBadge[];
+  aiBriefShortText?: string;
   aiStatsNoteText?: string;
+  aiNarrativeNoteText?: string;
+  aiDeepNoteText?: string;
 }
 
 interface AddressSummary {
@@ -34,6 +37,7 @@ interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiDeepNote?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -700,7 +704,10 @@ type ContentRuntimeMessage =
         annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
       const aiTags = dedupeBadges(aiSource).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
       const officialNoteText = annotation.hoverCard?.officialNoteText ?? "";
+      const aiBriefShortText = annotation.hoverCard?.aiBriefShortText ?? "";
+      const aiNarrativeNoteText = annotation.hoverCard?.aiNarrativeNoteText ?? "";
       const aiStatsNoteText = annotation.hoverCard?.aiStatsNoteText ?? "";
+      const aiDeepNoteText = annotation.hoverCard?.aiDeepNoteText ?? "";
 
       this.appendTagsSection(
         card,
@@ -715,7 +722,9 @@ type ContentRuntimeMessage =
         aiTags,
         "暂无 AI 标签"
       );
-      this.appendNoteSection(card, "AI 标签统计备注说明", aiStatsNoteText, "暂无 AI 标签统计备注说明");
+      this.appendNoteSection(card, "结论", aiBriefShortText, "暂无结论");
+      this.appendNoteSection(card, "摘要说明", aiNarrativeNoteText || aiStatsNoteText, "暂无摘要说明");
+      this.appendNoteSection(card, "深度解读", aiDeepNoteText, "暂无深度解读");
 
       const footer = document.createElement("a");
       footer.className = "wsmx-link";
@@ -2030,6 +2039,9 @@ type ContentRuntimeMessage =
     Boolean(annotation.hoverCard?.officialTags.length) ||
     Boolean(annotation.hoverCard?.aiTags.length) ||
     Boolean(annotation.hoverCard?.officialNoteText) ||
+    Boolean(annotation.hoverCard?.aiBriefShortText) ||
+    Boolean(annotation.hoverCard?.aiNarrativeNoteText) ||
+    Boolean(annotation.hoverCard?.aiDeepNoteText) ||
     Boolean(annotation.hoverCard?.aiStatsNoteText);
 
   const buildResolvedAnnotation = (

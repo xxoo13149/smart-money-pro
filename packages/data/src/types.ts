@@ -3,6 +3,7 @@ import type {
   AdminExtensionInviteStatus,
   ChainId,
   WalletAiProviderMeta,
+  WalletFinderAiInsight,
   WalletCurationStatus,
   WalletListQuery,
   WalletListSort,
@@ -14,7 +15,7 @@ import type {
 export type D1DatabaseLike = D1Database;
 export type KVNamespaceLike = KVNamespace;
 
-export type DatasetKey = "address_labels";
+export type DatasetKey = "address_labels" | "finder_ai";
 
 export interface WalletInput {
   chain?: ChainId;
@@ -139,6 +140,10 @@ export interface WalletImportBatchRecord {
   updatedCount: number;
   failedCount: number;
   createdAt: string;
+}
+
+export interface WalletFinderAiInsightInput extends Omit<WalletFinderAiInsight, "walletId" | "createdAt" | "updatedAt"> {
+  importBatchId?: string;
 }
 
 export interface WalletPageInput extends WalletListFilters {

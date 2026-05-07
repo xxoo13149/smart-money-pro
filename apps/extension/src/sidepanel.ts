@@ -20,9 +20,13 @@ interface AddressSearchResult {
     officialTags: Array<{ id: string; text: string; tone: string }>;
     officialNoteText?: string;
     aiTags: Array<{ id: string; text: string; tone: string }>;
+    aiBriefShortText?: string;
     aiStatsNoteText?: string;
+    aiNarrativeNoteText?: string;
+    aiDeepNoteText?: string;
   };
   noteSnippet?: string;
+  aiDeepNote?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -299,7 +303,20 @@ const renderResults = (items: AddressSearchResult[]) => {
         <a class="result-link" href="${item.detailUrl}" target="_blank" rel="noreferrer">Workbench</a>
       </div>
       <div class="result-address">${item.address}</div>
-      <div class="result-copy">${item.strategyFocus || item.noteSnippet || item.bio || item.teamNote || "No summary yet."}</div>
+      <div class="result-copy">${
+        item.hoverCard?.aiBriefShortText ||
+        item.strategyFocus ||
+        item.hoverCard?.aiNarrativeNoteText ||
+        item.noteSnippet ||
+        item.bio ||
+        item.teamNote ||
+        "No summary yet."
+      }</div>
+      ${
+        item.aiDeepNote || item.hoverCard?.aiDeepNoteText
+          ? `<div class="result-copy">${item.aiDeepNote || item.hoverCard?.aiDeepNoteText}</div>`
+          : ""
+      }
       <div class="badge-cluster"></div>
     `;
 

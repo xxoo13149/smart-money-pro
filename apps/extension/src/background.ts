@@ -49,7 +49,10 @@ interface AddressHoverCard {
   officialTags: AddressLabelBadge[];
   officialNoteText?: string;
   aiTags: AddressLabelBadge[];
+  aiBriefShortText?: string;
   aiStatsNoteText?: string;
+  aiNarrativeNoteText?: string;
+  aiDeepNoteText?: string;
 }
 
 interface MarketAnnotationResponse {
@@ -75,6 +78,7 @@ interface MarketAnnotationResponse {
       statusBadges?: AddressLabelBadge[];
       hoverCard?: AddressHoverCard;
       noteSnippet?: string;
+      aiDeepNote?: string;
       watchlisted: boolean;
       detailUrl: string;
       updatedAt: string;
@@ -115,6 +119,7 @@ interface AddressSearchResult {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiDeepNote?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -135,6 +140,7 @@ interface AddressLookupSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiDeepNote?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;

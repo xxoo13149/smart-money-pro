@@ -26,6 +26,7 @@
   type WalletAiExtractRequest,
   type WalletAiExtractPreviewRow,
   type WalletFacetSummary,
+  type WalletFinderAiInsight,
   type WalletImportBatch,
   type WalletImportCommitRequest,
   type WalletImportPreviewRow,
@@ -65,6 +66,7 @@ import {
   listWalletSavedViews as listPersistedWalletSavedViews,
   listWalletAuditLogsByWalletIds,
   listWalletLabelsByWalletIds,
+  listWalletFinderAiInsightsByWalletIds,
   listWalletsByImportBatchIds,
   listWallets as listPersistedWallets,
   removeWalletWatchlist as removePersistedWalletWatchlist,
@@ -81,6 +83,7 @@ import {
   updateWalletLabel as updatePersistedWalletLabel,
   updateWalletSavedView as updatePersistedWalletSavedView,
   updateWallet as updatePersistedWallet,
+  upsertWalletFinderAiInsight as upsertPersistedWalletFinderAiInsight,
   upsertWalletWatchlist as upsertPersistedWalletWatchlist,
   listWatchlistEntriesByWalletIds
 } from "@weather-smart-money/data";
@@ -126,6 +129,7 @@ interface PersistedAlertContext {
 interface PersistedWalletContext extends PersistedAlertContext {
   walletRows: WalletTableRow[];
   labelsByWalletId: Map<string, WalletLabel[]>;
+  finderAiByWalletId: Map<string, WalletFinderAiInsight>;
 }
 
 export interface WalletImportCommitResult {
@@ -133,6 +137,7 @@ export interface WalletImportCommitResult {
   updatedCount: number;
   failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
   importBatch?: WalletImportBatch;
+  finderAiUpsertedCount?: number;
 }
 
 export interface WalletImportBatchSummary {
@@ -197,6 +202,7 @@ export interface WalletLibraryExportRecord {
   auditLogs: NoteAuditLog[];
   watchlistEntry?: WatchlistEntry;
   importBatch?: WalletImportBatch;
+  finderAi?: WalletFinderAiInsight;
   metrics: WalletDetailData["metrics"];
   trades: Trade[];
   positions: PositionSnapshot[];
@@ -607,11 +613,15 @@ const buildWalletAdminRow = (
 ): WalletAdminRow => ({
   wallet: row.wallet,
   labels: row.labels,
+  finderAi: row.finderAi,
   highlights: buildHighlightBadges(row.wallet, row.labels),
-  summaryText: buildWalletAdminSummaryText(row.wallet),
+  summaryText: row.finderAi?.aiBriefShort || row.finderAi?.strategyFocus || buildWalletAdminSummaryText(row.wallet),
   statusBadges: buildWalletAdminStatusBadges(row.wallet),
   sourceMeta: buildWalletAdminSourceMeta(row.wallet, importBatch),
-  lastActivityAt: row.wallet.updatedAt
+  lastActivityAt:
+    [row.wallet.updatedAt, row.finderAi?.updatedAt]
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? row.wallet.updatedAt
 });
 
 const buildPersistedAlertContextUncached = async (
@@ -646,7 +656,10 @@ const buildPersistedContextUncached = async (
   }
 
   const walletIds = persisted.wallets.map((wallet) => wallet.id);
-  const userLabelsByWalletId = await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds);
+  const [userLabelsByWalletId, finderAiByWalletId] = await Promise.all([
+    listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+    listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
+  ]);
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
   const allLabels = deriveSystemLabels(persisted.wallets, allUserLabels, seedTrades);
   const labelsByWalletId = groupByWalletId(allLabels);
@@ -657,6 +670,7 @@ const buildPersistedContextUncached = async (
       wallet,
       metrics: computeWalletMetrics(wallet, seedTrades),
       labels: labelsByWalletId.get(wallet.id) ?? [],
+      finderAi: finderAiByWalletId.get(wallet.id),
       activeAlertCount: openAlertCountByWalletId.get(wallet.id) ?? 0,
       latestTrade: latestTradeByWalletId.get(wallet.id)
     }))
@@ -670,7 +684,8 @@ const buildPersistedContextUncached = async (
   return {
     ...persisted,
     walletRows,
-    labelsByWalletId
+    labelsByWalletId,
+    finderAiByWalletId
   };
 };
 
@@ -943,6 +958,7 @@ const buildWalletLibraryExportRecord = (
   auditLogs: NoteAuditLog[],
   watchlistEntry: WatchlistEntry | undefined,
   importBatch: WalletImportBatch | undefined,
+  finderAi: WalletFinderAiInsight | undefined,
   alertItems: AlertListItem[],
   trades: Trade[],
   positions: PositionSnapshot[]
@@ -953,6 +969,7 @@ const buildWalletLibraryExportRecord = (
       wallet,
       metrics,
       labels,
+      finderAi,
       activeAlertCount: alertItems.filter((item) => item.alert.status === "open").length,
       latestTrade: sortByIsoDesc(trades, (trade) => trade.enteredAt)[0]
     },
@@ -966,6 +983,7 @@ const buildWalletLibraryExportRecord = (
     statusBadges: adminRow.statusBadges,
     sourceMeta: adminRow.sourceMeta,
     lastActivityAt: adminRow.lastActivityAt,
+    finderAi,
     labels,
     notes,
     auditLogs,
@@ -1028,6 +1046,7 @@ export const exportWalletLibrary = async (input?: {
         auditLogs,
         detail?.watchlistEntry,
         undefined,
+        detail?.finderAi,
         detail?.alerts ?? [],
         detail?.trades ?? [],
         detail?.positions ?? []
@@ -1052,13 +1071,21 @@ export const exportWalletLibrary = async (input?: {
     (wallet) => changedSinceMs === undefined || Date.parse(wallet.updatedAt) >= changedSinceMs
   );
   const walletIds = wallets.map((wallet) => wallet.id);
-  const [userLabelsByWalletId, notesByWalletId, auditLogsByWalletId, watchlistByWalletId, importBatchesById] =
+  const [
+    userLabelsByWalletId,
+    notesByWalletId,
+    auditLogsByWalletId,
+    watchlistByWalletId,
+    importBatchesById,
+    finderAiByWalletId
+  ] =
     await Promise.all([
       listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
       listWalletNotesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
       listWalletAuditLogsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
       listWatchlistEntriesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
-      getImportBatchMapForWallets(bindings.SMART_MONEY_DB, wallets)
+      getImportBatchMapForWallets(bindings.SMART_MONEY_DB, wallets),
+      listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
     ]);
 
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
@@ -1074,6 +1101,7 @@ export const exportWalletLibrary = async (input?: {
       auditLogsByWalletId.get(wallet.id) ?? [],
       watchlistByWalletId.get(wallet.id),
       wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined,
+      finderAiByWalletId.get(wallet.id),
       alertItemsByWalletId.get(wallet.id) ?? [],
       tradesByWalletId.get(wallet.id) ?? [],
       positionsByWalletId.get(wallet.id) ?? []
@@ -1496,10 +1524,11 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
     return undefined;
   }
 
-  const [userLabelsByWalletId, auditLogsByWalletId, watchlistByWalletId] = await Promise.all([
+  const [userLabelsByWalletId, auditLogsByWalletId, watchlistByWalletId, finderAiByWalletId] = await Promise.all([
     listWalletLabelsByWalletIds(db, [walletId]),
     listWalletAuditLogsByWalletIds(db, [walletId]),
-    listWatchlistEntriesByWalletIds(db, [walletId])
+    listWatchlistEntriesByWalletIds(db, [walletId]),
+    listWalletFinderAiInsightsByWalletIds(db, [walletId])
   ]);
 
   const labels = deriveSystemLabels([wallet], userLabelsByWalletId.get(walletId) ?? [], seedTrades);
@@ -1511,6 +1540,7 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
     wallet,
     metrics: computeWalletMetrics(wallet, seedTrades),
     labels,
+    finderAi: finderAiByWalletId.get(walletId),
     trades: seedTrades
       .filter((trade) => trade.walletId === walletId)
       .sort(
@@ -1906,6 +1936,7 @@ export const commitWalletImport = async (
 
   let createdCount = 0;
   let updatedCount = 0;
+  let finderAiUpsertedCount = 0;
   const failedRows: Array<{ rowNumber: number; displayName: string; reason: string }> = [];
 
   for (const row of request.rows) {
@@ -2040,6 +2071,18 @@ export const commitWalletImport = async (
         await upsertWatchlistEntry(wallet.id, commitRow.watchlistNote.trim(), actor);
       }
 
+      if (commitRow.finderAi && bindings?.SMART_MONEY_DB) {
+        await upsertPersistedWalletFinderAiInsight(bindings.SMART_MONEY_DB, wallet.id, {
+          ...commitRow.finderAi,
+          sourceName: commitRow.finderAi.sourceName || request.sourceName || importBatch.sourceName,
+          runId: commitRow.finderAi.runId || importBatch.sourceName,
+          normalizedAddress: commitRow.finderAi.normalizedAddress || wallet.normalizedAddress,
+          strategyFocus: commitRow.finderAi.strategyFocus || commitRow.wallet.strategyFocus,
+          importBatchId: importBatch.id
+        });
+        finderAiUpsertedCount += 1;
+      }
+
       existingByAddress.set(wallet.normalizedAddress, wallet);
       existingLabelsByAddress.set(wallet.normalizedAddress, [
         ...preservedLabels.filter((label) => label.source === "user"),
@@ -2072,6 +2115,7 @@ export const commitWalletImport = async (
     createdCount,
     updatedCount,
     failedRows,
+    finderAiUpsertedCount,
     importBatch: finalizedBatch ?? importBatch
   };
 };

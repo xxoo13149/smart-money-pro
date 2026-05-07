@@ -3,6 +3,7 @@ import {
   normalizeAddress,
   type WalletAiExtractPreviewRow,
   type WalletAiProviderMeta,
+  type WalletFinderAiInsight,
   type WalletImportCommitRequest,
   type WalletImportLabelDraft,
   type WalletImportPreviewRow,
@@ -20,6 +21,12 @@ import {
 } from "./data-service";
 
 type JsonRecord = Record<string, unknown>;
+
+type FinderWalletPayload = {
+  row: JsonRecord;
+  detail: JsonRecord;
+  finderAi?: JsonRecord;
+};
 
 export interface FinderImportRequest {
   finderBaseUrl?: string;
@@ -279,7 +286,10 @@ const getMatchedFinderEvaluations = (detail: JsonRecord) => {
 };
 
 const hasFinderMatchedLabels = (row: JsonRecord, detail: JsonRecord) =>
-  getMatchedFinderEvaluations(detail).length > 0 || asArray(row.labels).map(text).some(Boolean);
+  getMatchedFinderEvaluations(detail).length > 0 ||
+  asArray(row.labels).map(text).some(Boolean) ||
+  asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai).matched === true ||
+  asArray(asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai).labels).length > 0;
 
 const buildFinderLabels = (row: JsonRecord, detail: JsonRecord, sourceName: string) => {
   const labels = new Map<string, WalletImportLabelDraft>();
@@ -432,14 +442,114 @@ const shouldWatchlist = (row: JsonRecord, detail: JsonRecord) =>
   row.recommend_watchlist === true ||
   asRecord(detail.evidence_summary).suggest_watchlist === true;
 
+const compactFinderAiMetricValue = (value: unknown) => {
+  if (typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+  const normalized = text(value);
+  return normalized || undefined;
+};
+
+const normalizeFinderAiInsight = (
+  finderAi: JsonRecord | undefined,
+  input: {
+    row: JsonRecord;
+    detail: JsonRecord;
+    sourceName: string;
+    runId?: string;
+  }
+): WalletFinderAiInsight | undefined => {
+  if (!finderAi || Object.keys(finderAi).length === 0) {
+    return undefined;
+  }
+
+  const wallet = asRecord(finderAi.wallet);
+  const providerMeta = asRecord(finderAi.providerMeta);
+  const normalizedAddress =
+    normalizeAddress(text(finderAi.normalizedAddress) || text(wallet.address)) ||
+    normalizeAddress(getFinderWalletAddress(input.row, input.detail));
+
+  const labels = asArray(finderAi.labels)
+    .map(asRecord)
+    .map((label) => ({
+      kind: text(label.kind) || undefined,
+      value: text(label.value),
+      source: text(label.source) || undefined,
+      evidence: text(label.evidence) || undefined
+    }))
+    .filter((label) => label.value)
+    .slice(0, 12);
+  const primarySignals = asArray(finderAi.primarySignals)
+    .map(asRecord)
+    .map((signal) => ({
+      key: text(signal.key) || undefined,
+      label: text(signal.label),
+      matched: typeof signal.matched === "boolean" ? signal.matched : undefined,
+      reason: text(signal.reason) || undefined
+    }))
+    .filter((signal) => signal.label)
+    .slice(0, 6);
+  const keyMetrics = asArray(finderAi.keyMetrics)
+    .map(asRecord)
+    .map((metric) => ({
+      key: text(metric.key) || undefined,
+      label: text(metric.label),
+      value: compactFinderAiMetricValue(metric.value)
+    }))
+    .filter((metric) => metric.label)
+    .slice(0, 8);
+  const weatherSignals = asRecord(finderAi.weatherSignals);
+  const providerValue: WalletAiProviderMeta["provider"] =
+    text(providerMeta.provider) === "deepseek"
+      ? "deepseek"
+      : text(providerMeta.provider) === "finder"
+        ? "finder"
+        : "none";
+  const providerMetaPayload = Object.keys(providerMeta).length
+    ? {
+        provider: providerValue,
+        model: text(providerMeta.model) || "finder-app",
+        fallbackUsed: providerMeta.fallbackUsed === true,
+        succeededAt: text(providerMeta.succeededAt) || text(providerMeta.generatedAt) || undefined,
+        promptVersion: text(providerMeta.promptVersion) || undefined,
+        generatedAt: text(providerMeta.generatedAt) || undefined,
+        inputHash: text(providerMeta.inputHash) || undefined,
+        generationScope: text(providerMeta.generationScope) || undefined,
+        outputSchemaVersion: text(providerMeta.outputSchemaVersion) || undefined,
+        cacheKey: text(providerMeta.cacheKey) || undefined
+      } satisfies WalletAiProviderMeta
+    : undefined;
+
+  return {
+    walletId: text(finderAi.walletId) || undefined,
+    sourceName: text(finderAi.sourceName) || input.sourceName,
+    runId: text(finderAi.runId) || input.runId,
+    normalizedAddress: normalizedAddress || undefined,
+    strategyFocus: text(finderAi.strategyFocus) || undefined,
+    aiBriefShort: text(finderAi.aiBriefShort) || undefined,
+    aiBriefNote: text(finderAi.aiBriefNote) || undefined,
+    aiDeepNote: text(finderAi.aiDeepNote) || undefined,
+    sourceExcerpt: text(finderAi.sourceExcerpt) || undefined,
+    evidenceLevel: text(finderAi.evidenceLevel) || undefined,
+    hasConflict: finderAi.hasConflict === true,
+    needsReview: finderAi.needsReview === true,
+    labels,
+    primarySignals,
+    keyMetrics,
+    weatherSignals: Object.keys(weatherSignals).length > 0 ? weatherSignals : undefined,
+    providerMeta: providerMetaPayload,
+    raw: finderAi
+  };
+};
+
 const buildFinderPreviewRows = (
-  wallets: Array<{ row: JsonRecord; detail: JsonRecord }>,
+  wallets: Array<{ row: JsonRecord; detail: JsonRecord; finderAi?: JsonRecord }>,
   input: {
     sourceName: string;
     runId?: string;
   }
 ): WalletAiExtractPreviewRow[] =>
-  wallets.map(({ row, detail }, index) => {
+  wallets.map(({ row, detail, finderAi }, index) => {
     const address = getFinderWalletAddress(row, detail);
     const normalizedAddress = normalizeAddress(address);
     const userName = getFinderUserName(row, detail);
@@ -449,6 +559,12 @@ const buildFinderPreviewRows = (
     const keyMetrics = buildFinderMetrics(row, detail);
     const primarySignals = buildPrimarySignals(labels);
     const sourceExcerpt = buildSourceExcerpt(row, detail);
+    const normalizedFinderAi = normalizeFinderAiInsight(finderAi, {
+      row,
+      detail,
+      sourceName: input.sourceName,
+      runId: input.runId
+    });
     const errors: string[] = [];
 
     if (!normalizedAddress) {
@@ -464,7 +580,11 @@ const buildFinderPreviewRows = (
         address,
         displayName,
         alias: userName && userName.length <= 18 ? userName : undefined,
-        strategyFocus: buildStrategyFocus(labels, keyMetrics, row, detail) || undefined,
+        strategyFocus:
+          normalizedFinderAi?.aiBriefShort ||
+          normalizedFinderAi?.strategyFocus ||
+          buildStrategyFocus(labels, keyMetrics, row, detail) ||
+          undefined,
         teamNote: buildTeamNote({
           sourceName: input.sourceName,
           runId: input.runId,
@@ -489,8 +609,9 @@ const buildFinderPreviewRows = (
           sourceNote: input.sourceName
         }
       ],
+      finderAi: normalizedFinderAi,
       watchlistNote: shouldWatchlist(row, detail) ? "Finder 建议进入观察名单" : undefined,
-      sourceExcerpt: sourceExcerpt || undefined,
+      sourceExcerpt: normalizedFinderAi?.sourceExcerpt || sourceExcerpt || undefined,
       warnings: labels.length === 0 ? ["Finder 未提供命中标签，建议人工复核"] : [],
       errors,
       confidence: labels.length >= 2 ? "high" : labels.length ? "medium" : "unknown",
@@ -522,7 +643,7 @@ const buildReportLabelLines = (labels: WalletImportLabelDraft[]) =>
     .join("\n");
 
 const buildFinderReportText = (
-  wallets: Array<{ row: JsonRecord; detail: JsonRecord }>,
+  wallets: Array<{ row: JsonRecord; detail: JsonRecord; finderAi?: JsonRecord }>,
   input: {
     sourceName: string;
     runId?: string;
@@ -554,6 +675,41 @@ const attachFinderSourceNote = (rows: WalletAiExtractPreviewRow[], sourceName: s
     })),
     note: undefined
   }));
+
+const attachFinderAiInsights = (
+  rows: WalletAiExtractPreviewRow[],
+  deterministicRows: WalletAiExtractPreviewRow[]
+) => {
+  const finderAiByAddress = new Map(
+    deterministicRows
+      .map((row) => {
+        const normalizedAddress = normalizeAddress(row.wallet.address) || row.finderAi?.normalizedAddress;
+        return normalizedAddress && row.finderAi ? [normalizedAddress, row.finderAi] as const : null;
+      })
+      .filter((entry): entry is [string, WalletFinderAiInsight] => Boolean(entry))
+  );
+
+  return rows.map((row) => {
+    const normalizedAddress = normalizeAddress(row.wallet.address) || row.finderAi?.normalizedAddress;
+    const finderAi = normalizedAddress ? finderAiByAddress.get(normalizedAddress) : undefined;
+    if (!finderAi) {
+      return row;
+    }
+
+    return {
+      ...row,
+      finderAi,
+      wallet: {
+        ...row.wallet,
+        strategyFocus:
+          finderAi.aiBriefShort ||
+          finderAi.strategyFocus ||
+          row.wallet.strategyFocus
+      },
+      sourceExcerpt: finderAi.sourceExcerpt || row.sourceExcerpt
+    };
+  });
+};
 
 const countValidRows = (rows: WalletImportPreviewRow[]) =>
   rows.filter((row) => row.errors.length === 0).length;
@@ -589,7 +745,7 @@ const pullFinderWallets = async (input: FinderImportRequest) => {
     `/api/runs/${encodeURIComponent(runId)}/wallets?offset=0&limit=${limit}`
   );
   const rows = asArray(listPayload.items).map(asRecord);
-  const wallets: Array<{ row: JsonRecord; detail: JsonRecord }> = [];
+  const wallets: Array<{ row: JsonRecord; detail: JsonRecord; finderAi?: JsonRecord }> = [];
 
   for (let index = 0; index < rows.length; index += FINDER_DETAIL_CONCURRENCY) {
     const chunk = rows.slice(index, index + FINDER_DETAIL_CONCURRENCY);
@@ -612,7 +768,13 @@ const pullFinderWallets = async (input: FinderImportRequest) => {
     );
 
     chunk.forEach((row, detailIndex) => {
-      wallets.push({ row, detail: asRecord(details[detailIndex]) });
+      const detail = asRecord(details[detailIndex]);
+      const finderAi = asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai);
+      wallets.push({
+        row,
+        detail,
+        finderAi: Object.keys(finderAi).length > 0 ? finderAi : undefined
+      });
     });
   }
 
@@ -623,9 +785,12 @@ const resolveWalletInputs = async (input: FinderImportRequest) => {
   if (Array.isArray(input.wallets) && input.wallets.length > 0) {
     const wallets = input.wallets.map((item) => {
       const record = asRecord(item);
+      const detail = asRecord(record.detail ?? record.finder_detail ?? record);
+      const finderAi = asRecord(record.finderAi ?? record.finder_ai ?? detail.finderAi ?? detail.finder_ai);
       return {
         row: asRecord(record.row ?? record.finder_row ?? record.selection_record ?? record),
-        detail: asRecord(record.detail ?? record.finder_detail ?? record)
+        detail,
+        finderAi: Object.keys(finderAi).length > 0 ? finderAi : undefined
       };
     });
 
@@ -720,7 +885,10 @@ export const previewFinderImport = async (
       text: reportText,
       sourceName: resolvedSourceName
     });
-    const rows = attachFinderSourceNote(aiPreview.rows, resolvedSourceName);
+    const rows = attachFinderAiInsights(
+      attachFinderSourceNote(aiPreview.rows, resolvedSourceName),
+      deterministicRows
+    );
     if (countValidRows(rows) > 0) {
       return {
         rows,

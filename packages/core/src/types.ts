@@ -281,6 +281,7 @@ export interface WalletTableRow {
   wallet: Wallet;
   metrics: WalletMetrics;
   labels: WalletLabel[];
+  finderAi?: WalletFinderAiInsight;
   activeAlertCount: number;
   latestTrade?: Trade;
 }
@@ -300,7 +301,10 @@ export interface AddressHoverCard {
   officialTags: AddressLabelBadge[];
   officialNoteText?: string;
   aiTags: AddressLabelBadge[];
+  aiBriefShortText?: string;
   aiStatsNoteText?: string;
+  aiNarrativeNoteText?: string;
+  aiDeepNoteText?: string;
 }
 
 export interface AddressSummary {
@@ -315,6 +319,7 @@ export interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiDeepNote?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -354,6 +359,7 @@ export interface WalletImportPreviewRow {
   rowNumber: number;
   wallet: WalletImportWalletDraft;
   labels: WalletImportLabelDraft[];
+  finderAi?: WalletFinderAiInsight;
   note?: string;
   watchlistNote?: string;
   sourceExcerpt?: string;
@@ -364,10 +370,60 @@ export interface WalletImportPreviewRow {
 export type WalletAiConfidence = "high" | "medium" | "low" | "unknown";
 
 export interface WalletAiProviderMeta {
-  provider: "gemini" | "groq" | "none";
+  provider: "gemini" | "groq" | "deepseek" | "finder" | "none";
   model: string;
   fallbackUsed: boolean;
   succeededAt?: string;
+  promptVersion?: string;
+  generatedAt?: string;
+  inputHash?: string;
+  generationScope?: string;
+  outputSchemaVersion?: string;
+  cacheKey?: string;
+}
+
+export interface WalletFinderAiMetric {
+  key?: string;
+  label: string;
+  value?: string | number | boolean;
+}
+
+export interface WalletFinderAiLabel {
+  kind?: string;
+  value: string;
+  source?: string;
+  evidence?: string;
+}
+
+export interface WalletFinderAiPrimarySignal {
+  key?: string;
+  label: string;
+  matched?: boolean;
+  reason?: string;
+}
+
+export interface WalletFinderAiInsight {
+  walletId?: string;
+  sourceName?: string;
+  runId?: string;
+  normalizedAddress?: string;
+  strategyFocus?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
+  aiDeepNote?: string;
+  sourceExcerpt?: string;
+  evidenceLevel?: string;
+  hasConflict?: boolean;
+  needsReview?: boolean;
+  labels?: WalletFinderAiLabel[];
+  primarySignals?: WalletFinderAiPrimarySignal[];
+  keyMetrics?: WalletFinderAiMetric[];
+  weatherSignals?: Record<string, unknown>;
+  providerMeta?: WalletAiProviderMeta;
+  raw?: Record<string, unknown>;
+  importBatchId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface WalletAiExtractRequest {
@@ -404,6 +460,7 @@ export interface WalletManualCreateInput {
 export interface WalletAdminRow {
   wallet: Wallet;
   labels: WalletLabel[];
+  finderAi?: WalletFinderAiInsight;
   highlights: AddressLabelBadge[];
   summaryText: string;
   statusBadges: WalletStatusBadge[];

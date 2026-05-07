@@ -21,6 +21,7 @@ import {
   type WalletCurationStatus,
   type WalletFacetCount,
   type WalletFacetSummary,
+  type WalletFinderAiInsight,
   type WalletImportBatch,
   type WalletLabel,
   type WalletLabelKind,
@@ -40,6 +41,7 @@ import type {
   ExtensionSessionRecord,
   WalletDeleteInput,
   WalletImportBatchRecord,
+  WalletFinderAiInsightInput,
   WalletInput,
   WalletListFilters,
   WalletLabelInput,
@@ -63,6 +65,7 @@ const REQUIRED_SCHEMA_TABLES = [
   "wallet_audit_logs",
   "wallet_saved_views",
   "wallet_import_batches",
+  "wallet_finder_ai_insights",
   "extension_invites",
   "extension_users",
   "extension_sessions",
@@ -164,6 +167,42 @@ const mapWalletLabelRow = (row: Record<string, unknown>): WalletLabel => ({
   sourceNote: row.source_note ? repairPossiblyMojibake(String(row.source_note)) : undefined,
   createdAt: String(row.created_at),
   updatedAt: row.updated_at ? String(row.updated_at) : String(row.created_at)
+});
+
+const parseJsonField = <T,>(value: unknown, fallback: T): T => {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const mapWalletFinderAiRow = (row: Record<string, unknown>): WalletFinderAiInsight => ({
+  walletId: String(row.wallet_id),
+  sourceName: row.source_name ? repairPossiblyMojibake(String(row.source_name)) : undefined,
+  runId: row.run_id ? String(row.run_id) : undefined,
+  normalizedAddress: row.normalized_address ? String(row.normalized_address) : undefined,
+  strategyFocus: row.strategy_focus ? repairPossiblyMojibake(String(row.strategy_focus)) : undefined,
+  aiBriefShort: row.ai_brief_short ? repairPossiblyMojibake(String(row.ai_brief_short)) : undefined,
+  aiBriefNote: row.ai_brief_note ? repairPossiblyMojibake(String(row.ai_brief_note)) : undefined,
+  aiDeepNote: row.ai_deep_note ? repairPossiblyMojibake(String(row.ai_deep_note)) : undefined,
+  sourceExcerpt: row.source_excerpt ? repairPossiblyMojibake(String(row.source_excerpt)) : undefined,
+  evidenceLevel: row.evidence_level ? String(row.evidence_level) : undefined,
+  hasConflict: Number(row.has_conflict ?? 0) === 1,
+  needsReview: Number(row.needs_review ?? 0) === 1,
+  labels: parseJsonField(row.labels_json, []),
+  primarySignals: parseJsonField(row.primary_signals_json, []),
+  keyMetrics: parseJsonField(row.key_metrics_json, []),
+  weatherSignals: parseJsonField(row.weather_signals_json, undefined),
+  providerMeta: parseJsonField(row.provider_meta_json, undefined),
+  raw: parseJsonField(row.raw_json, undefined),
+  importBatchId: row.import_batch_id ? String(row.import_batch_id) : undefined,
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at)
 });
 
 const mapAuditLogRow = (row: Record<string, unknown>): NoteAuditLog => ({
@@ -928,13 +967,19 @@ const buildAiMetricNote = (entry: DisplayLabelEntry) => {
   return metric ? clampLabelText(`${entry.badge.text}: ${metric}`, HOVER_NOTE_MAX) : entry.badge.text;
 };
 
-const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undefined => {
+const createAddressHoverCard = (
+  labels: WalletLabel[],
+  finderAi?: WalletFinderAiInsight
+): AddressHoverCard | undefined => {
   const displayEntries = createDisplayLabelEntries(labels);
   const officialEntries = displayEntries.filter((entry) => entry.label.source === "user");
   const aiEntries = displayEntries.filter((entry) => entry.label.source !== "user");
 
   const officialTags = officialEntries.map((entry) => entry.badge).slice(0, 6);
   const aiTags = aiEntries.map((entry) => entry.badge).slice(0, 6);
+  const aiBriefShortText = compactLabelText(finderAi?.aiBriefShort);
+  const aiNarrativeNoteText = compactLabelText(finderAi?.aiBriefNote);
+  const aiDeepNoteText = compactLabelText(finderAi?.aiDeepNote);
 
   const officialNoteText = joinUniqueLabelTexts(
     officialEntries.flatMap((entry) => [entry.label.verificationNote ?? "", entry.label.sourceNote ?? ""])
@@ -942,7 +987,15 @@ const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undef
 
   const aiStatsNoteText = joinUniqueLabelTexts(aiEntries.map(buildAiMetricNote));
 
-  if (officialTags.length === 0 && aiTags.length === 0 && !officialNoteText && !aiStatsNoteText) {
+  if (
+    officialTags.length === 0 &&
+    aiTags.length === 0 &&
+    !officialNoteText &&
+    !aiBriefShortText &&
+    !aiStatsNoteText &&
+    !aiNarrativeNoteText &&
+    !aiDeepNoteText
+  ) {
     return undefined;
   }
 
@@ -950,7 +1003,10 @@ const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undef
     officialTags,
     officialNoteText,
     aiTags,
-    aiStatsNoteText
+    aiBriefShortText: aiBriefShortText || undefined,
+    aiStatsNoteText,
+    aiNarrativeNoteText: aiNarrativeNoteText || undefined,
+    aiDeepNoteText: aiDeepNoteText || undefined
   };
 };
 
@@ -1030,6 +1086,7 @@ export const getSmartMoneySchemaStatus = async (
 export const bootstrapSmartMoneyDb = async (db: D1Database) => {
   await runMigrations(db);
   await ensureDatasetVersion(db, "address_labels");
+  await ensureDatasetVersion(db, "finder_ai");
   const status = await getSmartMoneySchemaStatus(db);
   if (!status.isReady) {
     const parts = [
@@ -2188,6 +2245,170 @@ export const getWalletImportBatchById = async (db: D1Database, batchId: string) 
   return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
 };
 
+const stringifyJsonField = (value: unknown) =>
+  value === undefined || value === null ? null : JSON.stringify(value);
+
+const buildFinderAiSearchableText = (input: WalletFinderAiInsightInput) =>
+  [
+    input.strategyFocus,
+    input.aiBriefShort,
+    input.aiBriefNote,
+    input.aiDeepNote,
+    input.sourceExcerpt,
+    input.evidenceLevel,
+    input.providerMeta?.model,
+    input.providerMeta?.promptVersion,
+    ...(input.labels ?? []).flatMap((label) => [label.kind, label.value, label.source, label.evidence]),
+    ...(input.primarySignals ?? []).flatMap((signal) => [signal.key, signal.label, signal.reason]),
+    ...(input.keyMetrics ?? []).flatMap((metric) => [metric.key, metric.label, String(metric.value ?? "")])
+  ]
+    .map((value) => compactLabelText(value))
+    .filter(Boolean)
+    .join(" ");
+
+export const getWalletFinderAiInsight = async (db: D1Database, walletId: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM wallet_finder_ai_insights WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<Record<string, unknown>>();
+
+  return row ? mapWalletFinderAiRow(row) : null;
+};
+
+export const upsertWalletFinderAiInsight = async (
+  db: D1Database,
+  walletId: string,
+  input: WalletFinderAiInsightInput
+) => {
+  const wallet = await getWalletById(db, walletId, { includeDeleted: true });
+  if (!wallet) {
+    return null;
+  }
+
+  const existing = await db
+    .prepare(`SELECT created_at FROM wallet_finder_ai_insights WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<{ created_at?: string }>();
+  const timestamp = nowIso();
+  const createdAt = existing?.created_at ?? timestamp;
+  const searchableText = buildFinderAiSearchableText(input);
+
+  await db
+    .prepare(
+      `INSERT INTO wallet_finder_ai_insights (
+        wallet_id,
+        source_name,
+        run_id,
+        normalized_address,
+        strategy_focus,
+        ai_brief_short,
+        ai_brief_note,
+        ai_deep_note,
+        source_excerpt,
+        evidence_level,
+        has_conflict,
+        needs_review,
+        labels_json,
+        primary_signals_json,
+        key_metrics_json,
+        weather_signals_json,
+        provider_meta_json,
+        raw_json,
+        searchable_text,
+        import_batch_id,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(wallet_id) DO UPDATE SET
+        source_name = excluded.source_name,
+        run_id = excluded.run_id,
+        normalized_address = excluded.normalized_address,
+        strategy_focus = excluded.strategy_focus,
+        ai_brief_short = excluded.ai_brief_short,
+        ai_brief_note = excluded.ai_brief_note,
+        ai_deep_note = excluded.ai_deep_note,
+        source_excerpt = excluded.source_excerpt,
+        evidence_level = excluded.evidence_level,
+        has_conflict = excluded.has_conflict,
+        needs_review = excluded.needs_review,
+        labels_json = excluded.labels_json,
+        primary_signals_json = excluded.primary_signals_json,
+        key_metrics_json = excluded.key_metrics_json,
+        weather_signals_json = excluded.weather_signals_json,
+        provider_meta_json = excluded.provider_meta_json,
+        raw_json = excluded.raw_json,
+        searchable_text = excluded.searchable_text,
+        import_batch_id = excluded.import_batch_id,
+        updated_at = excluded.updated_at`
+    )
+    .bind(
+      walletId,
+      input.sourceName?.trim() || null,
+      input.runId?.trim() || null,
+      input.normalizedAddress?.trim() || wallet.normalizedAddress,
+      input.strategyFocus?.trim() || null,
+      input.aiBriefShort?.trim() || null,
+      input.aiBriefNote?.trim() || null,
+      input.aiDeepNote?.trim() || null,
+      input.sourceExcerpt?.trim() || null,
+      input.evidenceLevel?.trim() || null,
+      input.hasConflict ? 1 : 0,
+      input.needsReview ? 1 : 0,
+      stringifyJsonField(input.labels ?? []),
+      stringifyJsonField(input.primarySignals ?? []),
+      stringifyJsonField(input.keyMetrics ?? []),
+      stringifyJsonField(input.weatherSignals),
+      stringifyJsonField(input.providerMeta),
+      stringifyJsonField(input.raw),
+      searchableText,
+      input.importBatchId?.trim() || null,
+      createdAt,
+      timestamp
+    )
+    .run();
+
+  await touchWallet(db, walletId);
+  await Promise.all([
+    incrementDatasetVersion(db, "address_labels"),
+    incrementDatasetVersion(db, "finder_ai")
+  ]);
+
+  return getWalletFinderAiInsight(db, walletId);
+};
+
+export const listWalletFinderAiInsightsByWalletIds = async (
+  db: D1Database,
+  walletIds: string[]
+) => {
+  if (walletIds.length === 0) {
+    return new Map<string, WalletFinderAiInsight>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(walletIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT * FROM wallet_finder_ai_insights
+             WHERE wallet_id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return new Map(
+    rows.map((row) => {
+      const insight = mapWalletFinderAiRow(row);
+      return [insight.walletId ?? String(row.wallet_id), insight] as const;
+    })
+  );
+};
+
 export const listWalletImportBatches = async (
   db: D1Database,
   input?: {
@@ -2765,10 +2986,12 @@ export const listAddressSummaries = async (
   }
 
   const walletIds = wallets.map((wallet) => wallet.id);
-  const [labelsByWalletId, notesByWalletId, version] = await Promise.all([
+  const [labelsByWalletId, notesByWalletId, finderAiByWalletId, labelsVersion, finderAiVersion] = await Promise.all([
     listWalletLabelsByWalletIds(db, walletIds),
     listWalletNotesByWalletIds(db, walletIds),
-    getDatasetVersion(db, "address_labels")
+    listWalletFinderAiInsightsByWalletIds(db, walletIds),
+    getDatasetVersion(db, "address_labels"),
+    getDatasetVersion(db, "finder_ai")
   ]);
 
   const walletRowByAddress = new Map(
@@ -2784,9 +3007,13 @@ export const listAddressSummaries = async (
       }
 
       const labels = labelsByWalletId.get(wallet.id) ?? [];
+      const finderAi = finderAiByWalletId.get(wallet.id);
       const latestNote = notesByWalletId.get(wallet.id)?.[0];
       const walletRow = walletRowByAddress.get(normalizedAddress);
-      const updatedAt = walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt;
+      const updatedAt = [walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt, finderAi?.updatedAt]
+        .filter((value): value is string => Boolean(value))
+        .sort((left, right) => toTimestamp(right) - toTimestamp(left))[0] ?? wallet.updatedAt;
+      const strategyFocus = finderAi?.aiBriefShort || finderAi?.strategyFocus || wallet.strategyFocus || undefined;
 
       return {
         chain: wallet.chain,
@@ -2794,16 +3021,17 @@ export const listAddressSummaries = async (
         normalizedAddress: wallet.normalizedAddress,
         alias: wallet.alias ?? wallet.displayName,
         displayName: wallet.displayName,
-        strategyFocus: wallet.strategyFocus || undefined,
+        strategyFocus,
         badges: createSummaryBadges(labels),
         hoverBadges: createHoverBadges(labels),
         statusBadges: createStatusBadges(wallet),
-        hoverCard: createAddressHoverCard(labels),
-        noteSnippet: latestNote?.content ?? wallet.teamNote,
+        hoverCard: createAddressHoverCard(labels, finderAi),
+        noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+        aiDeepNote: finderAi?.aiDeepNote,
         watchlisted: wallet.watchlisted,
         detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
         updatedAt,
-        version: `v${version}:${wallet.id}:${updatedAt}`
+        version: `v${labelsVersion}.${finderAiVersion}:${wallet.id}:${updatedAt}`
       } satisfies AddressSummary;
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
@@ -2843,6 +3071,12 @@ export const searchAddressSummaries = async (
            OR lower(coalesce(team_note, '')) LIKE ?
            OR EXISTS (
              SELECT 1
+             FROM wallet_finder_ai_insights
+             WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+               AND lower(wallet_finder_ai_insights.searchable_text) LIKE ?
+           )
+           OR EXISTS (
+             SELECT 1
              FROM wallet_user_labels
              WHERE wallet_user_labels.wallet_id = wallets.id
                AND (
@@ -2864,6 +3098,7 @@ export const searchAddressSummaries = async (
       queryLike,
       queryLike,
       queryLike,
+      queryLike,
       queryLike
     )
     .all<Record<string, unknown>>();
@@ -2875,17 +3110,23 @@ export const searchAddressSummaries = async (
   }
 
   const walletIds = wallets.map((wallet) => wallet.id);
-  const [labelsByWalletId, notesByWalletId, version] = await Promise.all([
+  const [labelsByWalletId, notesByWalletId, finderAiByWalletId, labelsVersion, finderAiVersion] = await Promise.all([
     listWalletLabelsByWalletIds(db, walletIds),
     listWalletNotesByWalletIds(db, walletIds),
-    getDatasetVersion(db, "address_labels")
+    listWalletFinderAiInsightsByWalletIds(db, walletIds),
+    getDatasetVersion(db, "address_labels"),
+    getDatasetVersion(db, "finder_ai")
   ]);
 
   return wallets.map((wallet, index) => {
     const labels = labelsByWalletId.get(wallet.id) ?? [];
+    const finderAi = finderAiByWalletId.get(wallet.id);
     const latestNote = notesByWalletId.get(wallet.id)?.[0];
     const walletRow = walletRows[index];
-    const updatedAt = walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt;
+    const updatedAt = [walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt, finderAi?.updatedAt]
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => toTimestamp(right) - toTimestamp(left))[0] ?? wallet.updatedAt;
+    const strategyFocus = finderAi?.aiBriefShort || finderAi?.strategyFocus || wallet.strategyFocus || undefined;
 
     return {
       chain: wallet.chain,
@@ -2893,16 +3134,17 @@ export const searchAddressSummaries = async (
       normalizedAddress: wallet.normalizedAddress,
       displayName: wallet.displayName,
       alias: wallet.alias ?? wallet.displayName,
-      strategyFocus: wallet.strategyFocus || undefined,
+      strategyFocus,
       badges: createSummaryBadges(labels),
       hoverBadges: createHoverBadges(labels),
       statusBadges: createStatusBadges(wallet),
-      hoverCard: createAddressHoverCard(labels),
-      noteSnippet: latestNote?.content ?? wallet.teamNote,
+      hoverCard: createAddressHoverCard(labels, finderAi),
+      noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+      aiDeepNote: finderAi?.aiDeepNote,
       watchlisted: wallet.watchlisted,
       detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
       updatedAt,
-      version: `v${version}:${wallet.id}:${updatedAt}`,
+      version: `v${labelsVersion}.${finderAiVersion}:${wallet.id}:${updatedAt}`,
       bio: wallet.bio || undefined,
       teamNote: wallet.teamNote || undefined
     } satisfies AddressSearchResult;

@@ -292,14 +292,19 @@ export const WalletsConsole = ({
     () => visibleRows.filter((row) => selectedIds.includes(row.wallet.id)),
     [selectedIds, visibleRows]
   );
+  const panelRow = visibleRows.find((row) => row.wallet.id === panelTargetId) ?? null;
   const panelWallet =
     detail?.wallet.id === panelTargetId
       ? detail.wallet
-      : visibleRows.find((row) => row.wallet.id === panelTargetId)?.wallet ?? null;
+      : panelRow?.wallet ?? null;
   const panelLabels =
     detail?.wallet.id === panelTargetId
       ? detail.labels
-      : visibleRows.find((row) => row.wallet.id === panelTargetId)?.labels ?? [];
+      : panelRow?.labels ?? [];
+  const panelFinderAi =
+    detail?.wallet.id === panelTargetId
+      ? detail.finderAi
+      : panelRow?.finderAi;
   const reviewTargetId = panelTargetId ?? focusRowId;
   const reviewRow = visibleRows.find((row) => row.wallet.id === reviewTargetId) ?? null;
   const reviewWallet =
@@ -322,6 +327,11 @@ export const WalletsConsole = ({
   const activeSystemView = getSystemViewId(queryState);
   const canPinPanel = isWideEnoughToPin(viewportWidth);
   const inspectorTitle = panelWallet?.alias ?? panelWallet?.displayName ?? "地址检查器";
+  const panelFinderAiMeta = [
+    panelFinderAi?.providerMeta?.model,
+    panelFinderAi?.providerMeta?.promptVersion,
+    panelFinderAi?.evidenceLevel
+  ].filter(Boolean).join(" / ");
 
   const pushFeedback = (message: string) => {
     setFeedback(message);
@@ -2103,34 +2113,39 @@ export const WalletsConsole = ({
                     <span>一句话摘要</span>
                     <strong>{panelWallet.strategyFocus || "待补充"}</strong>
                   </div>
+                  {panelFinderAi ? (
+                    <>
+                      <div className={styles.metaRow}>
+                        <span>Finder AI 结论</span>
+                        <strong>{panelFinderAi.aiBriefShort || panelFinderAi.strategyFocus || "已同步"}</strong>
+                      </div>
+                      <div className={styles.metaRow}>
+                        <span>Finder AI 状态</span>
+                        <strong>
+                          {panelFinderAi.needsReview
+                            ? "需复核"
+                            : panelFinderAi.hasConflict
+                              ? "有冲突"
+                              : "可展示"}
+                        </strong>
+                      </div>
+                    </>
+                  ) : null}
                   <div className={styles.metaRow}>
                     <span>来源</span>
-                    <strong>
-                      {visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.label ??
-                        panelWallet.sourceType}
-                    </strong>
+                    <strong>{panelRow?.sourceMeta.label ?? panelWallet.sourceType}</strong>
                   </div>
                   <div className={styles.metaRow}>
                     <span>来源批次</span>
-                    <strong>
-                      {visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.importBatchId ??
-                        "未关联"}
-                    </strong>
+                    <strong>{panelRow?.sourceMeta.importBatchId ?? "未关联"}</strong>
                   </div>
                   <div className={styles.metaRow}>
                     <span>来源名称</span>
-                    <strong>
-                      {visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.sourceName ??
-                        "未记录"}
-                    </strong>
+                    <strong>{panelRow?.sourceMeta.sourceName ?? "未记录"}</strong>
                   </div>
                   <div className={styles.metaRow}>
                     <span>导入时间</span>
-                    <strong>
-                      {formatDate(
-                        visibleRows.find((row) => row.wallet.id === panelWallet.id)?.sourceMeta.importedAt
-                      )}
-                    </strong>
+                    <strong>{formatDate(panelRow?.sourceMeta.importedAt)}</strong>
                   </div>
                   <div className={styles.metaRow}>
                     <span>创建时间</span>
@@ -2320,6 +2335,81 @@ export const WalletsConsole = ({
                 className={styles.panelSection}
               >
                 <div className={styles.panelSectionTitle}>分析摘要</div>
+                {panelFinderAi ? (
+                  <div className={styles.metaCard}>
+                    <div className={styles.subtleHeader}>
+                      <strong>Finder AI v6</strong>
+                      <span>{panelFinderAiMeta || formatDate(panelFinderAi.updatedAt)}</span>
+                    </div>
+                    <div className={styles.metaRow}>
+                      <span>结论 / 策略结论</span>
+                      <strong>{panelFinderAi.aiBriefShort || panelFinderAi.strategyFocus || "待补充"}</strong>
+                    </div>
+                    {panelFinderAi.aiBriefNote ? (
+                      <div>
+                        <span className={styles.identitySubtle}>摘要说明</span>
+                        <div className={styles.longText}>{panelFinderAi.aiBriefNote}</div>
+                      </div>
+                    ) : null}
+                    {panelFinderAi.aiDeepNote ? (
+                      <div>
+                        <span className={styles.identitySubtle}>深度解读</span>
+                        <div className={styles.longText}>{panelFinderAi.aiDeepNote}</div>
+                      </div>
+                    ) : null}
+                    {panelFinderAi.keyMetrics?.length ? (
+                      <div>
+                        <span className={styles.identitySubtle}>关键指标</span>
+                        <div className={styles.identityMeta}>
+                          {panelFinderAi.keyMetrics.map((metric, index) => (
+                            <span key={`${metric.key ?? metric.label}-${index}`} className={styles.panelTag}>
+                              {metric.label}: {String(metric.value ?? "--")}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {panelFinderAi.primarySignals?.length ? (
+                      <div className={styles.labelEditorList}>
+                        <span className={styles.identitySubtle}>命中信号</span>
+                        {panelFinderAi.primarySignals.map((signal, index) => (
+                          <div key={`${signal.key ?? signal.label}-${index}`} className={styles.labelEditorCard}>
+                            <div className={styles.labelEditorTop}>
+                              <strong>{signal.label}</strong>
+                              <span className={styles.panelTag}>{signal.matched === false ? "未命中" : "命中"}</span>
+                            </div>
+                            {signal.reason ? <div className={styles.longText}>{signal.reason}</div> : null}
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {panelFinderAi.labels?.length ? (
+                      <div>
+                        <span className={styles.identitySubtle}>同步标签</span>
+                        <div className={styles.identityMeta}>
+                          {panelFinderAi.labels.map((label, index) => (
+                            <span key={`${label.kind ?? "label"}-${label.value}-${index}`} className={styles.panelTag}>
+                              {label.kind ? `${label.kind}: ` : ""}
+                              {label.value}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {panelFinderAi.sourceExcerpt ? (
+                      <div>
+                        <span className={styles.identitySubtle}>来源摘录</span>
+                        <div className={styles.longText}>{panelFinderAi.sourceExcerpt}</div>
+                      </div>
+                    ) : null}
+                    <div className={styles.metaRow}>
+                      <span>Run ID</span>
+                      <strong>{panelFinderAi.runId || "未记录"}</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <div className={styles.metaCard}>暂时还没有 Finder AI v6 深度解读。下一次 Finder 同步带上 finderAi 后会显示在这里。</div>
+                )}
                 <div className={styles.analysisGrid}>
                   <div className={styles.metricCard}>
                     <span>胜率</span>

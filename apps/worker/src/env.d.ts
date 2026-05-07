@@ -15,4 +15,7 @@ export interface Env {
   PUBLIC_EXTENSION_BASE_URL: string;
   POLYMARKET_GAMMA_URL?: string;
   POLYMARKET_DATA_URL?: string;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_BASE_URL?: string;
+  DEEPSEEK_MODEL?: string;
 }
