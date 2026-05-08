@@ -114,6 +114,14 @@ export interface PageSurfaceState {
   lastUpdatedAt: string;
 }
 
+export interface SidePanelFocusTarget {
+  address: string;
+  normalizedAddress?: string;
+  displayName?: string;
+  requestedAt: string;
+  source: "hover" | "inline" | "popup" | "search";
+}
+
 export interface ExtensionStorageChange {
   oldValue?: unknown;
   newValue?: unknown;
@@ -128,6 +136,7 @@ export const AUTH_SESSION_KEY = "wsm.authSession";
 export const SYNC_STATE_KEY = "wsm.syncState";
 export const RUNTIME_STATE_KEY = "wsm.runtimeState";
 export const PAGE_SURFACE_STATE_KEY = "wsm.pageSurfaceState";
+export const SIDEPANEL_FOCUS_KEY = "wsm.sidepanelFocus";
 
 let runtimeConfigPromise: Promise<ExtensionRuntimeConfig> | null = null;
 

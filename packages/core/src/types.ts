@@ -319,7 +319,10 @@ export interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
   aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -443,7 +446,7 @@ export interface WalletAiExtractPreviewRow extends WalletImportPreviewRow {
 
 export interface WalletImportCommitRequest {
   rows: WalletImportPreviewRow[];
-  mode?: "file" | "text" | "ai";
+  mode?: "file" | "text" | "ai" | "finder";
   sourceType?: WalletSourceType;
   sourceName?: string;
   preserveExistingManualFields?: boolean;

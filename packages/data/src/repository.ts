@@ -867,6 +867,13 @@ const getLabelMetricText = (label: WalletLabel) => {
   return metric ? clampLabelText(metric, LABEL_METRIC_MAX) : undefined;
 };
 
+const getActivityLevelLabel = (labels: WalletLabel[]) =>
+  labels
+    .filter((label) => label.kind === "activity_level")
+    .sort((left, right) => toTimestamp(right.updatedAt ?? right.createdAt) - toTimestamp(left.updatedAt ?? left.createdAt))
+    .map((label) => compactLabelText(label.value) || compactLabelText(label.name))
+    .find(Boolean);
+
 const getLabelTone = (label: WalletLabel): AddressLabelBadge["tone"] => {
   if (label.source === "user") {
     return "accent";
@@ -889,7 +896,10 @@ const getLabelSortPriority = (label: WalletLabel) =>
   ((label.verificationNote || label.sourceNote) && label.source === "user" ? 120 : 0);
 
 const shouldIncludeSummaryLabel = (kind: WalletLabelKind) =>
-  kind !== "signal_quality" && kind !== "market_scope" && kind !== "confidence";
+  kind !== "activity_level" &&
+  kind !== "signal_quality" &&
+  kind !== "market_scope" &&
+  kind !== "confidence";
 
 const toLabelBadge = (label: WalletLabel): AddressLabelBadge => {
   const displayText = getLabelDisplayText(label);
@@ -1028,13 +1038,6 @@ const createStatusBadges = (wallet: Wallet): AddressLabelBadge[] => {
       text: "已删除",
       tone: "danger",
       priority: 60
-    });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "待复核",
-      tone: "ai-review",
-      priority: 35
     });
   }
 
@@ -3027,7 +3030,10 @@ export const listAddressSummaries = async (
         statusBadges: createStatusBadges(wallet),
         hoverCard: createAddressHoverCard(labels, finderAi),
         noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+        aiBriefShort: finderAi?.aiBriefShort ?? finderAi?.strategyFocus,
+        aiBriefNote: finderAi?.aiBriefNote,
         aiDeepNote: finderAi?.aiDeepNote,
+        activityLevel: getActivityLevelLabel(labels),
         watchlisted: wallet.watchlisted,
         detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
         updatedAt,
@@ -3140,7 +3146,10 @@ export const searchAddressSummaries = async (
       statusBadges: createStatusBadges(wallet),
       hoverCard: createAddressHoverCard(labels, finderAi),
       noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+      aiBriefShort: finderAi?.aiBriefShort ?? finderAi?.strategyFocus,
+      aiBriefNote: finderAi?.aiBriefNote,
       aiDeepNote: finderAi?.aiDeepNote,
+      activityLevel: getActivityLevelLabel(labels),
       watchlisted: wallet.watchlisted,
       detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
       updatedAt,

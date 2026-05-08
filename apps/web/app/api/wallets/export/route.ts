@@ -12,16 +12,28 @@ const readBoolean = (value: string | null, fallback: boolean) => {
   return value === "true";
 };
 
+const readFirstParam = (params: URLSearchParams, ...keys: string[]) => {
+  for (const key of keys) {
+    const value = params.get(key);
+    if (value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+};
+
 export async function GET(request: NextRequest) {
   const auth = await requireAdminApiSession(request);
   if (!auth.ok) {
     return auth.response;
   }
 
-  const scope = request.nextUrl.searchParams.get("scope");
-  const includeDeleted = readBoolean(request.nextUrl.searchParams.get("includeDeleted"), true);
-  const changedSince = request.nextUrl.searchParams.get("changedSince") ?? undefined;
-  const query = scope === "all" ? undefined : parseWalletListQueryInput(request.nextUrl.searchParams);
+  const searchParams = request.nextUrl.searchParams;
+  const scope = searchParams.get("scope");
+  const includeDeleted = readBoolean(readFirstParam(searchParams, "includeDeleted", "include_deleted"), true);
+  const changedSince = readFirstParam(searchParams, "changedSince", "changed_since") ?? undefined;
+  const query = scope === "all" ? undefined : parseWalletListQueryInput(searchParams);
 
   try {
     const data = await exportWalletLibrary({

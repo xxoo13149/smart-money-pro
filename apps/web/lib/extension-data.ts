@@ -1,12 +1,19 @@
 import {
   aggregatePolymarketHolders,
   type AddressSummary,
+  type AddressSearchResult,
   type ChainId,
   type MarketAnnotationResponse,
+  normalizeAddress,
   type PolymarketTokenHoldersGroup
 } from "@weather-smart-money/core";
+import {
+  listAddressSummaries as listPersistedAddressSummaries,
+  searchAddressSummaries as searchPersistedAddressSummaries
+} from "@weather-smart-money/data";
 
-import { lookupAddressSummaries } from "./demo-store";
+import { lookupAddressSummaries, listWalletRows as listDemoWalletRows } from "./demo-store";
+import { getSmartMoneyBindings } from "./cloudflare-env";
 
 interface GammaMarketResponse {
   conditionId: string;
@@ -111,7 +118,102 @@ export const lookupAddressSummariesPayload = async (
   addresses: string[],
   options?: { chain?: ChainId; baseUrl?: string }
 ) => {
-  const items = lookupAddressSummaries(addresses, options);
+  const chain = options?.chain ?? "polygon";
+  const baseUrl = options?.baseUrl ?? "";
+  const normalizedAddresses = Array.from(
+    new Set(
+      addresses.flatMap((address) => {
+        const normalized = normalizeAddress(address);
+        return normalized ? [normalized] : [];
+      })
+    )
+  );
+  const bindings = await getSmartMoneyBindings();
+  const items = bindings?.SMART_MONEY_DB
+    ? await listPersistedAddressSummaries(bindings.SMART_MONEY_DB, {
+        chain,
+        normalizedAddresses,
+        adminBaseUrl: baseUrl
+      })
+    : lookupAddressSummaries(addresses, options);
+
+  return {
+    items,
+    version: await createLabelsVersion(items)
+  };
+};
+
+const searchDemoAddressSummaries = (
+  query: string,
+  options?: { chain?: ChainId; baseUrl?: string; limit?: number }
+): AddressSearchResult[] => {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  const chain = options?.chain ?? "polygon";
+  const limit = Math.max(1, Math.min(25, options?.limit ?? 12));
+  const rows = listDemoWalletRows()
+    .filter((row) => row.wallet.chain === chain)
+    .filter((row) => {
+      const searchable = [
+        row.wallet.address,
+        row.wallet.normalizedAddress,
+        row.wallet.displayName,
+        row.wallet.alias,
+        row.wallet.bio,
+        row.wallet.strategyFocus,
+        row.wallet.teamNote,
+        ...row.labels.flatMap((label) => [label.name, label.value, label.evidence])
+      ]
+        .filter((value): value is string => Boolean(value))
+        .join(" ")
+        .toLowerCase();
+
+      return searchable.includes(normalizedQuery);
+    })
+    .slice(0, limit);
+
+  const summaryByAddress = new Map(
+    lookupAddressSummaries(
+      rows.map((row) => row.wallet.address),
+      options
+    ).map((summary) => [summary.normalizedAddress, summary] as const)
+  );
+
+  return rows.flatMap((row) => {
+    const summary = summaryByAddress.get(row.wallet.normalizedAddress);
+    if (!summary) {
+      return [];
+    }
+
+    const item = {
+      ...summary,
+      displayName: summary.displayName ?? row.wallet.displayName,
+      bio: row.wallet.bio || undefined,
+      teamNote: row.wallet.teamNote || undefined
+    } satisfies AddressSearchResult;
+
+    return [item];
+  });
+};
+
+export const searchAddressSummariesPayload = async (
+  query: string,
+  options?: { chain?: ChainId; baseUrl?: string; limit?: number }
+) => {
+  const chain = options?.chain ?? "polygon";
+  const baseUrl = options?.baseUrl ?? "";
+  const bindings = await getSmartMoneyBindings();
+  const items = bindings?.SMART_MONEY_DB
+    ? await searchPersistedAddressSummaries(bindings.SMART_MONEY_DB, {
+        query,
+        chain,
+        adminBaseUrl: baseUrl,
+        limit: options?.limit
+      })
+    : searchDemoAddressSummaries(query, options);
 
   return {
     items,

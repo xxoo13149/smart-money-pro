@@ -78,7 +78,10 @@ interface MarketAnnotationResponse {
       statusBadges?: AddressLabelBadge[];
       hoverCard?: AddressHoverCard;
       noteSnippet?: string;
+      aiBriefShort?: string;
+      aiBriefNote?: string;
       aiDeepNote?: string;
+      activityLevel?: string;
       watchlisted: boolean;
       detailUrl: string;
       updatedAt: string;
@@ -119,7 +122,10 @@ interface AddressSearchResult {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
   aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -140,7 +146,10 @@ interface AddressLookupSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
   aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -354,7 +363,13 @@ type BackgroundMessage =
   | { type: "wsm:refreshActiveTab" }
   | { type: "wsm:openPolymarket" }
   | { type: "wsm:openWorkbench" }
-  | { type: "wsm:openSidePanel" };
+  | {
+      type: "wsm:openSidePanel";
+      address?: string;
+      normalizedAddress?: string;
+      displayName?: string;
+      source?: "hover" | "inline" | "popup" | "search";
+    };
 
 (() => {
 const CONFIG_KEY = "wsm.config";
@@ -362,6 +377,7 @@ const AUTH_SESSION_KEY = "wsm.authSession";
 const SYNC_STATE_KEY = "wsm.syncState";
 const RUNTIME_STATE_KEY = "wsm.runtimeState";
 const PAGE_SURFACE_STATE_KEY = "wsm.pageSurfaceState";
+const SIDEPANEL_FOCUS_KEY = "wsm.sidepanelFocus";
 const MARKET_CACHE_PREFIX = "wsm.marketCache.";
 const ACCESS_TOKEN_REFRESH_BUFFER_MS = 60_000;
 const DEFAULT_REFRESH_INTERVAL_MS = 180_000;
@@ -1575,7 +1591,25 @@ const openOrFocusPolymarket = async () => {
   }
 };
 
-const openSidePanel = async () => {
+const openSidePanel = async (focus?: {
+  address?: string;
+  normalizedAddress?: string;
+  displayName?: string;
+  source?: "hover" | "inline" | "popup" | "search";
+}) => {
+  const focusAddress = (focus?.normalizedAddress || focus?.address || "").trim();
+  const focusPayload = focusAddress
+    ? {
+        [SIDEPANEL_FOCUS_KEY]: {
+          address: focus?.address || focusAddress,
+          normalizedAddress: focusAddress,
+          displayName: focus?.displayName,
+          requestedAt: new Date().toISOString(),
+          source: focus?.source ?? "inline"
+        }
+      }
+    : null;
+
   if (!chrome.sidePanel?.open) {
     await openWorkbench();
     return;
@@ -1591,12 +1625,18 @@ const openSidePanel = async () => {
 
     try {
       await chrome.sidePanel.open({ tabId: tab.id });
+      if (focusPayload) {
+        await chrome.storage.local.set(focusPayload);
+      }
       return;
     } catch (error) {
       if (typeof tab.windowId !== "number") {
         throw error;
       }
       await chrome.sidePanel.open({ windowId: tab.windowId });
+      if (focusPayload) {
+        await chrome.storage.local.set(focusPayload);
+      }
       return;
     }
   }
@@ -1604,6 +1644,9 @@ const openSidePanel = async () => {
   const currentWindow = await chrome.windows.getCurrent();
   if (typeof currentWindow.id === "number") {
     await chrome.sidePanel.open({ windowId: currentWindow.id });
+    if (focusPayload) {
+      await chrome.storage.local.set(focusPayload);
+    }
     return;
   }
 
@@ -1844,7 +1887,12 @@ const handleMessage = async (message: BackgroundMessage, sender?: { tab?: Browse
         ok: true
       };
     case "wsm:openSidePanel":
-      await openSidePanel();
+      await openSidePanel({
+        address: message.address,
+        normalizedAddress: message.normalizedAddress,
+        displayName: message.displayName,
+        source: message.source
+      });
       return {
         ok: true
       };

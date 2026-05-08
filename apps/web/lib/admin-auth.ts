@@ -30,6 +30,8 @@ const DEFAULT_APPROVAL_SENDER_EMAIL = "noreply@example.com";
 const DEFAULT_APPROVAL_SENDER_NAME = "Smart Money Admin";
 const APPROVAL_SECRET_HEADER = "x-admin-approval-secret";
 const SCHEMA_READY = new Map<string, Promise<unknown>>();
+const SHOULD_BOOTSTRAP_SCHEMA =
+  process.env.SMART_MONEY_BOOTSTRAP_SCHEMA === "true" || process.env.NODE_ENV !== "production";
 
 interface AdminUserRow {
   id: string;
@@ -369,15 +371,17 @@ const ensureAuthDb = async () => {
     return null;
   }
 
-  const scopeKey = [
-    bindings.ADMIN_BASE_URL ?? "admin",
-    bindings.PUBLIC_EXTENSION_BASE_URL ?? "app"
-  ].join("|");
-  if (!SCHEMA_READY.has(scopeKey)) {
-    SCHEMA_READY.set(scopeKey, bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB));
-  }
+  if (SHOULD_BOOTSTRAP_SCHEMA) {
+    const scopeKey = [
+      bindings.ADMIN_BASE_URL ?? "admin",
+      bindings.PUBLIC_EXTENSION_BASE_URL ?? "app"
+    ].join("|");
+    if (!SCHEMA_READY.has(scopeKey)) {
+      SCHEMA_READY.set(scopeKey, bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB));
+    }
 
-  await SCHEMA_READY.get(scopeKey)!;
+    await SCHEMA_READY.get(scopeKey)!;
+  }
 
   return {
     db: bindings.SMART_MONEY_DB,

@@ -19,7 +19,7 @@ import { WalletCreateForm } from "./WalletCreateForm";
 import { WalletImportPanel, type WalletImportSourceMode } from "./WalletImportPanel";
 import styles from "./WalletsConsole.module.css";
 
-type ColumnPreset = "compact" | "standard" | "review";
+type ColumnPreset = "compact" | "standard";
 type InspectorSection = "overview" | "labels" | "records" | "analysis";
 type DensityMode = "compact" | "comfortable";
 type LabelDraft = {
@@ -30,14 +30,6 @@ type LabelDraft = {
   evidence: string;
   verificationNote: string;
   sourceNote: string;
-};
-type ReviewAction = "promote" | "edit_and_promote" | "dismiss" | "complete_review";
-
-const REVIEW_ACTION_LABELS: Record<ReviewAction, string> = {
-  promote: "转官方",
-  edit_and_promote: "编辑后转官方",
-  dismiss: "忽略",
-  complete_review: "完成复核"
 };
 
 const DENSITY_STORAGE_KEY = "wallet-workspace-density";
@@ -66,21 +58,18 @@ const STATUS_OPTIONS = [
   { value: "all", label: "全部状态" },
   { value: "active", label: "正常" },
   { value: "watchlist", label: "Watchlist" },
-  { value: "review_needed", label: "AI 待确认" },
   { value: "deleted", label: "已删除" }
 ] as const;
 
 const COLUMN_PRESETS: Array<{ value: ColumnPreset; label: string }> = [
   { value: "compact", label: "紧凑" },
-  { value: "standard", label: "标准" },
-  { value: "review", label: "审阅" }
+  { value: "standard", label: "标准" }
 ];
 
 const SYSTEM_VIEWS = [
   { id: "all", label: "全部地址" },
   { id: "watchlist", label: "Watchlist" },
   { id: "recent-created", label: "最近新增" },
-  { id: "review", label: "AI 待确认" },
   { id: "deleted", label: "已删除" }
 ] as const;
 
@@ -155,9 +144,6 @@ const getSystemViewId = (query: WalletListQuery) => {
   }
   if (query.status === "watchlist") {
     return "watchlist";
-  }
-  if (query.status === "review_needed") {
-    return "review";
   }
   if ((query.sort ?? "updated_desc") === "created_desc") {
     return "recent-created";
@@ -252,6 +238,7 @@ export const WalletsConsole = ({
   const [helpOpen, setHelpOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
+  const [finderAiOpen, setFinderAiOpen] = useState(false);
   const [importSourceMode, setImportSourceMode] = useState<WalletImportSourceMode>("file");
   const [optimisticDeletedIds, setOptimisticDeletedIds] = useState<string[]>([]);
   const [armedDeleteId, setArmedDeleteId] = useState<string | null>(null);
@@ -267,8 +254,6 @@ export const WalletsConsole = ({
     labelSourceNote: ""
   });
   const [labelDrafts, setLabelDrafts] = useState<Record<string, LabelDraft>>({});
-  const [reviewTrayOpen, setReviewTrayOpen] = useState(initialQuery.status === "review_needed");
-  const [reviewPendingKey, setReviewPendingKey] = useState<string | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
 
   const sectionRefs = useRef<Record<InspectorSection, HTMLDivElement | null>>({
@@ -305,25 +290,10 @@ export const WalletsConsole = ({
     detail?.wallet.id === panelTargetId
       ? detail.finderAi
       : panelRow?.finderAi;
-  const reviewTargetId = panelTargetId ?? focusRowId;
-  const reviewRow = visibleRows.find((row) => row.wallet.id === reviewTargetId) ?? null;
-  const reviewWallet =
-    detail?.wallet.id === reviewTargetId ? detail.wallet : reviewRow?.wallet ?? null;
-  const reviewLabels =
-    detail?.wallet.id === reviewTargetId ? detail.labels : reviewRow?.labels ?? [];
-  const officialReviewLabels = useMemo(
-    () => reviewLabels.filter((label) => label.source === "user"),
-    [reviewLabels]
-  );
-  const aiReviewLabels = useMemo(
-    () => reviewLabels.filter((label) => label.source !== "user"),
-    [reviewLabels]
-  );
-  const reviewTrayVisible = Boolean(reviewTrayOpen && reviewWallet && !reviewWallet.deletedAt);
   const allCurrentPageSelected =
     currentPageIds.length > 0 && currentPageIds.every((walletId) => selectedIds.includes(walletId));
   const showSummaryColumn = columnPreset !== "compact";
-  const showUpdatedColumn = columnPreset !== "review" || density === "comfortable";
+  const showUpdatedColumn = true;
   const activeSystemView = getSystemViewId(queryState);
   const canPinPanel = isWideEnoughToPin(viewportWidth);
   const inspectorTitle = panelWallet?.alias ?? panelWallet?.displayName ?? "地址检查器";
@@ -431,6 +401,15 @@ export const WalletsConsole = ({
     updateLocalQuery({ ...queryState, selected: walletId, panel: mode, cursor: queryState.cursor });
   };
 
+  const openFinderAiDetail = (walletId: string) => {
+    setFocusRowId(walletId);
+    setPanelTargetId(walletId);
+    setPanelMode("inspect");
+    setPanelSection("analysis");
+    setDetailError(null);
+    setFinderAiOpen(true);
+  };
+
   const closeInspector = () => {
     setPanelOpen(false);
     setPanelTargetId(null);
@@ -451,14 +430,6 @@ export const WalletsConsole = ({
     if (viewId === "recent-created") {
       patchQuery(
         { view: viewId, status: "all", sort: "created_desc", includeDeleted: false },
-        { resetCursor: true, clearSelection: true, closePanel: true }
-      );
-      return;
-    }
-
-    if (viewId === "review") {
-      patchQuery(
-        { view: viewId, status: "review_needed", sort: queryState.sort ?? "updated_desc", includeDeleted: false },
         { resetCursor: true, clearSelection: true, closePanel: true }
       );
       return;
@@ -659,7 +630,7 @@ export const WalletsConsole = ({
   };
 
   const addQuickLabel = async () => {
-    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    const targetWalletId = panelTargetId;
     if (!targetWalletId) {
       return;
     }
@@ -719,7 +690,7 @@ export const WalletsConsole = ({
   };
 
   const saveLabelDraft = async (tagId: string) => {
-    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    const targetWalletId = panelTargetId;
     if (!targetWalletId) {
       return;
     }
@@ -758,7 +729,7 @@ export const WalletsConsole = ({
   };
 
   const removeLabelDraft = async (tagId: string) => {
-    const targetWalletId = panelTargetId ?? reviewWallet?.id;
+    const targetWalletId = panelTargetId;
     if (!targetWalletId) {
       return;
     }
@@ -782,62 +753,6 @@ export const WalletsConsole = ({
     }
 
     pushFeedback("标签已删除");
-    refreshWorkspace();
-  };
-
-  const runReviewAction = async (action: ReviewAction, tagId?: string) => {
-    if (!reviewWallet) {
-      return;
-    }
-
-    const draft = tagId ? labelDrafts[tagId] : undefined;
-    const reviewKey = `${action}:${tagId ?? reviewWallet.id}`;
-    setReviewPendingKey(reviewKey);
-
-    const body =
-      action === "complete_review"
-        ? { action: "complete_wallet_review" }
-        : action === "dismiss"
-          ? { action: "dismiss_ai_label", labelId: tagId }
-          : action === "edit_and_promote"
-            ? {
-                action: "edit_and_promote_ai_label",
-                labelId: tagId,
-                name: draft?.name?.trim() || undefined,
-                value: draft?.value?.trim() || undefined,
-                kind: draft?.kind || undefined,
-                evidence: draft?.evidence?.trim() || undefined,
-                verificationNote: draft?.verificationNote?.trim() || undefined,
-                sourceNote: draft?.sourceNote?.trim() || undefined
-              }
-            : { action: "promote_ai_to_official", labelId: tagId };
-
-    const result = await fetchJson<WalletDetailData>(`/api/wallets/${reviewWallet.id}/review`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-
-    setReviewPendingKey(null);
-
-    if (!result.ok || !result.data) {
-      pushFeedback(result.error ?? "复核动作失败");
-      return;
-    }
-
-    setDetail(result.data);
-    if (tagId) {
-      setLabelDrafts((current) => {
-        const next = { ...current };
-        delete next[tagId];
-        return next;
-      });
-    }
-
-    pushFeedback(REVIEW_ACTION_LABELS[action]);
-    if (action === "complete_review") {
-      setReviewTrayOpen(false);
-    }
     refreshWorkspace();
   };
 
@@ -1077,15 +992,9 @@ export const WalletsConsole = ({
   useEffect(() => {
     setLabelDrafts((current) => ({
       ...current,
-      ...Object.fromEntries(reviewLabels.map((label) => [label.id, toLabelDraft(label)]))
+      ...Object.fromEntries(panelLabels.map((label) => [label.id, toLabelDraft(label)]))
     }));
-  }, [reviewLabels]);
-
-  useEffect(() => {
-    if (reviewTargetId) {
-      setReviewTrayOpen(true);
-    }
-  }, [reviewTargetId]);
+  }, [panelLabels]);
 
   useEffect(() => {
     if (focusRowId && !visibleRows.some((row) => row.wallet.id === focusRowId)) {
@@ -1159,10 +1068,6 @@ export const WalletsConsole = ({
           setArmedDeleteId(null);
           return;
         }
-        if (panelOpen && panelMode === "edit") {
-          setPanelMode("inspect");
-          return;
-        }
         if (panelOpen) {
           closeInspector();
         }
@@ -1175,13 +1080,13 @@ export const WalletsConsole = ({
 
       if (event.key === "Enter" || event.key.toLowerCase() === "i") {
         event.preventDefault();
-        openInspector(focusRowId, event.key.toLowerCase() === "i" ? "inspect" : panelMode);
+        openInspector(focusRowId, "inspect");
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [armedDeleteId, closeInspector, focusRowId, openInspector, panelMode, panelOpen]);
+  }, [armedDeleteId, closeInspector, focusRowId, openInspector, panelOpen]);
 
   const activeFilterChips = [
     queryState.q
@@ -1198,7 +1103,7 @@ export const WalletsConsole = ({
             )
         }
       : null,
-    queryState.status && queryState.status !== "all"
+    queryState.status && queryState.status !== "all" && queryState.status !== "review_needed"
       ? {
           id: `status:${queryState.status}`,
           label: `状态：${STATUS_OPTIONS.find((item) => item.value === queryState.status)?.label ?? queryState.status}`,
@@ -1237,7 +1142,7 @@ export const WalletsConsole = ({
           <span className={styles.kicker}>Address Workspace</span>
           <h1 className={styles.title}>地址库工作台</h1>
           <p className={styles.description}>
-            这里是高频整理地址的主工作台。默认只做筛选、扫描、快速编辑、单条删除和批量操作，
+            这里是高频整理地址的主工作台。默认只做筛选、扫描、检查编辑、单条删除和批量操作，
             长内容维护与完整分析继续留在详情页。
           </p>
         </div>
@@ -1280,8 +1185,8 @@ export const WalletsConsole = ({
           <strong>{currentData.facetCounts.watchlistedCount}</strong>
         </div>
         <div className={styles.statCard}>
-          <span>AI 待确认</span>
-          <strong>{currentData.facetCounts.reviewNeededCount}</strong>
+          <span>正常地址</span>
+          <strong>{currentData.facetCounts.activeCount}</strong>
         </div>
         <div className={styles.statCard}>
           <span>已删除</span>
@@ -1341,7 +1246,7 @@ export const WalletsConsole = ({
             <span className={styles.fieldLabel}>状态</span>
             <select
               className={styles.select}
-              value={queryState.status ?? "all"}
+              value={queryState.status === "review_needed" ? "all" : queryState.status ?? "all"}
               onChange={(event) =>
                 patchQuery(
                   {
@@ -1499,7 +1404,7 @@ export const WalletsConsole = ({
         >
           <summary>使用说明与恢复信息</summary>
           <p>
-            单击一行只会选中，不会自动打开详情。按 Enter、按 I 或点行尾“检查/快编”才会打开右侧检查器；
+            单击一行只会选中，不会自动打开详情。按 Enter、按 I 或点行尾“检查”才会打开右侧检查器；
             删除采用两段式轻确认，默认 2.5 秒后自动取消。
           </p>
           <div className={styles.helpGrid}>
@@ -1642,6 +1547,19 @@ export const WalletsConsole = ({
                           </div>
 
                           <div className={styles.rowActions} data-delete-scope={row.wallet.id}>
+                            {row.finderAi ? (
+                              <button
+                                type="button"
+                                className={styles.iconButton}
+                                disabled={deletePendingId === row.wallet.id}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openFinderAiDetail(row.wallet.id);
+                                }}
+                              >
+                                AI 解读
+                              </button>
+                            ) : null}
                             <button
                               type="button"
                               className={styles.iconButton}
@@ -1652,17 +1570,6 @@ export const WalletsConsole = ({
                               }}
                             >
                               检查
-                            </button>
-                            <button
-                              type="button"
-                              className={styles.iconButton}
-                              disabled={deletePendingId === row.wallet.id}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                openInspector(row.wallet.id, "edit");
-                              }}
-                            >
-                              快编
                             </button>
                             {!deleteArmed && !row.wallet.deletedAt ? (
                               <button
@@ -1727,13 +1634,15 @@ export const WalletsConsole = ({
 
                     {showSummaryColumn ? (
                       <td className={styles.summaryCell}>
-                        {shortText(row.summaryText || "待补充摘要", columnPreset === "review" ? 160 : 96)}
+                        {shortText(row.summaryText || "待补充摘要", 96)}
                       </td>
                     ) : null}
 
                     <td>
                       <div className={styles.statusStack}>
-                        {row.statusBadges.map(renderStatusBadge)}
+                        {row.statusBadges
+                          .filter((badge) => badge.tone !== "ai-review")
+                          .map(renderStatusBadge)}
                       </div>
                     </td>
 
@@ -1783,246 +1692,6 @@ export const WalletsConsole = ({
         </div>
       </section>
 
-      {reviewTrayVisible ? (
-        <section className={styles.reviewTray}>
-          <div className={styles.reviewTrayHeader}>
-            <div>
-              <p className={styles.kicker}>Review Tray</p>
-              <h2>{reviewWallet?.alias ?? reviewWallet?.displayName ?? "待复核地址"}</h2>
-              <div className={styles.identityMeta}>
-                {reviewWallet ? <span className={styles.identityMono}>{reviewWallet.address}</span> : null}
-                {reviewRow?.statusBadges.map(renderStatusBadge)}
-              </div>
-            </div>
-            <div className={styles.reviewTrayActions}>
-              <button
-                type="button"
-                className={styles.ghostButton}
-                onClick={() => void runReviewAction("complete_review")}
-                disabled={reviewPendingKey === `complete_review:${reviewWallet?.id ?? ""}`}
-              >
-                {REVIEW_ACTION_LABELS.complete_review}
-              </button>
-              {reviewWallet ? (
-                <button
-                  type="button"
-                  className={styles.ghostButton}
-                  onClick={() => void toggleWatchlist(reviewWallet.id, !reviewWallet.watchlisted)}
-                >
-                  {reviewWallet.watchlisted ? "移出 Watchlist" : "加入 Watchlist"}
-                </button>
-              ) : null}
-              {reviewWallet ? (
-                <AppLink className={styles.ghostButton} href={`/wallets/${reviewWallet.id}`}>
-                  打开详情页
-                </AppLink>
-              ) : null}
-              <button type="button" className={styles.iconButton} onClick={() => setReviewTrayOpen(false)}>
-                暂时收起
-              </button>
-            </div>
-          </div>
-
-          <div className={styles.reviewTrayGrid}>
-            <div className={styles.reviewRail}>
-              <div className={styles.reviewRailTitle}>地址概览</div>
-              <div className={styles.metaCard}>
-                <div className={styles.metaRow}>
-                  <span>显示名</span>
-                  <strong>{reviewWallet?.displayName ?? "--"}</strong>
-                </div>
-                <div className={styles.metaRow}>
-                  <span>一句话摘要</span>
-                  <strong>{reviewWallet?.strategyFocus || reviewRow?.summaryText || "待补充摘要"}</strong>
-                </div>
-                <div className={styles.metaRow}>
-                  <span>更新时间</span>
-                  <strong>{formatDate(reviewWallet?.updatedAt)}</strong>
-                </div>
-                <div className={styles.metaRow}>
-                  <span>标签概况</span>
-                  <strong>官方 {officialReviewLabels.length} / AI {aiReviewLabels.length}</strong>
-                </div>
-              </div>
-
-              <div className={styles.metaCard}>
-                <div className={styles.editField}>
-                  <label className={styles.fieldLabel}>新增官方标签</label>
-                  <input
-                    className={styles.textInput}
-                    value={editForm.labelValue}
-                    placeholder="例如：高胜率-首尔 / 正常 / 提前埋伏"
-                    onChange={(event) =>
-                      setEditForm((current) => ({ ...current, labelValue: event.target.value }))
-                    }
-                  />
-                </div>
-                <div className={styles.editField}>
-                  <label className={styles.fieldLabel}>验证说明</label>
-                  <input
-                    className={styles.textInput}
-                    value={editForm.labelVerificationNote}
-                    placeholder="人工确认依据"
-                    onChange={(event) =>
-                      setEditForm((current) => ({
-                        ...current,
-                        labelVerificationNote: event.target.value
-                      }))
-                    }
-                  />
-                </div>
-                <div className={styles.editField}>
-                  <label className={styles.fieldLabel}>来源备注</label>
-                  <input
-                    className={styles.textInput}
-                    value={editForm.labelSourceNote}
-                    placeholder="数据来源或复核备注"
-                    onChange={(event) =>
-                      setEditForm((current) => ({ ...current, labelSourceNote: event.target.value }))
-                    }
-                  />
-                </div>
-                <button type="button" className={styles.primaryButton} onClick={() => void addQuickLabel()}>
-                  新增官方标签
-                </button>
-              </div>
-            </div>
-
-            <div className={styles.reviewRail}>
-              <div className={styles.reviewRailTitle}>官方标签轨道</div>
-              <div className={styles.reviewRailList}>
-                {officialReviewLabels.length > 0 ? (
-                  officialReviewLabels.map((label) => {
-                    const draft = labelDrafts[label.id] ?? toLabelDraft(label);
-                    return (
-                      <div key={label.id} className={styles.reviewCard}>
-                        <div className={styles.labelEditorTop}>
-                          <span className={styles.panelTag}>官方</span>
-                          <span className={styles.identitySubtle}>{label.kind}</span>
-                        </div>
-                        <input
-                          className={styles.textInput}
-                          value={draft.value}
-                          onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
-                        />
-                        <input
-                          className={styles.textInput}
-                          value={draft.verificationNote}
-                          placeholder="验证说明"
-                          onChange={(event) =>
-                            updateLabelDraftField(label.id, "verificationNote", event.target.value)
-                          }
-                        />
-                        <input
-                          className={styles.textInput}
-                          value={draft.sourceNote}
-                          placeholder="来源备注"
-                          onChange={(event) =>
-                            updateLabelDraftField(label.id, "sourceNote", event.target.value)
-                          }
-                        />
-                        <div className={styles.inlineForm}>
-                          <button
-                            type="button"
-                            className={styles.ghostButton}
-                            onClick={() => void saveLabelDraft(label.id)}
-                          >
-                            保存
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.dangerTextButton}
-                            onClick={() => void removeLabelDraft(label.id)}
-                          >
-                            删除
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className={styles.emptyState}>还没有官方标签，可以先从右侧 AI 候选里转一批。</div>
-                )}
-              </div>
-            </div>
-
-            <div className={styles.reviewRail}>
-              <div className={styles.reviewRailTitle}>AI 候选标签轨道</div>
-              <div className={styles.reviewRailList}>
-                {aiReviewLabels.length > 0 ? (
-                  aiReviewLabels.map((label) => {
-                    const draft = labelDrafts[label.id] ?? toLabelDraft(label);
-                    return (
-                      <div key={label.id} className={styles.reviewCard}>
-                        <div className={styles.labelEditorTop}>
-                          <span className={styles.panelTag}>AI</span>
-                          <span className={styles.identitySubtle}>{label.kind}</span>
-                        </div>
-                        <input
-                          className={styles.textInput}
-                          value={draft.value}
-                          onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
-                        />
-                        <input
-                          className={styles.textInput}
-                          value={draft.evidence}
-                          placeholder="核心指标 / 证据摘录"
-                          onChange={(event) => updateLabelDraftField(label.id, "evidence", event.target.value)}
-                        />
-                        <input
-                          className={styles.textInput}
-                          value={draft.verificationNote}
-                          placeholder="转官方后的验证说明"
-                          onChange={(event) =>
-                            updateLabelDraftField(label.id, "verificationNote", event.target.value)
-                          }
-                        />
-                        <input
-                          className={styles.textInput}
-                          value={draft.sourceNote}
-                          placeholder="转官方后的来源备注"
-                          onChange={(event) =>
-                            updateLabelDraftField(label.id, "sourceNote", event.target.value)
-                          }
-                        />
-                        <div className={styles.reviewCardActions}>
-                          <button
-                            type="button"
-                            className={styles.primaryButton}
-                            disabled={reviewPendingKey === `promote:${label.id}`}
-                            onClick={() => void runReviewAction("promote", label.id)}
-                          >
-                            {REVIEW_ACTION_LABELS.promote}
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.ghostButton}
-                            disabled={reviewPendingKey === `edit_and_promote:${label.id}`}
-                            onClick={() => void runReviewAction("edit_and_promote", label.id)}
-                          >
-                            {REVIEW_ACTION_LABELS.edit_and_promote}
-                          </button>
-                          <button
-                            type="button"
-                            className={styles.dangerTextButton}
-                            disabled={reviewPendingKey === `dismiss:${label.id}`}
-                            onClick={() => void runReviewAction("dismiss", label.id)}
-                          >
-                            {REVIEW_ACTION_LABELS.dismiss}
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className={styles.emptyState}>当前没有待处理 AI 标签，可以直接完成复核。</div>
-                )}
-              </div>
-            </div>
-          </div>
-        </section>
-      ) : null}
-
       <div
         className={`${styles.panelScrim} ${!panelOpen || panelPinned ? styles.panelScrimPinned : ""}`}
         onClick={() => {
@@ -2038,7 +1707,7 @@ export const WalletsConsole = ({
       >
         <div className={styles.panelHeader}>
           <div>
-            <p>{panelMode === "edit" ? "快速编辑" : "地址检查器"}</p>
+            <p>地址检查器</p>
             <h2>{inspectorTitle}</h2>
             <div className={styles.identityMeta}>
               {panelWallet ? <span className={styles.identityMono}>{panelWallet.address}</span> : null}
@@ -2079,7 +1748,7 @@ export const WalletsConsole = ({
         <div className={styles.panelBody}>
           {!panelTargetId ? (
             <div className={styles.emptyState}>
-              先在表格里选中一行，再按 Enter、按 I，或者点击行尾的“检查/快编”打开地址检查器。
+              先在表格里选中一行，再按 Enter、按 I，或者点击行尾的“检查”打开地址检查器。
             </div>
           ) : null}
 
@@ -2123,11 +1792,20 @@ export const WalletsConsole = ({
                         <span>Finder AI 状态</span>
                         <strong>
                           {panelFinderAi.needsReview
-                            ? "需复核"
+                            ? "需查看"
                             : panelFinderAi.hasConflict
                               ? "有冲突"
                               : "可展示"}
                         </strong>
+                      </div>
+                      <div className={styles.editActions}>
+                        <button
+                          type="button"
+                          className={styles.primaryButton}
+                          onClick={() => setFinderAiOpen(true)}
+                        >
+                          查看 AI 解读
+                        </button>
                       </div>
                     </>
                   ) : null}
@@ -2323,7 +2001,7 @@ export const WalletsConsole = ({
                     </div>
                   ))}
                   {(detail?.notes?.length ?? 0) === 0 ? (
-                    <div className={styles.metaCard}>最近还没有审计记录。</div>
+                    <div className={styles.metaCard}>最近还没有操作记录。</div>
                   ) : null}
                 </div>
               </div>
@@ -2348,63 +2026,17 @@ export const WalletsConsole = ({
                     {panelFinderAi.aiBriefNote ? (
                       <div>
                         <span className={styles.identitySubtle}>摘要说明</span>
-                        <div className={styles.longText}>{panelFinderAi.aiBriefNote}</div>
+                        <div className={styles.longText}>{shortText(panelFinderAi.aiBriefNote, 160)}</div>
                       </div>
                     ) : null}
-                    {panelFinderAi.aiDeepNote ? (
-                      <div>
-                        <span className={styles.identitySubtle}>深度解读</span>
-                        <div className={styles.longText}>{panelFinderAi.aiDeepNote}</div>
-                      </div>
-                    ) : null}
-                    {panelFinderAi.keyMetrics?.length ? (
-                      <div>
-                        <span className={styles.identitySubtle}>关键指标</span>
-                        <div className={styles.identityMeta}>
-                          {panelFinderAi.keyMetrics.map((metric, index) => (
-                            <span key={`${metric.key ?? metric.label}-${index}`} className={styles.panelTag}>
-                              {metric.label}: {String(metric.value ?? "--")}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-                    {panelFinderAi.primarySignals?.length ? (
-                      <div className={styles.labelEditorList}>
-                        <span className={styles.identitySubtle}>命中信号</span>
-                        {panelFinderAi.primarySignals.map((signal, index) => (
-                          <div key={`${signal.key ?? signal.label}-${index}`} className={styles.labelEditorCard}>
-                            <div className={styles.labelEditorTop}>
-                              <strong>{signal.label}</strong>
-                              <span className={styles.panelTag}>{signal.matched === false ? "未命中" : "命中"}</span>
-                            </div>
-                            {signal.reason ? <div className={styles.longText}>{signal.reason}</div> : null}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                    {panelFinderAi.labels?.length ? (
-                      <div>
-                        <span className={styles.identitySubtle}>同步标签</span>
-                        <div className={styles.identityMeta}>
-                          {panelFinderAi.labels.map((label, index) => (
-                            <span key={`${label.kind ?? "label"}-${label.value}-${index}`} className={styles.panelTag}>
-                              {label.kind ? `${label.kind}: ` : ""}
-                              {label.value}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-                    {panelFinderAi.sourceExcerpt ? (
-                      <div>
-                        <span className={styles.identitySubtle}>来源摘录</span>
-                        <div className={styles.longText}>{panelFinderAi.sourceExcerpt}</div>
-                      </div>
-                    ) : null}
-                    <div className={styles.metaRow}>
-                      <span>Run ID</span>
-                      <strong>{panelFinderAi.runId || "未记录"}</strong>
+                    <div className={styles.editActions}>
+                      <button
+                        type="button"
+                        className={styles.primaryButton}
+                        onClick={() => setFinderAiOpen(true)}
+                      >
+                        查看 AI 解读详情
+                      </button>
                     </div>
                   </div>
                 ) : (
@@ -2472,6 +2104,112 @@ export const WalletsConsole = ({
             refreshWorkspace();
           }}
         />
+      </Modal>
+
+      <Modal
+        open={Boolean(finderAiOpen && panelFinderAi)}
+        title="Finder AI 解读详情"
+        description={
+          panelWallet
+            ? `${panelWallet.alias ?? panelWallet.displayName} 的 Finder v6 深度分析，来自最近一次同步结果。`
+            : "Finder v6 深度分析"
+        }
+        onClose={() => setFinderAiOpen(false)}
+      >
+        {panelFinderAi ? (
+          <div className={styles.labelEditorList}>
+            <div className={styles.metaCard}>
+              <div className={styles.subtleHeader}>
+                <strong>结论 / 策略结论</strong>
+                <span>{panelFinderAiMeta || formatDate(panelFinderAi.updatedAt)}</span>
+              </div>
+              <div className={styles.longText}>
+                {panelFinderAi.aiBriefShort || panelFinderAi.strategyFocus || "待补充"}
+              </div>
+            </div>
+
+            {panelFinderAi.aiBriefNote ? (
+              <div className={styles.metaCard}>
+                <div className={styles.subtleHeader}>
+                  <strong>摘要说明</strong>
+                  <span>{panelFinderAi.needsReview ? "需查看" : "可展示"}</span>
+                </div>
+                <div className={styles.longText}>{panelFinderAi.aiBriefNote}</div>
+              </div>
+            ) : null}
+
+            {panelFinderAi.aiDeepNote ? (
+              <div className={styles.metaCard}>
+                <div className={styles.subtleHeader}>
+                  <strong>深度解读</strong>
+                  <span>{panelFinderAi.hasConflict ? "有冲突" : "已同步"}</span>
+                </div>
+                <div className={styles.longText}>{panelFinderAi.aiDeepNote}</div>
+              </div>
+            ) : null}
+
+            <div className={styles.analysisGrid}>
+              {panelFinderAi.keyMetrics?.length ? (
+                <div className={styles.metaCard}>
+                  <strong>关键指标</strong>
+                  <div className={styles.identityMeta}>
+                    {panelFinderAi.keyMetrics.map((metric, index) => (
+                      <span key={`${metric.key ?? metric.label}-${index}`} className={styles.panelTag}>
+                        {metric.label}: {String(metric.value ?? "--")}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {panelFinderAi.labels?.length ? (
+                <div className={styles.metaCard}>
+                  <strong>同步标签</strong>
+                  <div className={styles.identityMeta}>
+                    {panelFinderAi.labels.map((label, index) => (
+                      <span key={`${label.kind ?? "label"}-${label.value}-${index}`} className={styles.panelTag}>
+                        {label.kind ? `${label.kind}: ` : ""}
+                        {label.value}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
+            {panelFinderAi.primarySignals?.length ? (
+              <div className={styles.metaCard}>
+                <div className={styles.subtleHeader}>
+                  <strong>命中信号</strong>
+                  <span>{panelFinderAi.primarySignals.length} 条</span>
+                </div>
+                <div className={styles.labelEditorList}>
+                  {panelFinderAi.primarySignals.map((signal, index) => (
+                    <div key={`${signal.key ?? signal.label}-${index}`} className={styles.labelEditorCard}>
+                      <div className={styles.labelEditorTop}>
+                        <strong>{signal.label}</strong>
+                        <span className={styles.panelTag}>{signal.matched === false ? "未命中" : "命中"}</span>
+                      </div>
+                      {signal.reason ? <div className={styles.longText}>{signal.reason}</div> : null}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {panelFinderAi.sourceExcerpt ? (
+              <div className={styles.metaCard}>
+                <div className={styles.subtleHeader}>
+                  <strong>来源摘录</strong>
+                  <span>{panelFinderAi.runId || "未记录 Run ID"}</span>
+                </div>
+                <div className={styles.longText}>{panelFinderAi.sourceExcerpt}</div>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <div className={styles.emptyState}>当前地址还没有 Finder AI 解读。</div>
+        )}
       </Modal>
 
       {feedback ? <div className={styles.loadingOverlay}>{feedback}</div> : null}

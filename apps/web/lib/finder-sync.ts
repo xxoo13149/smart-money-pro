@@ -275,6 +275,148 @@ const labelEvidenceText = (item: JsonRecord, fallback?: string) => {
 const labelDraftKey = (label: WalletImportLabelDraft) =>
   `${label.kind}:${label.value.toLowerCase().replace(/[\s,，;；:：|/\\-]+/gu, "")}`;
 
+const KNOWN_LABEL_KINDS = new Set<WalletLabelKind>([
+  "wallet_age",
+  "performance",
+  "specialty",
+  "style",
+  "risk",
+  "group",
+  "alias",
+  "confidence",
+  "strategy",
+  "activity_level",
+  "new_wallet_signal",
+  "early_entry_signal",
+  "geo_specialty",
+  "frequency_region",
+  "winrate_region",
+  "payout_region",
+  "trader_archetype",
+  "market_scope",
+  "resolution_source",
+  "forecast_basis",
+  "timing_window",
+  "edge_style",
+  "weather_driver",
+  "signal_quality"
+]);
+
+const FINDER_AI_KIND_NAME: Partial<Record<WalletLabelKind, string>> = {
+  frequency_region: "高频地区",
+  payout_region: "高暴击地区",
+  winrate_region: "高胜率地区",
+  trader_archetype: "选手类型",
+  activity_level: "活跃标签",
+  new_wallet_signal: "新钱包标签",
+  early_entry_signal: "提前埋伏",
+  geo_specialty: "地区专精",
+  group: "Finder 标签"
+};
+
+const canonicalRegionTag = (raw: string, prefix: "高频" | "高暴击" | "高胜率") => {
+  const value = text(raw).replace(/高爆击/gu, "高暴击");
+  const region =
+    regionFromDisplayName(value) ||
+    value
+      .replace(new RegExp(`^${prefix}(?:交易)?(?:地区)?\\s*[-:：]?\\s*`, "iu"), "")
+      .replace(/地区$/u, "")
+      .trim();
+  return region ? `${prefix}-${region}地区` : prefix;
+};
+
+const normalizeFinderAiLabelText = (
+  rawValue: string,
+  kindHint?: WalletLabelKind
+): Pick<WalletImportLabelDraft, "name" | "value" | "kind"> | undefined => {
+  const normalized = text(rawValue).replace(/高爆击/gu, "高暴击");
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (kindHint === "frequency_region" || /^高频/u.test(normalized)) {
+    return { name: "高频地区", value: canonicalRegionTag(normalized, "高频"), kind: "frequency_region" };
+  }
+  if (kindHint === "payout_region" || /^高暴击/u.test(normalized)) {
+    return { name: "高暴击地区", value: canonicalRegionTag(normalized, "高暴击"), kind: "payout_region" };
+  }
+  if (kindHint === "winrate_region" || /^高胜率/u.test(normalized)) {
+    return { name: "高胜率地区", value: canonicalRegionTag(normalized, "高胜率"), kind: "winrate_region" };
+  }
+  if (kindHint === "activity_level" || /活跃|active/iu.test(normalized)) {
+    return {
+      name: "活跃标签",
+      value: /低活跃|inactive|low/iu.test(normalized) ? "低活跃" : "正常",
+      kind: "activity_level"
+    };
+  }
+  if (kindHint === "new_wallet_signal" || /隐藏高手新钱包|新钱包|new wallet/iu.test(normalized)) {
+    return {
+      name: "新钱包标签",
+      value: /隐藏高手/iu.test(normalized) ? "隐藏高手新钱包" : "新钱包",
+      kind: "new_wallet_signal"
+    };
+  }
+  if (kindHint === "early_entry_signal" || /提前埋伏|early entry/iu.test(normalized)) {
+    return { name: "提前埋伏", value: "提前埋伏", kind: "early_entry_signal" };
+  }
+  if (
+    kindHint === "trader_archetype" ||
+    /彩票型选手|彩票型|拆分型选手|拆分型|流动型选手|流动型/iu.test(normalized)
+  ) {
+    const value = /拆分型/iu.test(normalized)
+      ? "拆分型选手"
+      : /流动型/iu.test(normalized)
+        ? "流动型选手"
+        : "彩票型选手";
+    return { name: "选手类型", value, kind: "trader_archetype" };
+  }
+  if (kindHint && kindHint !== "signal_quality" && kindHint !== "confidence" && kindHint !== "market_scope") {
+    return {
+      name: FINDER_AI_KIND_NAME[kindHint] ?? "Finder 标签",
+      value: truncate(normalized, 24),
+      kind: kindHint
+    };
+  }
+
+  return {
+    name: "Finder 标签",
+    value: truncate(normalized, 24),
+    kind: "group"
+  };
+};
+
+const normalizeFinderAiKind = (rawKind: string): WalletLabelKind | undefined => {
+  const normalized = rawKind.trim().toLowerCase();
+  return KNOWN_LABEL_KINDS.has(normalized as WalletLabelKind)
+    ? (normalized as WalletLabelKind)
+    : undefined;
+};
+
+const addFinderAiLabelDraft = (
+  labels: Map<string, WalletImportLabelDraft>,
+  rawValue: string,
+  options: {
+    kind?: WalletLabelKind;
+    evidence?: string;
+    sourceName: string;
+  }
+) => {
+  const normalized = normalizeFinderAiLabelText(rawValue, options.kind);
+  if (!normalized || !normalized.value) {
+    return;
+  }
+
+  const label: WalletImportLabelDraft = {
+    ...normalized,
+    value: truncate(normalized.value, 24),
+    evidence: options.evidence ? truncate(options.evidence, 320) : undefined,
+    source: "system",
+    sourceNote: options.sourceName
+  };
+  labels.set(labelDraftKey(label), label);
+};
+
 const getMatchedFinderEvaluations = (detail: JsonRecord) => {
   const evaluations = asArray(detail.label_evaluations)
     .map(asRecord)
@@ -285,16 +427,35 @@ const getMatchedFinderEvaluations = (detail: JsonRecord) => {
   return [...evaluations, ...labels];
 };
 
-const hasFinderMatchedLabels = (row: JsonRecord, detail: JsonRecord) =>
-  getMatchedFinderEvaluations(detail).length > 0 ||
-  asArray(row.labels).map(text).some(Boolean) ||
-  asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai).matched === true ||
-  asArray(asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai).labels).length > 0;
+const hasFinderAiMatchedLabels = (finderAi: JsonRecord) =>
+  finderAi.matched === true ||
+  asArray(finderAi.labels).length > 0 ||
+  asArray(finderAi.primarySignals)
+    .map(asRecord)
+    .some((item) => item.matched !== false && Boolean(text(item.key) || text(item.label)));
 
-const buildFinderLabels = (row: JsonRecord, detail: JsonRecord, sourceName: string) => {
+const hasFinderMatchedLabels = (row: JsonRecord, detail: JsonRecord) => {
+  const finderAi = asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai);
+  return (
+    getMatchedFinderEvaluations(detail).length > 0 ||
+    asArray(row.labels).map(text).some(Boolean) ||
+    hasFinderAiMatchedLabels(finderAi)
+  );
+};
+
+const buildFinderLabels = (
+  row: JsonRecord,
+  detail: JsonRecord,
+  sourceName: string,
+  finderAi?: JsonRecord
+) => {
   const labels = new Map<string, WalletImportLabelDraft>();
   const evidenceSummary = asRecord(detail.evidence_summary);
   const fallbackEvidence = text(evidenceSummary.headline);
+  const finderAiRecord =
+    finderAi && Object.keys(finderAi).length > 0
+      ? finderAi
+      : asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai);
 
   for (const item of getMatchedFinderEvaluations(detail)) {
     const key = text(item.key);
@@ -312,6 +473,39 @@ const buildFinderLabels = (row: JsonRecord, detail: JsonRecord, sourceName: stri
       sourceNote: sourceName
     };
     labels.set(labelDraftKey(label), label);
+  }
+
+  for (const item of asArray(finderAiRecord.primarySignals).map(asRecord)) {
+    if (item.matched === false) {
+      continue;
+    }
+    const key = text(item.key);
+    const meta = LABEL_KEY_META[key];
+    if (meta) {
+      const label: WalletImportLabelDraft = {
+        name: meta.name,
+        value: truncate(labelValueFromEvaluation({ ...item, display_name: text(item.label) }, meta), 24),
+        kind: meta.kind,
+        evidence: labelEvidenceText({ ...item, reason: text(item.reason) }, fallbackEvidence),
+        source: "system",
+        sourceNote: sourceName
+      };
+      labels.set(labelDraftKey(label), label);
+      continue;
+    }
+
+    addFinderAiLabelDraft(labels, text(item.label), {
+      evidence: text(item.reason) || fallbackEvidence,
+      sourceName
+    });
+  }
+
+  for (const item of asArray(finderAiRecord.labels).map(asRecord)) {
+    addFinderAiLabelDraft(labels, text(item.value) || text(item.label) || text(item.name), {
+      kind: normalizeFinderAiKind(text(item.kind)),
+      evidence: text(item.evidence) || fallbackEvidence,
+      sourceName
+    });
   }
 
   for (const rawLabel of asArray(row.labels)) {
@@ -555,7 +749,7 @@ const buildFinderPreviewRows = (
     const userName = getFinderUserName(row, detail);
     const xUserName = getFinderXUserName(row, detail);
     const displayName = userName || xUserName || normalizedAddress || address || `Finder 钱包 ${index + 1}`;
-    const labels = buildFinderLabels(row, detail, input.sourceName);
+    const labels = buildFinderLabels(row, detail, input.sourceName, finderAi);
     const keyMetrics = buildFinderMetrics(row, detail);
     const primarySignals = buildPrimarySignals(labels);
     const sourceExcerpt = buildSourceExcerpt(row, detail);
@@ -629,42 +823,6 @@ const buildFinderPreviewRows = (
     };
   });
 
-const buildReportLabelLines = (labels: WalletImportLabelDraft[]) =>
-  labels
-    .filter((label) => label.kind !== "signal_quality")
-    .map((label, index) => {
-      const meta = Object.values(LABEL_KEY_META).find((item) => item.kind === label.kind);
-      const title = meta?.reportTitle ?? label.name;
-      return [
-        `标签${index + 1}. ${title}`,
-        `判定: [YES] 匹配 - ${label.evidence || label.value}`
-      ].join("\n");
-    })
-    .join("\n");
-
-const buildFinderReportText = (
-  wallets: Array<{ row: JsonRecord; detail: JsonRecord; finderAi?: JsonRecord }>,
-  input: {
-    sourceName: string;
-    runId?: string;
-  }
-) =>
-  buildFinderPreviewRows(wallets, input)
-    .map((row, index) =>
-      [
-        `【钱包 #${index + 1}】 ${row.wallet.displayName}`,
-        `完整地址: ${row.wallet.address}`,
-        input.runId ? `来源分析任务: ${input.runId}` : "",
-        row.wallet.teamNote ? `来源摘要: ${row.wallet.teamNote}` : "",
-        buildReportLabelLines(row.labels),
-        row.keyMetrics.length ? `关键数据: ${row.keyMetrics.join("； ")}` : "",
-        row.sourceExcerpt ? `证据摘要: ${row.sourceExcerpt}` : ""
-      ]
-        .filter(Boolean)
-        .join("\n")
-    )
-    .join("\n\n");
-
 const attachFinderSourceNote = (rows: WalletAiExtractPreviewRow[], sourceName: string) =>
   rows.map((row) => ({
     ...row,
@@ -675,41 +833,6 @@ const attachFinderSourceNote = (rows: WalletAiExtractPreviewRow[], sourceName: s
     })),
     note: undefined
   }));
-
-const attachFinderAiInsights = (
-  rows: WalletAiExtractPreviewRow[],
-  deterministicRows: WalletAiExtractPreviewRow[]
-) => {
-  const finderAiByAddress = new Map(
-    deterministicRows
-      .map((row) => {
-        const normalizedAddress = normalizeAddress(row.wallet.address) || row.finderAi?.normalizedAddress;
-        return normalizedAddress && row.finderAi ? [normalizedAddress, row.finderAi] as const : null;
-      })
-      .filter((entry): entry is [string, WalletFinderAiInsight] => Boolean(entry))
-  );
-
-  return rows.map((row) => {
-    const normalizedAddress = normalizeAddress(row.wallet.address) || row.finderAi?.normalizedAddress;
-    const finderAi = normalizedAddress ? finderAiByAddress.get(normalizedAddress) : undefined;
-    if (!finderAi) {
-      return row;
-    }
-
-    return {
-      ...row,
-      finderAi,
-      wallet: {
-        ...row.wallet,
-        strategyFocus:
-          finderAi.aiBriefShort ||
-          finderAi.strategyFocus ||
-          row.wallet.strategyFocus
-      },
-      sourceExcerpt: finderAi.sourceExcerpt || row.sourceExcerpt
-    };
-  });
-};
 
 const countValidRows = (rows: WalletImportPreviewRow[]) =>
   rows.filter((row) => row.errors.length === 0).length;
@@ -859,10 +982,6 @@ export const previewFinderImport = async (
     sourceName: resolvedSourceName,
     runId: resolved.runId
   });
-  const reportText = buildFinderReportText(matchedWallets, {
-    sourceName: resolvedSourceName,
-    runId: resolved.runId
-  });
 
   if (matchedWallets.length === 0) {
     return {
@@ -880,47 +999,6 @@ export const previewFinderImport = async (
     };
   }
 
-  try {
-    const aiPreview = await previewWalletImportAi({
-      text: reportText,
-      sourceName: resolvedSourceName
-    });
-    const rows = attachFinderAiInsights(
-      attachFinderSourceNote(aiPreview.rows, resolvedSourceName),
-      deterministicRows
-    );
-    if (countValidRows(rows) > 0) {
-      return {
-        rows,
-        sourceName: resolvedSourceName,
-        runId: resolved.runId,
-        finderBaseUrl: resolved.finderBaseUrl,
-        totalRows: rows.length,
-        validRows: countValidRows(rows),
-        pulledRows,
-        matchedRows,
-        filteredOutRows,
-        providerMeta: aiPreview.providerMeta,
-        pulledAt
-      };
-    }
-  } catch (error) {
-    return {
-      rows: deterministicRows,
-      sourceName: resolvedSourceName,
-      runId: resolved.runId,
-      finderBaseUrl: resolved.finderBaseUrl,
-      totalRows: deterministicRows.length,
-      validRows: countValidRows(deterministicRows),
-      pulledRows,
-      matchedRows,
-      filteredOutRows,
-      providerMeta: deterministicRows[0]?.providerMeta,
-      fallbackReason: error instanceof Error ? error.message : "Finder AI 预览失败，已使用本地适配器",
-      pulledAt
-    };
-  }
-
   return {
     rows: deterministicRows,
     sourceName: resolvedSourceName,
@@ -932,7 +1010,6 @@ export const previewFinderImport = async (
     matchedRows,
     filteredOutRows,
     providerMeta: deterministicRows[0]?.providerMeta,
-    fallbackReason: "AI 预览没有返回可导入地址，已使用 Finder 本地适配器",
     pulledAt
   };
 };
@@ -956,7 +1033,7 @@ export const commitFinderImport = async (
 
   const commitRequest: WalletImportCommitRequest = {
     rows: preview.rows,
-    mode: "ai",
+    mode: "finder",
     sourceType: "finder",
     sourceName: preview.sourceName,
     preserveExistingManualFields: true

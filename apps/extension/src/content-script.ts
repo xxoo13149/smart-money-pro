@@ -37,7 +37,10 @@ interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
   aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -153,6 +156,7 @@ interface ResolvedInlineAnnotation {
   hoverCard?: AddressHoverCard;
   summaryText?: string;
   noteSnippet?: string;
+  activityLevel?: string;
   detailUrl: string;
   summaryVersion: string;
   proxyWallet: string;
@@ -319,6 +323,7 @@ type ContentRuntimeMessage =
   >();
   const fallbackHoverAnnotations = new Map<string, ResolvedInlineAnnotation>();
   let hoverOverlayManager: HoverOverlayManager | null = null;
+  let drawerOverlayManager: DrawerOverlayManager | null = null;
   let interactionAbortController: AbortController | null = null;
   let mountedFallbackNode: HTMLElement | null = null;
 
@@ -370,6 +375,44 @@ type ContentRuntimeMessage =
   const compactText = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
 
   const normalizeBadgeText = (value: string | null | undefined) => compactText(value).toLowerCase();
+
+  const normalizeActivityText = (value: string | null | undefined) => compactText(value).toLowerCase();
+
+  const isActivityLevelText = (value: string | null | undefined) => {
+    const normalized = normalizeActivityText(value);
+    return normalized === "正常" || normalized === "低活跃" || normalized === "活跃";
+  };
+
+  const isSystemOnlyBadge = (badge: AddressLabelBadge) => {
+    const text = compactText(badge.text);
+    const normalized = normalizeBadgeText(text);
+    return (
+      compactText(badge.kind).toLowerCase() === "activity_level" ||
+      badge.tone === "ai-review" ||
+      normalized === "待复核" ||
+      normalized === "ai 待确认" ||
+      normalized === "ai待确认" ||
+      isActivityLevelText(text)
+    );
+  };
+
+  const getActivityLevelFromSummary = (summary: AddressSummary) =>
+    summary.activityLevel ||
+    [...(summary.hoverBadges ?? []), ...(summary.badges ?? [])].find((badge) => {
+      const kind = compactText(badge.kind).toLowerCase();
+      return kind === "activity_level" || isActivityLevelText(badge.text);
+    })?.text;
+
+  const getAliasActivityTone = (activityLevel?: string) => {
+    const normalized = normalizeActivityText(activityLevel);
+    if (normalized === "正常" || normalized === "活跃") {
+      return "active";
+    }
+    if (normalized === "低活跃") {
+      return "quiet";
+    }
+    return undefined;
+  };
 
   const INLINE_BADGE_KIND_PRIORITY: Record<string, number> = {
     payout_region: 900,
@@ -423,9 +466,36 @@ type ContentRuntimeMessage =
     return badge;
   };
 
+  const inferBadgeDedupeKind = (badge: AddressLabelBadge) => {
+    const text = compactText(badge.text).replace(/高爆击/gu, "高暴击");
+    const normalized = normalizeBadgeText(text);
+    if (normalized === "正常" || normalized === "低活跃") {
+      return "activity_level";
+    }
+    if (normalized === "提前埋伏") {
+      return "early_entry_signal";
+    }
+    if (normalized === "新钱包" || normalized === "隐藏高手新钱包") {
+      return "new_wallet_signal";
+    }
+    if (/^高频/u.test(text)) {
+      return "frequency_region";
+    }
+    if (/^高暴击/u.test(text)) {
+      return "payout_region";
+    }
+    if (/^高胜率/u.test(text)) {
+      return "winrate_region";
+    }
+    if (/彩票型|拆分型|流动型/u.test(text)) {
+      return "trader_archetype";
+    }
+    return compactText(badge.kind).toLowerCase() || "unknown";
+  };
+
   const makeBadgeKey = (badge: AddressLabelBadge) => {
-    const kind = compactText(badge.kind).toLowerCase() || "unknown";
-    return `${kind}:${normalizeBadgeText(badge.text)}`;
+    const kind = inferBadgeDedupeKind(badge);
+    return `${kind}:${normalizeBadgeText(badge.text).replace(/高爆击/gu, "高暴击")}`;
   };
 
   const getInlineBadgePriority = (badge: AddressLabelBadge) => {
@@ -448,7 +518,7 @@ type ContentRuntimeMessage =
     const unique: T[] = [];
     badges.forEach((badge) => {
       const normalized = normalizeBadgeText(badge.text);
-      if (!normalized) {
+      if (!normalized || isSystemOnlyBadge(badge)) {
         return;
       }
       const key = makeBadgeKey(badge);
@@ -548,11 +618,13 @@ type ContentRuntimeMessage =
       const style = document.createElement("style");
       style.textContent = `
 .wsmx-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483647}
-.wsmx-card{position:absolute;width:264px;padding:10px 11px;border-radius:10px;border:1px solid rgba(147,163,184,.24);background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.98));box-shadow:0 18px 36px rgba(0,0,0,.42),0 0 0 1px rgba(15,23,42,.22);color:#e8f0fb;pointer-events:auto;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.42;transform:translateY(0);animation:wsmxFadeIn .14s ease}
-.wsmx-header{display:grid;gap:2px;margin-bottom:8px}
+.wsmx-card{position:absolute;width:min(376px,calc(100vw - 16px));max-height:min(460px,calc(100vh - 16px));padding:10px 11px;border-radius:10px;border:1px solid rgba(147,163,184,.24);background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.98));box-shadow:0 18px 36px rgba(0,0,0,.42),0 0 0 1px rgba(15,23,42,.22);color:#e8f0fb;pointer-events:auto;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.42;display:flex;flex-direction:column;overflow:hidden;transform:translateY(0);animation:wsmxFadeIn .14s ease}
+.wsmx-header{display:grid;gap:2px;margin-bottom:8px;flex:0 0 auto}
 .wsmx-title{font-size:12px;font-weight:700;color:#f8fbff}
 .wsmx-subtitle{font-size:10px;color:rgba(209,220,234,.7)}
-.wsmx-summary{font-size:11px;color:rgba(231,239,247,.86);margin-bottom:9px}
+.wsmx-summary{font-size:11px;color:rgba(231,239,247,.88);margin-bottom:9px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.wsmx-body{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto;padding-right:2px}
+.wsmx-footer{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid rgba(148,163,184,.15);flex:0 0 auto}
 .wsmx-section{display:grid;gap:6px;padding-top:7px;margin-top:7px;border-top:1px solid rgba(148,163,184,.15)}
 .wsmx-section:first-of-type{border-top:none;padding-top:0;margin-top:0}
 .wsmx-section-title{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:rgba(204,216,230,.7)}
@@ -563,8 +635,9 @@ type ContentRuntimeMessage =
 .wsmx-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.2)}
 .wsmx-tag--alert,.wsmx-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
 .wsmx-note{font-size:11px;color:rgba(215,227,239,.78);word-break:break-word}
-.wsmx-link{font-size:10px;font-weight:600;color:#92bcff;text-decoration:none}
-.wsmx-link:hover{color:#bfd7ff}
+.wsmx-note--hint{color:#c7d8ff}
+.wsmx-action{appearance:none;border:1px solid rgba(130,245,206,.28);border-radius:999px;background:rgba(130,245,206,.1);color:#bfffe9;font-size:10px;font-weight:700;padding:5px 9px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
+.wsmx-action:hover,.wsmx-action:focus-visible{background:rgba(130,245,206,.16);border-color:rgba(130,245,206,.42);outline:none;transform:translateY(-1px)}
 @keyframes wsmxFadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
       `;
       shadow.append(style);
@@ -619,7 +692,7 @@ type ContentRuntimeMessage =
     }
 
     private appendTagsSection(
-      card: HTMLDivElement,
+      container: HTMLElement,
       titleText: string,
       tags: AddressLabelBadge[],
       fallbackTagText: string
@@ -644,14 +717,15 @@ type ContentRuntimeMessage =
       }
       section.append(tagList);
 
-      card.append(section);
+      container.append(section);
     }
 
     private appendNoteSection(
-      card: HTMLDivElement,
+      container: HTMLElement,
       titleText: string,
       noteText: string,
-      fallbackNoteText: string
+      fallbackNoteText: string,
+      maxLength = 160
     ) {
       const section = document.createElement("section");
       section.className = "wsmx-section";
@@ -663,10 +737,10 @@ type ContentRuntimeMessage =
 
       const note = document.createElement("div");
       note.className = "wsmx-note";
-      note.textContent = noteText || fallbackNoteText;
+      note.textContent = truncateText(noteText || fallbackNoteText, maxLength);
       section.append(note);
 
-      card.append(section);
+      container.append(section);
     }
 
     private buildCard(annotation: ResolvedInlineAnnotation) {
@@ -693,45 +767,74 @@ type ContentRuntimeMessage =
       if (annotation.summaryText) {
         const summary = document.createElement("div");
         summary.className = "wsmx-summary";
-        summary.textContent = truncateText(annotation.summaryText, 120);
+        summary.textContent = truncateText(annotation.summaryText, 110);
         card.append(summary);
       }
 
-      const officialTags = dedupeBadges(annotation.hoverCard?.officialTags ?? []);
+      const body = document.createElement("div");
+      body.className = "wsmx-body";
+
+      const officialFallback = annotation.secondaryBadges.filter(
+        (badge) => badge.tone === "accent" || badge.kind === "official"
+      );
+      const officialTags = dedupeBadges(
+        annotation.hoverCard?.officialTags?.length ? annotation.hoverCard.officialTags : officialFallback
+      );
       const officialKeys = new Set(officialTags.map((badge) => makeBadgeKey(badge)));
-      const aiSource =
-        annotation.hoverCard?.aiTags ??
-        annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
-      const aiTags = dedupeBadges(aiSource).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
+      const aiSource = annotation.hoverCard?.aiTags?.length
+        ? annotation.hoverCard.aiTags
+        : annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
+      const aiTags = dedupeBadges(aiSource)
+        .filter((badge) => !officialKeys.has(makeBadgeKey(badge)))
+        .slice(0, 4);
       const officialNoteText = annotation.hoverCard?.officialNoteText ?? "";
       const aiBriefShortText = annotation.hoverCard?.aiBriefShortText ?? "";
       const aiNarrativeNoteText = annotation.hoverCard?.aiNarrativeNoteText ?? "";
       const aiStatsNoteText = annotation.hoverCard?.aiStatsNoteText ?? "";
       const aiDeepNoteText = annotation.hoverCard?.aiDeepNoteText ?? "";
 
-      this.appendTagsSection(
-        card,
-        "官方标签",
-        officialTags,
-        "暂无官方标签"
-      );
-      this.appendNoteSection(card, "官方标签备注说明", officialNoteText, "暂无官方标签备注说明");
-      this.appendTagsSection(
-        card,
-        "AI 标签",
-        aiTags,
-        "暂无 AI 标签"
-      );
-      this.appendNoteSection(card, "结论", aiBriefShortText, "暂无结论");
-      this.appendNoteSection(card, "摘要说明", aiNarrativeNoteText || aiStatsNoteText, "暂无摘要说明");
-      this.appendNoteSection(card, "深度解读", aiDeepNoteText, "暂无深度解读");
+      if (officialTags.length > 0) {
+        this.appendTagsSection(body, "官方标签", officialTags.slice(0, 4), "暂无官方标签");
+      }
+      if (officialNoteText) {
+        this.appendNoteSection(body, "官方标签备注说明", officialNoteText, "暂无官方标签备注说明", 120);
+      }
+      if (aiTags.length > 0) {
+        this.appendTagsSection(body, "AI 标签", aiTags, "暂无 AI 标签");
+      }
+      if (aiBriefShortText) {
+        this.appendNoteSection(body, "AI 结论", aiBriefShortText, "暂无结论", 96);
+      }
+      if (aiNarrativeNoteText || aiStatsNoteText) {
+        this.appendNoteSection(
+          body,
+          "摘要说明",
+          truncateText(aiNarrativeNoteText || aiStatsNoteText, 240),
+          "暂无摘要说明",
+          220
+        );
+      }
+      if (aiDeepNoteText) {
+        this.appendNoteSection(body, "深度解读", "已同步，可展开阅读完整内容。", "暂无深度解读", 88);
+      }
+      card.append(body);
 
-      const footer = document.createElement("a");
-      footer.className = "wsmx-link";
-      footer.href = annotation.detailUrl;
-      footer.target = "_blank";
-      footer.rel = "noreferrer";
-      footer.textContent = "打开完整详情";
+      const deepHint = document.createElement("span");
+      deepHint.className = "wsmx-note wsmx-note--hint";
+      deepHint.textContent = aiDeepNoteText ? "有深度解读" : "快速判断";
+      const footer = document.createElement("div");
+      footer.className = "wsmx-footer";
+      footer.append(deepHint);
+      const detailButton = document.createElement("button");
+      detailButton.type = "button";
+      detailButton.className = "wsmx-action";
+      detailButton.textContent = "展开阅读";
+      detailButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAnnotationReader(annotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+      });
+      footer.append(detailButton);
       card.append(footer);
 
       return card;
@@ -898,6 +1001,215 @@ type ContentRuntimeMessage =
       if (this.host) {
         this.host.remove();
       }
+      this.host = null;
+      this.shadowRoot = null;
+    }
+  }
+
+  class DrawerOverlayManager {
+    private host: HTMLDivElement | null = null;
+    private shadowRoot: ShadowRoot | null = null;
+    private returnFocus: HTMLElement | null = null;
+
+    private ensureHost() {
+      if (this.host && this.shadowRoot) {
+        return;
+      }
+
+      this.host = document.createElement("div");
+      this.host.className = "wsmx-drawer-host";
+      this.host.style.position = "fixed";
+      this.host.style.inset = "0";
+      this.host.style.zIndex = "2147483647";
+      this.host.style.pointerEvents = "none";
+
+      const shadow = this.host.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = `
+.wsmx-reader-layer{position:fixed;inset:0;pointer-events:none;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;z-index:2147483647}
+.wsmx-reader-backdrop{position:absolute;inset:0;background:rgba(3,7,18,.32);pointer-events:auto;animation:wsmxReaderFade .12s ease}
+.wsmx-reader{position:absolute;top:12px;right:12px;bottom:12px;width:min(430px,calc(100vw - 24px));display:flex;flex-direction:column;border:1px solid rgba(148,163,184,.24);border-radius:12px;background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.99));box-shadow:0 24px 60px rgba(0,0,0,.48);color:#e8f0fb;pointer-events:auto;overflow:hidden;animation:wsmxReaderIn .16s ease}
+.wsmx-reader-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 14px 10px;border-bottom:1px solid rgba(148,163,184,.14)}
+.wsmx-reader-title{font-size:13px;font-weight:750;line-height:1.3;color:#f8fbff}
+.wsmx-reader-address{margin-top:4px;font-size:10px;color:rgba(209,220,234,.66);word-break:break-all}
+.wsmx-reader-close{width:28px;height:28px;border-radius:999px;border:1px solid rgba(231,239,247,.12);background:rgba(231,239,247,.06);color:#e8f0fb;font-size:18px;line-height:1;cursor:pointer}
+.wsmx-reader-body{display:grid;gap:12px;padding:12px 14px 16px;overflow:auto;min-height:0}
+.wsmx-reader-brief{border-left:3px solid rgba(130,245,206,.75);border-radius:9px;background:rgba(130,245,206,.08);padding:9px 10px;font-size:12px;line-height:1.65;color:#f4fffb}
+.wsmx-reader-section{display:grid;gap:7px}
+.wsmx-reader-section-title{font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;color:rgba(204,216,230,.68)}
+.wsmx-reader-tags{display:flex;flex-wrap:wrap;gap:6px}
+.wsmx-reader-tag{display:inline-flex;align-items:center;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid transparent;font-size:10px;line-height:1.2}
+.wsmx-reader-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-reader-tag--neutral{color:rgba(231,239,247,.86);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
+.wsmx-reader-tag--ai-review{color:#d7ddff;background:rgba(129,140,248,.13);border-color:rgba(129,140,248,.22)}
+.wsmx-reader-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.22)}
+.wsmx-reader-tag--alert,.wsmx-reader-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
+.wsmx-reader-text{font-size:12px;line-height:1.7;color:rgba(224,235,247,.86);white-space:pre-wrap;word-break:break-word}
+.wsmx-reader-details{border:1px solid rgba(148,163,184,.14);border-radius:10px;background:rgba(231,239,247,.035);overflow:hidden}
+.wsmx-reader-details summary{padding:10px 11px;cursor:pointer;font-size:12px;font-weight:750;color:#edf5ff}
+.wsmx-reader-details-text{padding:0 11px 12px}
+@media (max-width:560px){.wsmx-reader{top:8px;right:8px;bottom:8px;width:calc(100vw - 16px)}}
+@keyframes wsmxReaderFade{from{opacity:0}to{opacity:1}}
+@keyframes wsmxReaderIn{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}
+      `;
+      shadow.append(style);
+
+      const layer = document.createElement("div");
+      layer.className = "wsmx-reader-layer";
+      shadow.append(layer);
+
+      document.body.append(this.host);
+      this.shadowRoot = shadow;
+    }
+
+    private getLayer() {
+      return this.shadowRoot?.querySelector<HTMLDivElement>(".wsmx-reader-layer") ?? null;
+    }
+
+    private toneClass(tone?: string) {
+      switch (tone) {
+        case "accent":
+        case "watch":
+        case "alert":
+        case "danger":
+        case "ai-review":
+          return tone;
+        default:
+          return "neutral";
+      }
+    }
+
+    private createTagNode(badge: AddressLabelBadge) {
+      const tag = document.createElement("span");
+      tag.className = `wsmx-reader-tag wsmx-reader-tag--${this.toneClass(badge.tone)}`;
+      tag.textContent = truncateText(badge.text, 30);
+      tag.title = badge.detailText || badge.metricText || badge.text;
+      return tag;
+    }
+
+    private appendTagSection(container: HTMLElement, titleText: string, badges: AddressLabelBadge[]) {
+      if (badges.length === 0) {
+        return;
+      }
+      const section = document.createElement("section");
+      section.className = "wsmx-reader-section";
+      const title = document.createElement("div");
+      title.className = "wsmx-reader-section-title";
+      title.textContent = titleText;
+      const tags = document.createElement("div");
+      tags.className = "wsmx-reader-tags";
+      dedupeBadges(badges).forEach((badge) => tags.append(this.createTagNode(badge)));
+      section.append(title, tags);
+      container.append(section);
+    }
+
+    private appendTextSection(container: HTMLElement, titleText: string, textValue: string) {
+      if (!compactText(textValue)) {
+        return;
+      }
+      const details = document.createElement("details");
+      details.className = "wsmx-reader-details";
+      const summary = document.createElement("summary");
+      summary.textContent = titleText;
+      const textNode = document.createElement("div");
+      textNode.className = "wsmx-reader-text wsmx-reader-details-text";
+      textNode.textContent = textValue;
+      details.append(summary, textNode);
+      container.append(details);
+    }
+
+    open(annotation: ResolvedInlineAnnotation, returnFocus?: HTMLElement | null) {
+      this.ensureHost();
+      this.returnFocus =
+        returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      const layer = this.getLayer();
+      if (!layer) {
+        return;
+      }
+      layer.textContent = "";
+
+      const backdrop = document.createElement("button");
+      backdrop.type = "button";
+      backdrop.className = "wsmx-reader-backdrop";
+      backdrop.setAttribute("aria-label", "关闭 AI 解读");
+      backdrop.addEventListener("click", () => this.close());
+
+      const drawer = document.createElement("aside");
+      drawer.className = "wsmx-reader";
+      drawer.setAttribute("role", "dialog");
+      drawer.setAttribute("aria-label", `${annotation.aliasText} AI 解读`);
+
+      const head = document.createElement("div");
+      head.className = "wsmx-reader-head";
+      const titleWrap = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "wsmx-reader-title";
+      title.textContent = annotation.aliasText;
+      const address = document.createElement("div");
+      address.className = "wsmx-reader-address";
+      address.textContent = annotation.normalizedAddress || annotation.proxyWallet;
+      titleWrap.append(title, address);
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "wsmx-reader-close";
+      closeButton.setAttribute("aria-label", "关闭 AI 解读");
+      closeButton.textContent = "×";
+      closeButton.addEventListener("click", () => this.close());
+      head.append(titleWrap, closeButton);
+
+      const body = document.createElement("div");
+      body.className = "wsmx-reader-body";
+      const brief = document.createElement("div");
+      brief.className = "wsmx-reader-brief";
+      brief.textContent =
+        annotation.hoverCard?.aiBriefShortText || annotation.summaryText || annotation.noteSnippet || "暂无 AI 结论。";
+      body.append(brief);
+
+      const officialTags = dedupeBadges([
+        ...(annotation.hoverCard?.officialTags ?? []),
+        ...getVisibleAnnotationBadges(annotation).filter((badge) => badge.tone === "accent")
+      ]);
+      const officialKeys = new Set(officialTags.map((badge) => makeBadgeKey(badge)));
+      const aiTags = dedupeBadges([
+        ...(annotation.hoverCard?.aiTags ?? []),
+        ...getVisibleAnnotationBadges(annotation).filter((badge) => badge.tone !== "accent")
+      ]).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
+      this.appendTagSection(body, "结构化标签", officialTags.length ? officialTags : getVisibleAnnotationBadges(annotation));
+      this.appendTagSection(body, "AI 标签", aiTags);
+
+      this.appendTextSection(
+        body,
+        "摘要说明",
+        annotation.hoverCard?.aiNarrativeNoteText || annotation.hoverCard?.aiStatsNoteText || annotation.noteSnippet || ""
+      );
+      this.appendTextSection(body, "深度解读", annotation.hoverCard?.aiDeepNoteText || "");
+
+      drawer.append(head, body);
+      drawer.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          this.close();
+        }
+      });
+      layer.append(backdrop, drawer);
+      closeButton.focus();
+    }
+
+    close() {
+      const layer = this.getLayer();
+      if (layer) {
+        layer.textContent = "";
+      }
+      const focusTarget = this.returnFocus;
+      this.returnFocus = null;
+      if (focusTarget?.isConnected) {
+        focusTarget.focus();
+      }
+    }
+
+    destroy() {
+      this.close();
+      this.host?.remove();
       this.host = null;
       this.shadowRoot = null;
     }
@@ -1153,6 +1465,16 @@ type ContentRuntimeMessage =
       type: "wsm:lookupAddresses",
       addresses
     });
+
+  const openAnnotationReader = (annotation: ResolvedInlineAnnotation, returnFocus?: HTMLElement | null) => {
+    const address = annotation.normalizedAddress || annotation.proxyWallet;
+    if (!address) {
+      return;
+    }
+
+    hoverOverlayManager?.close();
+    drawerOverlayManager?.open(annotation, returnFocus);
+  };
 
   const publishPageState = async (state: PageRuntimeState) => {
     const serialized = JSON.stringify(state);
@@ -2013,8 +2335,11 @@ type ContentRuntimeMessage =
     return lookupCache;
   };
 
+  const getInlineBadgeSource = (summary: AddressSummary) =>
+    dedupeBadges(summary.badges?.length ? summary.badges : (summary.hoverBadges ?? []));
+
   const selectPrimaryBadge = (summary: AddressSummary, aliasText: string, holderDisplayName: string) =>
-    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+    getInlineBadgeSource(summary)
       .filter((badge) => !isAliasDuplicateBadge(badge, aliasText, holderDisplayName))
       .sort(compareInlineBadges)[0];
 
@@ -2024,20 +2349,20 @@ type ContentRuntimeMessage =
     aliasText?: string,
     holderDisplayName?: string
   ) =>
-    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+    getInlineBadgeSource(summary)
       .filter((badge) => badge.id !== primaryBadge?.id)
       .filter((badge) =>
         aliasText && holderDisplayName ? !isAliasDuplicateBadge(badge, aliasText, holderDisplayName) : true
       )
       .sort(compareInlineBadges)
-      .slice(0, 5);
+      .slice(0, 2);
 
   const hasHoverPayload = (annotation: ResolvedInlineAnnotation) =>
     Boolean(annotation.summaryText) ||
     annotation.secondaryBadges.length > 0 ||
     annotation.statusBadges.length > 0 ||
-    Boolean(annotation.hoverCard?.officialTags.length) ||
-    Boolean(annotation.hoverCard?.aiTags.length) ||
+    Boolean(annotation.hoverCard?.officialTags?.length) ||
+    Boolean(annotation.hoverCard?.aiTags?.length) ||
     Boolean(annotation.hoverCard?.officialNoteText) ||
     Boolean(annotation.hoverCard?.aiBriefShortText) ||
     Boolean(annotation.hoverCard?.aiNarrativeNoteText) ||
@@ -2065,8 +2390,9 @@ type ContentRuntimeMessage =
       secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
-      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
+      summaryText: truncateText(summary.aiBriefShort ?? summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
       noteSnippet: truncateText(summary.noteSnippet, 48),
+      activityLevel: getActivityLevelFromSummary(summary),
       detailUrl: summary.detailUrl,
       summaryVersion: summary.version,
       proxyWallet: holder.proxyWallet,
@@ -2094,8 +2420,9 @@ type ContentRuntimeMessage =
       secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
-      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
+      summaryText: truncateText(summary.aiBriefShort ?? summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
       noteSnippet: truncateText(summary.noteSnippet, 48),
+      activityLevel: getActivityLevelFromSummary(summary),
       detailUrl: summary.detailUrl,
       summaryVersion: summary.version,
       proxyWallet: holder.proxyWallet,
@@ -2296,11 +2623,41 @@ type ContentRuntimeMessage =
     }
   };
 
-  const createChipNode = (badge: AddressSummary["badges"][number]) => {
-    const span = document.createElement("span");
-    span.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
-    span.textContent = truncateText(badge.text, 18);
-    return span;
+  const getVisibleAnnotationBadges = (annotation: ResolvedInlineAnnotation) =>
+    dedupeBadges([
+      ...(annotation.primaryBadge ? [annotation.primaryBadge] : []),
+      ...annotation.secondaryBadges,
+      ...annotation.statusBadges.filter((badge) => !isSystemOnlyBadge(badge))
+    ]);
+
+  const prepareHoverTrigger = (element: HTMLElement, annotation: ResolvedInlineAnnotation) => {
+    element.setAttribute("aria-haspopup", "dialog");
+    element.setAttribute("aria-expanded", "false");
+    element.dataset.wsmxHoverTrigger = "1";
+    element.dataset.wsmxHoverKey = annotation.key;
+  };
+
+  const createChipNode = (
+    badge: AddressSummary["badges"][number],
+    annotation: ResolvedInlineAnnotation
+  ): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
+    button.textContent = truncateText(badge.text, 18);
+    button.title = badge.detailText || badge.metricText || badge.text;
+    prepareHoverTrigger(button, annotation);
+    return button;
+  };
+
+  const createMoreChipNode = (hiddenCount: number, annotation: ResolvedInlineAnnotation) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wsm-chip wsm-chip--more";
+    button.textContent = `+${hiddenCount}`;
+    button.title = "查看更多标签";
+    prepareHoverTrigger(button, annotation);
+    return button;
   };
 
   const buildAnnotationNode = (annotation: ResolvedInlineAnnotation) => {
@@ -2313,26 +2670,43 @@ type ContentRuntimeMessage =
     row.dataset.source = annotation.source;
     row.dataset.version = annotation.summaryVersion;
 
-    const aliasLink = document.createElement("a");
-    aliasLink.className = "wsm-alias";
-    aliasLink.href = annotation.detailUrl;
-    aliasLink.target = "_blank";
-    aliasLink.rel = "noreferrer";
-    aliasLink.textContent = annotation.aliasText;
-    row.append(aliasLink);
+    const aliasButton = document.createElement("button");
+    aliasButton.type = "button";
+    aliasButton.className = "wsm-alias";
+    const aliasTone = getAliasActivityTone(annotation.activityLevel);
+    if (aliasTone) {
+      aliasButton.classList.add(`wsm-alias--${aliasTone}`);
+    }
+    aliasButton.textContent = annotation.aliasText;
+    aliasButton.title = annotation.activityLevel ? `查看钱包解读 · ${annotation.activityLevel}` : "查看钱包解读";
+    prepareHoverTrigger(aliasButton, annotation);
+    aliasButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openAnnotationReader(annotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+    });
+    row.append(aliasButton);
 
-    let trigger: HTMLButtonElement | undefined;
-    if (annotation.primaryBadge || hasHoverPayload(annotation)) {
-      trigger = document.createElement("button");
-      trigger.type = "button";
-      trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${annotation.primaryBadge?.tone || "neutral"}`;
-      trigger.textContent = truncateText(annotation.primaryBadge?.text || "More", 18);
-      trigger.setAttribute("aria-haspopup", "dialog");
-      trigger.setAttribute("aria-expanded", "false");
-      trigger.dataset.wsmxHoverTrigger = "1";
-      trigger.dataset.wsmxHoverKey = annotation.key;
-      row.append(trigger);
-    } else if (annotation.noteSnippet) {
+    let trigger: HTMLButtonElement | undefined = aliasButton;
+    const visibleBadges = getVisibleAnnotationBadges(annotation);
+    if (visibleBadges.length > 0) {
+      const chipList = document.createElement("div");
+      chipList.className = "wsm-chip-list";
+      const maxInlineBadges = 3;
+      visibleBadges.slice(0, maxInlineBadges).forEach((badge, index) => {
+        const chip = createChipNode(badge, annotation);
+        if (index === 0) {
+          trigger = chip;
+        }
+        chipList.append(chip);
+      });
+      if (visibleBadges.length > maxInlineBadges) {
+        chipList.append(createMoreChipNode(visibleBadges.length - maxInlineBadges, annotation));
+      }
+      row.append(chipList);
+    }
+
+    if (annotation.noteSnippet && visibleBadges.length === 0 && !hasHoverPayload(annotation)) {
       const note = document.createElement("span");
       note.className = "wsm-note";
       note.textContent = truncateText(annotation.noteSnippet, 24);
@@ -2420,30 +2794,34 @@ type ContentRuntimeMessage =
         return;
       }
 
-      const item = document.createElement("a");
+      const item = document.createElement("div");
       item.className = "wsm-fallback-item";
-      item.href = holder.summary.detailUrl;
-      item.target = "_blank";
-      item.rel = "noreferrer";
-
-      const alias = document.createElement("span");
-      alias.className = "wsm-fallback-alias";
-      alias.textContent = holder.summary.alias?.trim() || holder.displayName || shortenAddress(holder.proxyWallet);
-      item.append(alias);
 
       const fallbackAnnotation = buildFallbackAnnotation(panel, holder, holder.summary);
       fallbackHoverAnnotations.set(fallbackAnnotation.key, fallbackAnnotation);
 
-      if (fallbackAnnotation.primaryBadge || hasHoverPayload(fallbackAnnotation)) {
-        const trigger = document.createElement("button");
-        trigger.type = "button";
-        trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${fallbackAnnotation.primaryBadge?.tone || "neutral"}`;
-        trigger.textContent = truncateText(fallbackAnnotation.primaryBadge?.text || "More", 18);
-        trigger.setAttribute("aria-haspopup", "dialog");
-        trigger.setAttribute("aria-expanded", "false");
-        trigger.dataset.wsmxHoverTrigger = "1";
-        trigger.dataset.wsmxHoverKey = fallbackAnnotation.key;
-        item.append(trigger);
+      const alias = document.createElement("button");
+      alias.type = "button";
+      alias.className = "wsm-fallback-alias";
+      alias.textContent = holder.summary.alias?.trim() || holder.displayName || shortenAddress(holder.proxyWallet);
+      alias.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAnnotationReader(fallbackAnnotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+      });
+      item.append(alias);
+
+      const visibleBadges = getVisibleAnnotationBadges(fallbackAnnotation);
+      if (visibleBadges.length > 0) {
+        const chipList = document.createElement("div");
+        chipList.className = "wsm-chip-list";
+        visibleBadges.slice(0, 4).forEach((badge) => {
+          chipList.append(createChipNode(badge, fallbackAnnotation));
+        });
+        if (visibleBadges.length > 4) {
+          chipList.append(createMoreChipNode(visibleBadges.length - 4, fallbackAnnotation));
+        }
+        item.append(chipList);
       }
 
       list.append(item);
@@ -3105,6 +3483,8 @@ type ContentRuntimeMessage =
         interactionAbortController = null;
         hoverOverlayManager?.destroy();
         hoverOverlayManager = null;
+        drawerOverlayManager?.destroy();
+        drawerOverlayManager = null;
         surfaceObserver?.disconnect();
         surfaceObserver = null;
         discoveryObserver?.disconnect();
@@ -3149,6 +3529,7 @@ type ContentRuntimeMessage =
     hoverOverlayManager = new HoverOverlayManager(
       (key) => mountedAnnotations.get(key)?.annotation ?? fallbackHoverAnnotations.get(key)
     );
+    drawerOverlayManager = new DrawerOverlayManager();
     installHoverInteractionHandlers();
 
     chrome.storage.onChanged.addListener(handleStorageChange);
