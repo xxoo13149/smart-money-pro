@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
 
-import { AlertRow } from "../../../components/AlertRow";
 import { Metric } from "../../../components/Metric";
 import { Section } from "../../../components/Section";
 import { WalletDeleteButton } from "../../../components/WalletDeleteButton";
@@ -30,7 +29,7 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ i
     notFound();
   }
 
-  const { wallet, metrics, labels, trades, alerts, notes, positions, watchlistEntry, finderAi } = data;
+  const { wallet, metrics, labels, trades, notes, positions, watchlistEntry, finderAi } = data;
   const finderAiMeta = [
     finderAi?.providerMeta?.model,
     finderAi?.providerMeta?.promptVersion,
@@ -87,7 +86,7 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ i
           description="Finder 同步过来的深度分析会原样保留在这里，扩展页内标注也会优先读取这组摘要。"
           action={
             <div className="badge-cluster">
-              <span className="action-pill">{finderAi.needsReview ? "需复核" : "已同步"}</span>
+              <span className="action-pill">{finderAi.needsReview ? "证据不足" : "已同步"}</span>
               {finderAi.hasConflict ? <span className="eyebrow">有冲突</span> : null}
               {finderAiMeta ? <span className="eyebrow">{finderAiMeta}</span> : null}
             </div>
@@ -286,23 +285,6 @@ export default async function WalletDetailPage({ params }: { params: Promise<{ i
                 <EmptyState text="新录入地址默认没有 demo trades，后续接入真实分析流水后会自动补齐。" />
               )}
             </div>
-          </div>
-
-          <div className="stack-list">
-            <h3 className="inline-title">预警</h3>
-            {alerts.length > 0 ? (
-              alerts.map((alertItem) => (
-                <div key={alertItem.alert.id} className="stack-item">
-                  <div className="subtle-row">
-                    <span>{alertItem.market?.title ?? alertItem.alert.marketId}</span>
-                    <span>{alertItem.eventLabel}</span>
-                  </div>
-                  <AlertRow alert={alertItem.alert} />
-                </div>
-              ))
-            ) : (
-              <EmptyState text="这个地址目前没有 demo 预警。" />
-            )}
           </div>
         </div>
       </Section>

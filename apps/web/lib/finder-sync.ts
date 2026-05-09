@@ -796,7 +796,7 @@ const buildFinderPreviewRows = (
         ...labels,
         {
           name: "信号质量",
-          value: labels.length >= 2 ? "高信号" : labels.length ? "需复核" : "低信号",
+          value: labels.length >= 2 ? "高信号" : labels.length ? "信号不足" : "低信号",
           kind: "signal_quality",
           evidence: sourceExcerpt || undefined,
           source: "system",
@@ -806,7 +806,7 @@ const buildFinderPreviewRows = (
       finderAi: normalizedFinderAi,
       watchlistNote: shouldWatchlist(row, detail) ? "Finder 建议进入观察名单" : undefined,
       sourceExcerpt: normalizedFinderAi?.sourceExcerpt || sourceExcerpt || undefined,
-      warnings: labels.length === 0 ? ["Finder 未提供命中标签，建议人工复核"] : [],
+      warnings: labels.length === 0 ? ["Finder 未提供命中标签，建议补充证据"] : [],
       errors,
       confidence: labels.length >= 2 ? "high" : labels.length ? "medium" : "unknown",
       signalQuality: labels.length >= 2 ? "high_signal" : labels.length ? "needs_review" : "low_signal",
@@ -1051,7 +1051,7 @@ const statusLabel = (status?: string) => {
     case "active":
       return "正常";
     case "review_needed":
-      return "AI 待确认";
+      return "待补充证据";
     case "deleted":
       return "已删除";
     default:

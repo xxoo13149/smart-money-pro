@@ -12,7 +12,7 @@ const ACCESS_HEADER_KEYS = [
   "x-forwarded-email"
 ] as const;
 
-const APP_VERSION = process.env.npm_package_version ?? "0.1.0";
+const APP_VERSION = process.env.npm_package_version ?? "0.2.0";
 const SCHEMA_READY = new Map<string, Promise<void>>();
 
 type RuntimeMode = "cloudflare" | "demo";

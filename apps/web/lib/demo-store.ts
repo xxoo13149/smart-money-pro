@@ -144,11 +144,11 @@ const buildStatusBadges = (wallet: Wallet, activeAlertCount: number) => {
   if (wallet.deletedAt) {
     badges.push(toBadge(wallet.id, "已删除", "danger", "deleted"));
   } else if (wallet.curationStatus === "review_needed") {
-    badges.push(toBadge(wallet.id, "待复核", "ai-review", "review"));
+    badges.push(toBadge(wallet.id, "待补充", "neutral", "review"));
   }
 
   if (activeAlertCount > 0) {
-    badges.push(toBadge(wallet.id, `${activeAlertCount} 红旗`, "alert", "alerts"));
+    badges.push(toBadge(wallet.id, `${activeAlertCount} 信号`, "neutral", "signals"));
   }
 
   return sortAddressBadges(badges);
@@ -676,7 +676,7 @@ export const resolveAlert = (alertId: string, actor = "Team Alpha") => {
     id: createId("audit"),
     walletId: alert.walletId,
     action: "resolve_alert",
-    content: `处理预警 ${alert.eventType}`,
+    content: `处理信号 ${alert.eventType}`,
     createdAt: nowIso(),
     actor
   });

@@ -308,7 +308,7 @@
   border-color: rgba(103, 214, 170, 0.26);
 }
 
-.flowStep[data-tone="review"] {
+.flowStep[data-tone="warning"] {
   border-color: rgba(255, 210, 122, 0.28);
 }
 

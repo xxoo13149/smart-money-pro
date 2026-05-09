@@ -1,10 +1,8 @@
 ﻿import {
-  ALERT_EVENT_META,
   computeDashboardSummary,
   computeMarketDigests,
   computeWalletMetrics,
   deriveSystemLabels,
-  generateAlertEvents,
   getLabelKindPriority,
   getWalletLabelDisplayKey,
   isPrimarySignalLabelKind,
@@ -91,14 +89,13 @@ import {
 } from "@weather-smart-money/data";
 import { cache } from "react";
 
-import type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
+import type { DashboardData, WalletDetailData } from "./demo-store";
 import {
   createUserTag as createDemoUserTag,
   createWallet as createDemoWallet,
   createWalletNote as createDemoWalletNote,
   getDashboardData as getDemoDashboardData,
   getWalletDetail as getDemoWalletDetail,
-  listAlerts as listDemoAlerts,
   listWalletRows as listDemoWalletRows,
   removeWatchlistEntry as removeDemoWatchlistEntry,
   softDeleteWallet as softDeleteDemoWallet,
@@ -123,12 +120,8 @@ import {
   type WalletImportPreview
 } from "./wallet-import";
 
-interface PersistedAlertContext {
+interface PersistedWalletContext {
   wallets: Wallet[];
-  alertItems: AlertListItem[];
-}
-
-interface PersistedWalletContext extends PersistedAlertContext {
   walletRows: WalletTableRow[];
   labelsByWalletId: Map<string, WalletLabel[]>;
   finderAiByWalletId: Map<string, WalletFinderAiInsight>;
@@ -146,36 +139,28 @@ export interface WalletImportBatchSummary {
   batch: WalletImportBatch;
   sourceLabel: string;
   walletCount: number;
+  successCount: number;
+  existingOverlapCount: number;
   activeCount: number;
-  reviewNeededCount: number;
   deletedCount: number;
   watchlistedCount: number;
   officialLabelCount: number;
   aiLabelCount: number;
   promotedLabels: string[];
-  workflow: WalletImportWorkflowSummary;
 }
 
 export interface WalletImportOverview {
   totalBatches: number;
   finderBatches: number;
-  pendingReviewWallets: number;
+  importedWallets: number;
   importedRows7d: number;
   failedRows7d: number;
   promotedLabels7d: number;
 }
 
-export interface WalletImportWorkflowSummary {
-  finderCandidates: number;
-  structuredRows: number;
-  reviewQueue: number;
-  approvedWallets: number;
-  promotedLabels: number;
-}
-
 export interface WalletImportBatchDetail extends WalletImportBatchSummary {
-  latestReviewAt?: string;
-  reviewActors: string[];
+  latestOperationAt?: string;
+  operationActors: string[];
 }
 
 export interface WalletImportsPageData {
@@ -367,11 +352,7 @@ const sanitizeWalletImportRowForCommit = (
 };
 
 const resolveImportCurationStatus = (row: WalletImportPreviewRow): Wallet["curationStatus"] => {
-  if (isWalletAiPreviewRow(row)) {
-    return "review_needed";
-  }
-
-  return row.warnings.length > 0 ? "review_needed" : "active";
+  return "active";
 };
 
 const ensurePersistedBindings = async (): Promise<SmartMoneyBindings | null> => {
@@ -419,18 +400,6 @@ const groupByWalletId = <T extends { walletId: string }>(items: T[]) => {
   return map;
 };
 
-const buildOpenAlertCountByWalletId = (alertItems: AlertListItem[]) => {
-  const map = new Map<string, number>();
-  alertItems.forEach((item) => {
-    if (item.alert.status !== "open") {
-      return;
-    }
-
-    map.set(item.wallet.id, (map.get(item.wallet.id) ?? 0) + 1);
-  });
-  return map;
-};
-
 const buildLatestTradeByWalletId = () => {
   const map = new Map<string, (typeof seedTrades)[number]>();
   seedTrades.forEach((trade) => {
@@ -440,30 +409,6 @@ const buildLatestTradeByWalletId = () => {
     }
   });
   return map;
-};
-
-const buildPersistedAlertItems = (wallets: Wallet[]): AlertListItem[] => {
-  const alerts = generateAlertEvents(wallets, seedTrades, seedPositions);
-  const walletById = new Map(wallets.map((wallet) => [wallet.id, wallet]));
-
-  return alerts
-    .map((alert) => {
-      const wallet = walletById.get(alert.walletId);
-      if (!wallet) {
-        return null;
-      }
-
-      const market = seedMarkets.find((item) => item.id === alert.marketId);
-      return {
-        alert,
-        wallet,
-        market,
-        eventLabel: ALERT_EVENT_META[alert.eventType].label,
-        eventDescription: ALERT_EVENT_META[alert.eventType].description
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((left, right) => right.alert.alertScore - left.alert.alertScore);
 };
 
 const latestTradeByWalletId = buildLatestTradeByWalletId();
@@ -562,12 +507,6 @@ const buildStatusBadges = (wallet: Wallet): WalletStatusBadge[] => {
       text: "已删除",
       tone: "danger"
     });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "AI 待确认",
-      tone: "ai-review"
-    });
   }
 
   badges.push({
@@ -598,12 +537,6 @@ const buildWalletAdminStatusBadges = (wallet: Wallet): WalletStatusBadge[] => {
       text: "已删除",
       tone: "danger"
     });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "AI 待确认",
-      tone: "ai-review"
-    });
   }
 
   badges.push({
@@ -632,32 +565,30 @@ const buildWalletAdminRow = (
       .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? row.wallet.updatedAt
 });
 
-const buildPersistedAlertContextUncached = async (
+const buildPersistedWalletsContextUncached = async (
   filters?: WalletListFilters
-): Promise<PersistedAlertContext | null> => {
+): Promise<{ wallets: Wallet[] } | null> => {
   const bindings = await ensurePersistedBindings();
   if (!bindings?.SMART_MONEY_DB) {
     return null;
   }
 
-  const wallets = await listPersistedWallets(bindings.SMART_MONEY_DB, filters);
   return {
-    wallets,
-    alertItems: buildPersistedAlertItems(wallets)
+    wallets: await listPersistedWallets(bindings.SMART_MONEY_DB, filters)
   };
 };
 
-const getPersistedAlertContext = cache(async () => buildPersistedAlertContextUncached());
+const getPersistedWalletsContext = cache(async () => buildPersistedWalletsContextUncached());
 
-const buildPersistedAlertContext = async (
+const buildPersistedWalletsContext = async (
   filters?: WalletListFilters
-): Promise<PersistedAlertContext | null> =>
-  filters ? buildPersistedAlertContextUncached(filters) : getPersistedAlertContext();
+): Promise<{ wallets: Wallet[] } | null> =>
+  filters ? buildPersistedWalletsContextUncached(filters) : getPersistedWalletsContext();
 
 const buildPersistedContextUncached = async (
   filters?: WalletListFilters
 ): Promise<PersistedWalletContext | null> => {
-  const persisted = await buildPersistedAlertContext(filters);
+  const persisted = await buildPersistedWalletsContext(filters);
   const bindings = await ensurePersistedBindings();
   if (!persisted || !bindings?.SMART_MONEY_DB) {
     return null;
@@ -671,7 +602,6 @@ const buildPersistedContextUncached = async (
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
   const allLabels = deriveSystemLabels(persisted.wallets, allUserLabels, seedTrades);
   const labelsByWalletId = groupByWalletId(allLabels);
-  const openAlertCountByWalletId = buildOpenAlertCountByWalletId(persisted.alertItems);
 
   const walletRows = persisted.wallets
     .map((wallet) => ({
@@ -679,7 +609,7 @@ const buildPersistedContextUncached = async (
       metrics: computeWalletMetrics(wallet, seedTrades),
       labels: labelsByWalletId.get(wallet.id) ?? [],
       finderAi: finderAiByWalletId.get(wallet.id),
-      activeAlertCount: openAlertCountByWalletId.get(wallet.id) ?? 0,
+      activeAlertCount: 0,
       latestTrade: latestTradeByWalletId.get(wallet.id)
     }))
     .sort((left, right) => {
@@ -1567,16 +1497,6 @@ const sortByIsoDesc = <T,>(items: T[], pick: (item: T) => string | undefined | n
     return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
   });
 
-const buildAlertItemsByWalletId = (items: AlertListItem[]) => {
-  const map = new Map<string, AlertListItem[]>();
-  items.forEach((item) => {
-    const current = map.get(item.wallet.id) ?? [];
-    current.push(item);
-    map.set(item.wallet.id, current);
-  });
-  return map;
-};
-
 const buildWalletLibraryExportRecord = (
   wallet: Wallet,
   labels: WalletLabel[],
@@ -1585,7 +1505,6 @@ const buildWalletLibraryExportRecord = (
   watchlistEntry: WatchlistEntry | undefined,
   importBatch: WalletImportBatch | undefined,
   finderAi: WalletFinderAiInsight | undefined,
-  alertItems: AlertListItem[],
   trades: Trade[],
   positions: PositionSnapshot[]
 ): WalletLibraryExportRecord => {
@@ -1596,7 +1515,7 @@ const buildWalletLibraryExportRecord = (
       metrics,
       labels,
       finderAi,
-      activeAlertCount: alertItems.filter((item) => item.alert.status === "open").length,
+      activeAlertCount: 0,
       latestTrade: sortByIsoDesc(trades, (trade) => trade.enteredAt)[0]
     },
     importBatch
@@ -1618,10 +1537,7 @@ const buildWalletLibraryExportRecord = (
     metrics,
     trades: sortByIsoDesc(trades, (trade) => trade.enteredAt),
     positions: sortByIsoDesc(positions, (position) => position.capturedAt),
-    alerts: sortByIsoDesc(
-      alertItems.map((item) => item.alert),
-      (alert) => alert.occurredAt
-    )
+    alerts: []
   };
 };
 
@@ -1673,7 +1589,6 @@ export const exportWalletLibrary = async (input?: {
         detail?.watchlistEntry,
         undefined,
         detail?.finderAi,
-        detail?.alerts ?? [],
         detail?.trades ?? [],
         detail?.positions ?? []
       );
@@ -1717,8 +1632,6 @@ export const exportWalletLibrary = async (input?: {
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
   const allLabels = deriveSystemLabels(wallets, allUserLabels, seedTrades);
   const labelsByWalletId = groupByWalletId(allLabels);
-  const alertItemsByWalletId = buildAlertItemsByWalletId(buildPersistedAlertItems(wallets));
-
   const records = wallets.map((wallet) =>
     buildWalletLibraryExportRecord(
       wallet,
@@ -1728,7 +1641,6 @@ export const exportWalletLibrary = async (input?: {
       watchlistByWalletId.get(wallet.id),
       wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined,
       finderAiByWalletId.get(wallet.id),
-      alertItemsByWalletId.get(wallet.id) ?? [],
       tradesByWalletId.get(wallet.id) ?? [],
       positionsByWalletId.get(wallet.id) ?? []
     )
@@ -1749,7 +1661,7 @@ export const exportWalletLibrary = async (input?: {
 };
 
 export const getDashboardData = async (): Promise<DashboardData> => {
-  const persisted = await buildPersistedAlertContext();
+  const persisted = await buildPersistedWalletsContext();
   if (!persisted) {
     return getDemoDashboardData();
   }
@@ -1778,23 +1690,19 @@ export const getDashboardData = async (): Promise<DashboardData> => {
     seedTrades
   );
   const labelsByWalletId = groupByWalletId(spotlightLabels);
-  const openAlertCountByWalletId = buildOpenAlertCountByWalletId(persisted.alertItems);
   const spotlightWallets = spotlightBase.map(({ wallet, metrics }) => ({
     wallet,
     metrics,
     labels: labelsByWalletId.get(wallet.id) ?? [],
-    activeAlertCount: openAlertCountByWalletId.get(wallet.id) ?? 0,
+    activeAlertCount: 0,
     latestTrade: latestTradeByWalletId.get(wallet.id)
   }));
 
   return {
-    summary: computeDashboardSummary(
-      persisted.wallets,
-      persisted.alertItems.filter((item) => item.alert.status === "open").length
-    ),
+    summary: computeDashboardSummary(persisted.wallets, 0),
     markets: computeMarketDigests(persisted.wallets, seedMarkets, seedTrades),
     walletRows: spotlightWallets,
-    alerts: persisted.alertItems,
+    alerts: [],
     spotlightWallets
   };
 };
@@ -1970,19 +1878,18 @@ const buildWalletImportBatchSummaries = async (
 
     const activeCount = batchWallets.filter((wallet) => wallet.curationStatus === "active" && !wallet.deletedAt)
       .length;
-    const reviewNeededCount = batchWallets.filter(
-      (wallet) => wallet.curationStatus === "review_needed" && !wallet.deletedAt
-    ).length;
     const deletedCount = batchWallets.filter((wallet) => Boolean(wallet.deletedAt)).length;
     const watchlistedCount = batchWallets.filter((wallet) => wallet.watchlisted && !wallet.deletedAt).length;
-    const structuredRows = Math.max(0, batch.rowCount - batch.failedCount);
+    const successCount = Math.max(0, batch.rowCount - batch.failedCount);
+    const existingOverlapCount = batch.updatedCount;
 
     return {
       batch,
       sourceLabel: getImportBatchSourceLabel(batch),
       walletCount: batchWallets.length,
+      successCount,
+      existingOverlapCount,
       activeCount,
-      reviewNeededCount,
       deletedCount,
       watchlistedCount,
       officialLabelCount,
@@ -1990,14 +1897,7 @@ const buildWalletImportBatchSummaries = async (
       promotedLabels: Array.from(labelCounts.entries())
         .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-CN"))
         .slice(0, 6)
-        .map(([label]) => label),
-      workflow: {
-        finderCandidates: isFinderImportBatch(batch) ? batch.rowCount : 0,
-        structuredRows,
-        reviewQueue: reviewNeededCount,
-        approvedWallets: activeCount,
-        promotedLabels: officialLabelCount
-      }
+        .map(([label]) => label)
     } satisfies WalletImportBatchSummary;
   });
 };
@@ -2011,17 +1911,17 @@ const buildWalletImportBatchDetail = async (
     db,
     wallets.map((wallet) => wallet.id)
   );
-  const reviewLogs = Array.from(auditLogsByWalletId.values())
+  const operationLogs = Array.from(auditLogsByWalletId.values())
     .flat()
     .filter((log) =>
-      ["create_user_tag", "update_wallet", "create_note", "resolve_alert"].includes(log.action)
+      ["create_user_tag", "update_wallet", "create_note", "toggle_watchlist"].includes(log.action)
     )
     .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
 
   return {
     ...summary,
-    latestReviewAt: reviewLogs[0]?.createdAt,
-    reviewActors: Array.from(new Set(reviewLogs.map((log) => log.actor).filter(Boolean))).slice(0, 8)
+    latestOperationAt: operationLogs[0]?.createdAt,
+    operationActors: Array.from(new Set(operationLogs.map((log) => log.actor).filter(Boolean))).slice(0, 8)
   };
 };
 
@@ -2034,7 +1934,7 @@ export const getWalletImportsPageData = async (
       overview: {
         totalBatches: 0,
         finderBatches: 0,
-        pendingReviewWallets: 0,
+        importedWallets: 0,
         importedRows7d: 0,
         failedRows7d: 0,
         promotedLabels7d: 0
@@ -2046,12 +1946,11 @@ export const getWalletImportsPageData = async (
   }
 
   const requestedBatchId = selectedBatchId?.trim();
-  const [recentBatches, selectedBatchRecord, reviewFacet] = await Promise.all([
+  const [recentBatches, selectedBatchRecord] = await Promise.all([
     listPersistedWalletImportBatches(bindings.SMART_MONEY_DB, { limit: 18 }),
     requestedBatchId
       ? getPersistedWalletImportBatchById(bindings.SMART_MONEY_DB, requestedBatchId)
-      : Promise.resolve(null),
-    getPersistedWalletFacetSummary(bindings.SMART_MONEY_DB, { status: "review_needed" })
+      : Promise.resolve(null)
   ]);
   const batchList = [...recentBatches];
   if (selectedBatchRecord && !batchList.some((batch) => batch.id === selectedBatchRecord.id)) {
@@ -2084,7 +1983,7 @@ export const getWalletImportsPageData = async (
     overview: {
       totalBatches: summaries.length,
       finderBatches: summaries.filter((summary) => isFinderImportBatch(summary.batch)).length,
-      pendingReviewWallets: reviewFacet.reviewNeededCount,
+      importedWallets: summaries.reduce((total, summary) => total + summary.walletCount, 0),
       importedRows7d: recentWindowSummaries.reduce((total, summary) => total + summary.batch.rowCount, 0),
       failedRows7d: recentWindowSummaries.reduce(
         (total, summary) => total + summary.batch.failedCount,
@@ -2193,7 +2092,6 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
   const labels = deriveSystemLabels([wallet], userLabelsByWalletId.get(walletId) ?? [], seedTrades);
   const notes = auditLogsByWalletId.get(walletId) ?? [];
   const watchlistEntry = watchlistByWalletId.get(walletId);
-  const alertItems = buildPersistedAlertItems([wallet]).filter((item) => item.wallet.id === walletId);
 
   return {
     wallet,
@@ -2211,43 +2109,20 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
       .sort(
         (left, right) =>
           new Date(right.capturedAt).getTime() - new Date(left.capturedAt).getTime()
-      ),
+    ),
     notes,
-    alerts: alertItems,
+    alerts: [],
     watchlistEntry
   };
 };
 
-export const getAlertItems = async (
-  status: "open" | "resolved" | "all" = "all"
-): Promise<AlertListItem[]> => {
-  const persisted = await buildPersistedAlertContext();
-  if (!persisted) {
-    return listDemoAlerts(status);
-  }
-
-  return persisted.alertItems.filter((item) => (status === "all" ? true : item.alert.status === status));
-};
-
-export const getAlerts = async () => (await getAlertItems("all")).map((item) => item.alert);
-
 export const getWalletList = async () => {
   const persisted = await buildPersistedContext();
   if (!persisted) {
-    const alertItems = await getAlertItems("all");
-
-    return (await listWalletRows()).map((row) => ({
-      ...row,
-      alerts: alertItems.filter((item) => item.wallet.id === row.wallet.id).map((item) => item.alert)
-    }));
+    return listWalletRows();
   }
 
-  return persisted.walletRows.map((row) => ({
-    ...row,
-    alerts: persisted.alertItems
-      .filter((item) => item.wallet.id === row.wallet.id)
-      .map((item) => item.alert)
-  }));
+  return persisted.walletRows;
 };
 
 export const createWallet = async (payload: WalletInput, actor?: string) => {
@@ -2361,148 +2236,6 @@ export const deleteUserTag = async (walletId: string, tagId: string, actor?: str
   }
 
   return deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, tagId, actor);
-};
-
-export type WalletReviewAction =
-  | "promote_ai_to_official"
-  | "edit_and_promote_ai_label"
-  | "dismiss_ai_label"
-  | "complete_wallet_review";
-
-export interface WalletReviewActionInput {
-  action: WalletReviewAction;
-  labelId?: string;
-  name?: string;
-  value?: string;
-  kind?: WalletLabel["kind"];
-  evidence?: string;
-  verificationNote?: string;
-  sourceNote?: string;
-}
-
-const normalizeReviewField = (value: string | undefined) => {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const trimmed = compactImportText(value);
-  return trimmed || undefined;
-};
-
-export const applyWalletReviewAction = async (
-  walletId: string,
-  input: WalletReviewActionInput,
-  actor = "Team Alpha"
-) => {
-  const bindings = await ensurePersistedBindings();
-  if (!bindings?.SMART_MONEY_DB) {
-    throw new Error("review actions require persisted database");
-  }
-
-  const wallet = await getPersistedWalletById(bindings.SMART_MONEY_DB, walletId, {
-    includeDeleted: true
-  });
-  if (!wallet) {
-    return undefined;
-  }
-
-  const storedLabels = (await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, [walletId])).get(walletId) ?? [];
-
-  if (input.action === "complete_wallet_review") {
-    await updatePersistedWallet(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      { curationStatus: "active" },
-      actor
-    );
-    return getWalletDetail(walletId);
-  }
-
-  if (!input.labelId) {
-    throw new Error("labelId is required");
-  }
-
-  const targetLabel = storedLabels.find((label) => label.id === input.labelId);
-  if (!targetLabel) {
-    throw new Error("tag not found");
-  }
-
-  if (targetLabel.source === "user") {
-    throw new Error("only AI/system labels can enter review actions");
-  }
-
-  const nextName = normalizeReviewField(input.name) ?? targetLabel.name;
-  const nextValue = normalizeReviewField(input.value) ?? targetLabel.value;
-  const nextKind = input.kind ?? targetLabel.kind;
-  const nextEvidence = normalizeReviewField(input.evidence) ?? targetLabel.evidence;
-  const nextVerificationNote =
-    normalizeReviewField(input.verificationNote) ?? targetLabel.verificationNote;
-  const nextSourceNote = normalizeReviewField(input.sourceNote) ?? targetLabel.sourceNote;
-  const dedupeKey = getWalletLabelDisplayKey(nextKind, nextValue);
-
-  if (input.action === "dismiss_ai_label") {
-    const duplicates = storedLabels.filter(
-      (label) =>
-        label.source !== "user" &&
-        getWalletLabelDisplayKey(label.kind, label.value || label.name) ===
-          getWalletLabelDisplayKey(targetLabel.kind, targetLabel.value || targetLabel.name)
-    );
-    for (const label of duplicates) {
-      await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
-    }
-    return getWalletDetail(walletId);
-  }
-
-  const existingOfficial = storedLabels.find(
-    (label) =>
-      label.source === "user" &&
-      getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey
-  );
-
-  if (existingOfficial) {
-    await updatePersistedWalletLabel(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      existingOfficial.id,
-      {
-        name: nextName,
-        value: nextValue,
-        kind: nextKind,
-        source: "user",
-        evidence: nextEvidence,
-        verificationNote: nextVerificationNote,
-        sourceNote: nextSourceNote
-      },
-      actor
-    );
-  } else {
-    await createPersistedWalletLabel(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      {
-        name: nextName,
-        value: nextValue,
-        kind: nextKind,
-        source: "user",
-        evidence: nextEvidence,
-        verificationNote: nextVerificationNote,
-        sourceNote: nextSourceNote
-      },
-      actor
-    );
-  }
-
-  const duplicateAiLabels = storedLabels.filter(
-    (label) =>
-      label.source !== "user" &&
-      (label.id === targetLabel.id ||
-        getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey)
-  );
-  for (const label of duplicateAiLabels) {
-    await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
-  }
-
-  return getWalletDetail(walletId);
 };
 
 export const upsertWatchlistEntry = async (walletId: string, note?: string, actor?: string) => {

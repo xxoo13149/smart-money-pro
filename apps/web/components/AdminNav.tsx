@@ -9,7 +9,6 @@ const navItems = [
   { href: "/", label: "首页" },
   { href: "/imports", label: "导入中心" },
   { href: "/wallets", label: "地址库" },
-  { href: "/alerts", label: "预警" },
   { href: "/runtime", label: "运行时" },
   { href: "/extension", label: "扩展" }
 ];

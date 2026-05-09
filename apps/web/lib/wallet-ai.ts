@@ -339,7 +339,7 @@ export const buildWeatherLabels = (
     signalQuality === "high_signal"
       ? "高信号"
       : signalQuality === "needs_review"
-        ? "需复核"
+        ? "信号不足"
         : "低信号"
   )
 ];

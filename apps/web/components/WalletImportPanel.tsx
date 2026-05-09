@@ -55,7 +55,7 @@ const WEATHER_GUIDE_BLOCKS = [
   {
     title: "系统现在怎么处理",
     body:
-      "现在会尽量接收搜索系统 AI 返回的全部结果，不再做过强的二次拦截。系统主要负责提炼短标签、压缩关键数据、方便人工查看。"
+      "现在会尽量接收搜索系统 AI 返回的全部结果，不再做过强的二次拦截。系统主要负责提炼短标签、压缩关键数据、方便后台快速查看。"
   },
   {
     title: "推荐输入模板",
@@ -107,7 +107,7 @@ const getSignalQualityLabel = (row: WalletImportPreviewRow) => {
     case "high_signal":
       return "高信号";
     case "needs_review":
-      return "需复核";
+      return "信号不足";
     default:
       return "低信号";
   }
@@ -122,7 +122,7 @@ const getSignalQualityTone = (row: WalletImportPreviewRow) => {
     case "high_signal":
       return "watch";
     case "needs_review":
-      return "ai-review";
+      return "neutral";
     default:
       return "danger";
   }
@@ -531,9 +531,9 @@ export const WalletImportPanel = ({
           </div>
 
           <div className="status-line" style={{ marginTop: "0.85rem" }}>
-            {status ??
+              {status ??
               (sourceMode === "finder"
-                ? "Finder 导入会保护已有人工字段，不会直接覆盖人工备注和人工标签。"
+                ? "Finder 导入会保护已有手动维护字段，不会直接覆盖手动备注和手动标签。"
                 : "导入前会先生成预览，不会直接写库。")}
           </div>
         </div>

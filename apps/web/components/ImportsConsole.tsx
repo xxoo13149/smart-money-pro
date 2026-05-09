@@ -37,15 +37,12 @@ const getBatchHref = (batchId: string) => `/imports/batches/${batchId}`;
 const getModeHref = (mode: WalletImportSourceMode) =>
   mode === "finder" ? "/imports/finder" : `/imports?source=${mode}`;
 
-const getWalletBatchHref = (batchId: string, walletId?: string, status?: "review_needed" | "active") => {
+const getWalletBatchHref = (batchId: string, walletId?: string) => {
   if (!batchId) {
     return walletId ? `/wallets/${walletId}` : "/wallets";
   }
 
   const params = new URLSearchParams({ batch: batchId });
-  if (status) {
-    params.set("status", status);
-  }
   if (walletId) {
     params.set("selected", walletId);
     params.set("panel", "inspect");
@@ -72,57 +69,55 @@ const getPageCopy = (view: ImportsConsoleView, selectedBatch: WalletImportBatchS
       kicker: "Import Batch",
       title: selectedBatch ? getBatchTitle(selectedBatch.batch) : "导入批次页",
       description:
-        "聚焦单个导入批次的来源、AI 结构化结果、待确认地址、人工审阅记录和官方标签产出。",
+        "查看单个导入批次的时间、来源、成功行、新增地址、命中地址库和失败行。",
       primaryHref: "/imports",
       primaryLabel: "返回导入中心",
-      secondaryHref: selectedBatch
-        ? getWalletBatchHref(selectedBatch.batch.id, undefined, "review_needed")
-        : "/wallets?status=review_needed",
-      secondaryLabel: "处理本批待确认"
+      secondaryHref: selectedBatch ? getWalletBatchHref(selectedBatch.batch.id) : "/wallets",
+      secondaryLabel: "打开本批地址"
     };
   }
 
   return {
     kicker: "Import Operations",
     title: "导入中心",
-    description: "统一管理 Finder 候选、AI 结构化、地址库待确认、人工审阅和官方标签转正。",
+    description: "统一管理 Finder 候选、AI 结构化预览、地址入库和批次备份结果。",
     primaryHref: "/imports/finder",
     primaryLabel: "Finder 对接中心",
-    secondaryHref: "/wallets?status=review_needed",
-    secondaryLabel: "处理待确认"
+    secondaryHref: "/wallets",
+    secondaryLabel: "打开地址库"
   };
 };
 
-const buildWorkflow = (summary: WalletImportBatchSummary | null) => [
+const buildBatchStats = (summary: WalletImportBatchSummary | null) => [
   {
-    label: "Finder 候选",
-    value: summary?.workflow.finderCandidates ?? 0,
+    label: "原始行",
+    value: summary?.batch.rowCount ?? 0,
     tone: "finder",
     href: summary ? getBatchHref(summary.batch.id) : "/imports/finder"
   },
   {
-    label: "AI 结构化",
-    value: summary?.workflow.structuredRows ?? 0,
+    label: "导入成功",
+    value: summary?.successCount ?? 0,
     tone: "ai",
     href: summary ? getBatchHref(summary.batch.id) : "/imports"
   },
   {
-    label: "地址库待确认",
-    value: summary?.workflow.reviewQueue ?? 0,
-    tone: "review",
-    href: summary ? getWalletBatchHref(summary.batch.id, undefined, "review_needed") : "/wallets?status=review_needed"
-  },
-  {
-    label: "人工审阅",
-    value: summary?.workflow.approvedWallets ?? 0,
-    tone: "human",
-    href: summary ? getWalletBatchHref(summary.batch.id, undefined, "active") : "/wallets?status=active"
-  },
-  {
-    label: "官方标签",
-    value: summary?.workflow.promotedLabels ?? 0,
+    label: "新增地址",
+    value: summary?.batch.createdCount ?? 0,
     tone: "official",
     href: summary ? getWalletBatchHref(summary.batch.id) : "/wallets"
+  },
+  {
+    label: "命中地址库",
+    value: summary?.existingOverlapCount ?? 0,
+    tone: "human",
+    href: summary ? getWalletBatchHref(summary.batch.id) : "/wallets"
+  },
+  {
+    label: "失败行",
+    value: summary?.batch.failedCount ?? 0,
+    tone: "warning",
+    href: summary ? getBatchHref(summary.batch.id) : "/imports"
   }
 ];
 
@@ -136,7 +131,7 @@ export function ImportsConsole({
   view?: ImportsConsoleView;
 }) {
   const selectedBatch = data.selectedBatch;
-  const workflow = buildWorkflow(selectedBatch);
+  const batchStats = buildBatchStats(selectedBatch);
   const pageCopy = getPageCopy(view, selectedBatch);
   const showImportPanel = view !== "batch";
 
@@ -168,8 +163,8 @@ export function ImportsConsole({
           <strong>{data.overview.finderBatches}</strong>
         </div>
         <div className={styles.metric}>
-          <span>待确认地址</span>
-          <strong>{data.overview.pendingReviewWallets}</strong>
+          <span>已关联地址</span>
+          <strong>{data.overview.importedWallets}</strong>
         </div>
         <div className={styles.metric}>
           <span>近 7 天入库行</span>
@@ -245,13 +240,13 @@ export function ImportsConsole({
               <strong>{selectedBatch?.batch.actor ?? "--"}</strong>
             </div>
             <div>
-              <span>后续审阅</span>
-              <strong>{selectedBatch?.latestReviewAt ? formatDate(selectedBatch.latestReviewAt) : "暂无记录"}</strong>
+              <span>最近操作</span>
+              <strong>{selectedBatch?.latestOperationAt ? formatDate(selectedBatch.latestOperationAt) : "暂无记录"}</strong>
             </div>
             <div>
-              <span>审阅人</span>
+              <span>操作人</span>
               <strong>
-                {selectedBatch?.reviewActors.length ? selectedBatch.reviewActors.join(" / ") : "暂无记录"}
+                {selectedBatch?.operationActors.length ? selectedBatch.operationActors.join(" / ") : "暂无记录"}
               </strong>
             </div>
           </div>
@@ -262,7 +257,7 @@ export function ImportsConsole({
               <strong>{selectedBatch?.batch.createdCount ?? 0}</strong>
             </div>
             <div>
-              <span>更新</span>
+              <span>命中地址库</span>
               <strong>{selectedBatch?.batch.updatedCount ?? 0}</strong>
             </div>
             <div>
@@ -286,15 +281,15 @@ export function ImportsConsole({
       <section className={styles.flowSection}>
         <div className={styles.sectionHeader}>
           <div>
-            <span className={styles.kicker}>Operational Flow</span>
-            <h2>导入处理链路</h2>
+            <span className={styles.kicker}>Batch Result</span>
+            <h2>导入结果统计</h2>
           </div>
           {selectedBatch ? (
-            <span className={styles.subtleText}>当前批次：{shortId(selectedBatch.batch.id)}</span>
+            <span className={styles.subtleText}>批次 {shortId(selectedBatch.batch.id)} · {formatDate(selectedBatch.batch.createdAt)}</span>
           ) : null}
         </div>
         <div className={styles.flowRail}>
-          {workflow.map((step, index) => (
+          {batchStats.map((step, index) => (
             <AppLink key={step.label} href={step.href} className={styles.flowStep} data-tone={step.tone}>
               <span>{String(index + 1).padStart(2, "0")}</span>
               <strong>{step.value}</strong>
@@ -332,7 +327,8 @@ export function ImportsConsole({
                     </div>
                     <div className={styles.batchNumbers}>
                       <span>{summary.batch.createdCount} 新增</span>
-                      <span>{summary.batch.updatedCount} 更新</span>
+                      <span>{summary.existingOverlapCount} 命中地址库</span>
+                      <span>{summary.successCount} 成功</span>
                       <span>{summary.batch.failedCount} 失败</span>
                     </div>
                   </AppLink>
@@ -352,10 +348,10 @@ export function ImportsConsole({
             </div>
             {selectedBatch ? (
               <Link
-                href={getWalletBatchHref(selectedBatch.batch.id, undefined, "review_needed")}
+                href={getWalletBatchHref(selectedBatch.batch.id)}
                 className={styles.ghostButton}
               >
-                只看待确认
+                打开本批地址
               </Link>
             ) : null}
           </div>
@@ -367,8 +363,7 @@ export function ImportsConsole({
                   key={row.wallet.id}
                   href={getWalletBatchHref(
                     selectedBatch?.batch.id ?? row.wallet.importBatchId ?? "",
-                    row.wallet.id,
-                    row.wallet.curationStatus === "review_needed" ? "review_needed" : undefined
+                    row.wallet.id
                   )}
                   className={styles.walletRow}
                 >
@@ -377,15 +372,15 @@ export function ImportsConsole({
                     <p>{row.wallet.address}</p>
                   </div>
                   <div className={styles.walletMeta}>
-                    <span>{row.wallet.curationStatus === "review_needed" ? "待确认" : "已入库"}</span>
+                    <span>{row.wallet.deletedAt ? "已删除" : "已入库"}</span>
                     <span>{row.labels.filter((label) => label.source === "user").length} 官方标签</span>
                     <span>{row.labels.filter((label) => label.source !== "user").length} AI 标签</span>
-                    <span>{row.wallet.curationStatus === "review_needed" ? "去审阅" : "查看链路"}</span>
+                    <span>查看地址</span>
                   </div>
                 </AppLink>
               ))
             ) : (
-              <div className={styles.emptyState}>当前批次没有可展示的地址行。</div>
+              <div className={styles.emptyState}>这个批次没有可展示的地址行。</div>
             )}
           </div>
         </div>

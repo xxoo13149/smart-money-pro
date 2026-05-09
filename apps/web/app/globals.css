@@ -900,16 +900,20 @@ body {
 
 .modal {
   width: min(760px, calc(100vw - 24px));
+  max-height: calc(100vh - 40px);
   border: 1px solid rgba(145, 184, 209, 0.18);
   border-radius: 1.4rem;
   padding: 0;
   background: linear-gradient(180deg, rgba(10, 18, 28, 0.98), rgba(7, 15, 22, 0.96));
   color: inherit;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+  animation: modal-enter 150ms ease-out;
 }
 
 .modal::backdrop {
   background: rgba(2, 8, 14, 0.68);
   backdrop-filter: blur(10px);
+  animation: modal-backdrop-enter 150ms ease-out;
 }
 
 .modal__header,
@@ -929,6 +933,8 @@ body {
 
 .modal__body {
   padding: 1.2rem;
+  max-height: calc(100vh - 170px);
+  overflow: auto;
 }
 
 .modal__title {
@@ -950,6 +956,26 @@ body {
   color: #d8e5f2;
   font-size: 1.25rem;
   cursor: pointer;
+}
+
+@keyframes modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes modal-backdrop-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 .detail-meta-grid {

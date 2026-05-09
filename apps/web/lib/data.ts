@@ -5,10 +5,7 @@ export type {
   WalletImportBatchDetail,
   WalletImportBatchSummary,
   WalletImportOverview,
-  WalletImportWorkflowSummary,
-  WalletImportsPageData,
-  WalletReviewAction,
-  WalletReviewActionInput
+  WalletImportsPageData
 } from "./data-service";
 export { getWalletsPageData } from "./wallets-page-data";
 export {
@@ -24,7 +21,6 @@ export {
 
 export {
   createAdminExtensionInvite,
-  applyWalletReviewAction,
   createManualWallet,
   createUserTag,
   updateUserTag,
@@ -33,8 +29,6 @@ export {
   createWalletNote,
   deleteWallet,
   getAdminExtensionOverview,
-  getAlertItems,
-  getAlerts,
   getDashboardData,
   getSmartMoneySchemaStatusReport,
   exportWalletLibrary,

@@ -37,7 +37,7 @@ export const wallets: Wallet[] = [
     bio: "跨天气与新闻赛道切换较快，仓位弹性大。",
     firstSeenAt: "2024-01-18T11:30:00.000Z",
     strategyFocus: "风暴警报、极端天气和跨赛道轮动",
-    teamNote: "强信号但噪音高，需要盯红旗预警。",
+    teamNote: "强信号但噪音高，需要持续观察。",
     watchlisted: true,
     createdAt: "2026-04-05T12:10:00.000Z",
     updatedAt: "2026-04-05T12:12:00.000Z",

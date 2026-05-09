@@ -1,7 +1,5 @@
-﻿import Link from "next/link";
 import {
   shortenAddress,
-  type AlertEvent,
   type Wallet,
   type WalletLabel,
   type WalletMetrics
@@ -12,19 +10,17 @@ import { AppLink } from "./AppLink";
 export const WalletPreview = ({
   wallet,
   metrics,
-  labels,
-  alerts
+  labels
 }: {
   wallet: Wallet;
   metrics: WalletMetrics;
   labels: WalletLabel[];
-  alerts: AlertEvent[];
 }) => (
   <AppLink href={`/wallets/${wallet.id}`} className="wallet-link">
     <article className="wallet-preview">
       <div className="subtle-row">
         <span className="eyebrow">{wallet.watchlisted ? "Watchlisted" : "Observation"}</span>
-        <span>{alerts.length} red flags</span>
+        <span>{wallet.sourceType.toUpperCase()}</span>
       </div>
       <div>
         <h3>{wallet.alias ?? wallet.displayName}</h3>
