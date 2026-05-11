@@ -227,6 +227,12 @@ const MAX_IMPORT_EXCERPT_LENGTH = 320;
 const compactImportText = (value: string | null | undefined) =>
   (value ?? "").replace(/\s+/g, " ").trim();
 
+const compactSearchText = (value: string) =>
+  [" ", "\t", "\n", "\r", "_", "-", ".", ":", "/"].reduce(
+    (current, token) => current.split(token).join(""),
+    value.toLowerCase()
+  );
+
 const truncateImportText = (value: string, maxLength: number) =>
   value.length <= maxLength ? value : `${value.slice(0, maxLength - 3).trimEnd()}...`;
 
@@ -1429,19 +1435,31 @@ const applyWalletListQuery = (
       return true;
     }
 
-    return [
+    const searchableText = [
       row.wallet.address,
       row.wallet.normalizedAddress,
       row.wallet.displayName,
       row.wallet.alias,
       row.summaryText,
+      row.finderAi?.strategyFocus,
+      row.finderAi?.aiBriefShort,
+      row.finderAi?.aiBriefNote,
+      row.finderAi?.aiDeepNote,
+      row.finderAi?.sourceExcerpt,
+      ...(row.finderAi?.labels ?? []).map((label) => `${label.kind ?? ""} ${label.value}`),
+      ...(row.finderAi?.primarySignals ?? []).map((signal) => `${signal.label} ${signal.reason ?? ""}`),
       ...row.highlights.map((badge) => badge.text),
       ...row.labels.map((label) => `${label.name} ${label.value}`)
     ]
       .filter(Boolean)
       .join(" ")
-      .toLowerCase()
-      .includes(normalizedQuery);
+      .toLowerCase();
+    const compactQuery = compactSearchText(normalizedQuery);
+
+    return (
+      searchableText.includes(normalizedQuery) ||
+      (compactQuery.length >= 2 && compactSearchText(searchableText).includes(compactQuery))
+    );
   });
 
   const sort = query?.sort ?? "updated_desc";
@@ -1773,8 +1791,11 @@ export const listWalletAdminRowsPage = async (
     cursor: mergedQuery.cursor
   });
   const walletIds = page.wallets.map((wallet) => wallet.id);
-  const userLabelsByWalletId = await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds);
-  const importBatchesById = await getImportBatchMapForWallets(bindings.SMART_MONEY_DB, page.wallets);
+  const [userLabelsByWalletId, importBatchesById, finderAiByWalletId] = await Promise.all([
+    listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+    getImportBatchMapForWallets(bindings.SMART_MONEY_DB, page.wallets),
+    listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
+  ]);
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
   const allLabels = deriveSystemLabels(page.wallets, allUserLabels, seedTrades);
   const labelsByWalletId = groupByWalletId(allLabels);
@@ -1784,6 +1805,7 @@ export const listWalletAdminRowsPage = async (
         wallet,
         metrics: computeWalletMetrics(wallet, seedTrades),
         labels: labelsByWalletId.get(wallet.id) ?? [],
+        finderAi: finderAiByWalletId.get(wallet.id),
         activeAlertCount: 0
       },
       wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined

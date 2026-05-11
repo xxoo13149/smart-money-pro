@@ -1,6 +1,6 @@
 ﻿"use client";
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useMemo, useRef, useState, useTransition } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import type {
   WalletAdminRow,
@@ -31,6 +31,8 @@ type LabelDraft = {
   verificationNote: string;
   sourceNote: string;
 };
+
+const EMPTY_PANEL_LABELS: WalletDetailData["labels"] = [];
 
 const DENSITY_STORAGE_KEY = "wallet-workspace-density";
 const PANEL_PINNED_STORAGE_KEY = "wallet-workspace-panel-pinned";
@@ -85,6 +87,8 @@ const shortAddress = (address: string) =>
 
 const shortText = (value: string, max = 108) =>
   value.length > max ? `${value.slice(0, max - 1).trimEnd()}...` : value;
+
+const normalizeSearchDraft = (value: string) => value.trim().replace(/\s+/g, " ");
 
 const mergeUniqueIds = (current: string[], incoming: string[]) =>
   Array.from(new Set([...current, ...incoming.filter(Boolean)]));
@@ -217,10 +221,9 @@ export const WalletsConsole = ({
 }) => {
   const router = useRouter();
   const pathname = usePathname();
-  const [isNavigating, startNavigation] = useTransition();
+  const [, startNavigation] = useTransition();
   const [queryState, setQueryState] = useState(initialQuery);
   const [searchDraft, setSearchDraft] = useState(initialQuery.q ?? "");
-  const deferredSearch = useDeferredValue(searchDraft);
   const [focusRowId, setFocusRowId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(null);
@@ -255,6 +258,7 @@ export const WalletsConsole = ({
   });
   const [labelDrafts, setLabelDrafts] = useState<Record<string, LabelDraft>>({});
   const [viewportWidth, setViewportWidth] = useState(0);
+  const [navigationHint, setNavigationHint] = useState(false);
 
   const sectionRefs = useRef<Record<InspectorSection, HTMLDivElement | null>>({
     overview: null,
@@ -265,6 +269,9 @@ export const WalletsConsole = ({
   const deleteTimerRef = useRef<number | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
   const deleteTransitionRef = useRef<number | null>(null);
+  const searchDebounceRef = useRef<number | null>(null);
+  const navigationHintTimerRef = useRef<number | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const previousSignatureRef = useRef(buildResultSignature(initialQuery));
 
   const currentData = initialData;
@@ -285,13 +292,14 @@ export const WalletsConsole = ({
   const panelLabels =
     detail?.wallet.id === panelTargetId
       ? detail.labels
-      : panelRow?.labels ?? [];
+      : panelRow?.labels ?? EMPTY_PANEL_LABELS;
   const panelFinderAi =
     detail?.wallet.id === panelTargetId
       ? detail.finderAi
       : panelRow?.finderAi;
   const allCurrentPageSelected =
     currentPageIds.length > 0 && currentPageIds.every((walletId) => selectedIds.includes(walletId));
+  const routeSyncing = navigationHint;
   const showSummaryColumn = columnPreset !== "compact";
   const showUpdatedColumn = true;
   const activeSystemView = getSystemViewId(queryState);
@@ -302,6 +310,22 @@ export const WalletsConsole = ({
     panelFinderAi?.providerMeta?.promptVersion,
     panelFinderAi?.evidenceLevel
   ].filter(Boolean).join(" / ");
+  const committedSearch = queryState.q ?? "";
+  const normalizedSearchDraft = normalizeSearchDraft(searchDraft);
+  const searchDirty = normalizedSearchDraft !== committedSearch;
+  const hasAnyFilter =
+    Boolean(committedSearch) ||
+    Boolean(queryState.source && queryState.source !== "all") ||
+    Boolean(queryState.status && queryState.status !== "all" && queryState.status !== "review_needed") ||
+    Boolean(queryState.includeDeleted && queryState.status !== "deleted") ||
+    (queryState.labels ?? []).length > 0;
+  const searchStatusText = routeSyncing
+    ? `正在搜索${normalizedSearchDraft || committedSearch ? `：${normalizedSearchDraft || committedSearch}` : ""}`
+    : searchDirty
+      ? "输入后按 Enter 或点击搜索，系统也会自动刷新"
+      : committedSearch
+        ? `已搜索“${committedSearch}”，命中 ${currentData.totalCount} 条`
+        : "支持地址、名称、别名、标签、摘要和 AI 解读关键词";
 
   const pushFeedback = (message: string) => {
     setFeedback(message);
@@ -312,6 +336,17 @@ export const WalletsConsole = ({
       setFeedback(null);
       feedbackTimerRef.current = null;
     }, 2200);
+  };
+
+  const showNavigationHint = () => {
+    setNavigationHint(true);
+    if (navigationHintTimerRef.current) {
+      window.clearTimeout(navigationHintTimerRef.current);
+    }
+    navigationHintTimerRef.current = window.setTimeout(() => {
+      setNavigationHint(false);
+      navigationHintTimerRef.current = null;
+    }, 2600);
   };
 
   const downloadFullLibraryExport = () => {
@@ -352,6 +387,8 @@ export const WalletsConsole = ({
       return;
     }
 
+    showNavigationHint();
+    window.history.replaceState(window.history.state, "", nextUrl);
     startNavigation(() => {
       router.replace(nextUrl, { scroll: false });
     });
@@ -385,7 +422,38 @@ export const WalletsConsole = ({
     updateLocalQuery(nextQuery);
   };
 
+  const commitSearch = (value = searchDraft, options?: { immediateFeedback?: boolean }) => {
+    const nextSearch = normalizeSearchDraft(value);
+    setSearchDraft(nextSearch);
+
+    if ((queryState.q ?? "") === nextSearch) {
+      if (options?.immediateFeedback) {
+        pushFeedback(nextSearch ? `当前已经在搜索：${nextSearch}` : "当前没有搜索关键词");
+      }
+      return;
+    }
+
+    if (searchDebounceRef.current) {
+      window.clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
+
+    patchQuery(
+      { q: nextSearch || undefined },
+      { resetCursor: true, clearSelection: true, closePanel: true }
+    );
+  };
+
+  const clearSearch = () => {
+    commitSearch("");
+  };
+
+  const commitCurrentSearchInput = (options?: { immediateFeedback?: boolean }) => {
+    commitSearch(searchInputRef.current?.value ?? searchDraft, options);
+  };
+
   const refreshWorkspace = () => {
+    showNavigationHint();
     startNavigation(() => {
       router.refresh();
     });
@@ -793,6 +861,10 @@ export const WalletsConsole = ({
   };
 
   const clearFilters = () => {
+    if (searchDebounceRef.current) {
+      window.clearTimeout(searchDebounceRef.current);
+      searchDebounceRef.current = null;
+    }
     setSearchDraft("");
     patchQuery(
       {
@@ -886,6 +958,11 @@ export const WalletsConsole = ({
     setPanelMode(initialQuery.panel ?? "inspect");
     setPanelTargetId(initialQuery.selected ?? null);
     setPanelOpen(Boolean(initialQuery.selected && initialQuery.panel));
+    setNavigationHint(false);
+    if (navigationHintTimerRef.current) {
+      window.clearTimeout(navigationHintTimerRef.current);
+      navigationHintTimerRef.current = null;
+    }
   }, [initialQuery]);
 
   useEffect(() => {
@@ -917,16 +994,27 @@ export const WalletsConsole = ({
   }, [currentPageIds]);
 
   useEffect(() => {
-    if ((queryState.q ?? "") === deferredSearch) {
+    const nextSearch = normalizeSearchDraft(searchDraft);
+    if ((queryState.q ?? "") === nextSearch) {
       return;
     }
 
-    patchQuery(
-      { q: deferredSearch.trim() || undefined },
-      { resetCursor: true, clearSelection: true, closePanel: true }
-    );
+    if (searchDebounceRef.current) {
+      window.clearTimeout(searchDebounceRef.current);
+    }
+
+    searchDebounceRef.current = window.setTimeout(() => {
+      commitSearch(nextSearch);
+    }, 650);
+
+    return () => {
+      if (searchDebounceRef.current) {
+        window.clearTimeout(searchDebounceRef.current);
+        searchDebounceRef.current = null;
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deferredSearch]);
+  }, [searchDraft]);
 
   useEffect(() => {
     if (!panelTargetId || !panelOpen) {
@@ -1054,6 +1142,12 @@ export const WalletsConsole = ({
       if (deleteTransitionRef.current) {
         window.clearTimeout(deleteTransitionRef.current);
       }
+      if (searchDebounceRef.current) {
+        window.clearTimeout(searchDebounceRef.current);
+      }
+      if (navigationHintTimerRef.current) {
+        window.clearTimeout(navigationHintTimerRef.current);
+      }
     };
   }, []);
 
@@ -1090,7 +1184,7 @@ export const WalletsConsole = ({
 
   const activeFilterChips = [
     queryState.q
-      ? { id: `q:${queryState.q}`, label: `搜索：${queryState.q}`, onRemove: () => setSearchDraft("") }
+      ? { id: `q:${queryState.q}`, label: `搜索：${queryState.q}`, onRemove: clearSearch }
       : null,
     queryState.source && queryState.source !== "all"
       ? {
@@ -1211,12 +1305,47 @@ export const WalletsConsole = ({
         <div className={styles.toolbarRow}>
           <label className={styles.searchField}>
             <span className={styles.fieldLabel}>搜索地址 / 名称 / 标签</span>
-            <input
-              value={searchDraft}
-              onChange={(event) => setSearchDraft(event.target.value)}
-              placeholder="搜索地址、显示名、别名、标签或摘要"
-              className={styles.searchInput}
-            />
+            <div className={styles.searchControl} data-dirty={searchDirty || undefined}>
+              <input
+                ref={searchInputRef}
+                type="search"
+                value={searchDraft}
+                onChange={(event) => setSearchDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    commitSearch(event.currentTarget.value, { immediateFeedback: true });
+                  }
+                }}
+                placeholder="输入 portrait、0x 地址片段、标签或 AI 摘要"
+                className={styles.searchInput}
+                aria-label="搜索地址、名称、别名、标签或摘要"
+                enterKeyHint="search"
+              />
+              {searchDraft ? (
+                <button
+                  type="button"
+                  className={styles.searchClearButton}
+                  onClick={clearSearch}
+                  aria-label="清空搜索"
+                  title="清空搜索"
+                >
+                  x
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={styles.searchSubmitButton}
+                onClick={() => commitCurrentSearchInput({ immediateFeedback: true })}
+                disabled={routeSyncing}
+              >
+                搜索
+              </button>
+            </div>
+            <div className={styles.searchFeedback} data-active={routeSyncing || searchDirty || undefined}>
+              {routeSyncing ? <span className={styles.searchSpinner} aria-hidden="true" /> : null}
+              <span>{searchStatusText}</span>
+            </div>
           </label>
 
           <label className={styles.compactField}>
@@ -1450,6 +1579,26 @@ export const WalletsConsole = ({
           </div>
         ) : null}
 
+        <div className={styles.resultStatus} data-loading={routeSyncing || undefined}>
+          <div>
+            <strong>{routeSyncing ? "正在同步搜索结果" : "当前结果"}</strong>
+            <span>
+              {committedSearch
+                ? `关键词“${committedSearch}”，当前页 ${visibleRows.length} 条 / 共 ${currentData.totalCount} 条`
+                : `当前页 ${visibleRows.length} 条 / 共 ${currentData.totalCount} 条`}
+            </span>
+          </div>
+          {searchDirty ? (
+            <button
+              type="button"
+              className={styles.ghostButton}
+              onClick={() => commitCurrentSearchInput()}
+            >
+              应用输入内容
+            </button>
+          ) : null}
+        </div>
+
         <div className={styles.tableWrap}>
           <table className={`${styles.table} ${density === "comfortable" ? styles.tableComfortable : ""}`}>
             <colgroup>
@@ -1480,7 +1629,21 @@ export const WalletsConsole = ({
                 <tr>
                   <td colSpan={showSummaryColumn && showUpdatedColumn ? 5 : showSummaryColumn || showUpdatedColumn ? 4 : 3}>
                     <div className={styles.emptyState}>
-                      当前筛选下没有地址。可以尝试放宽筛选条件，或直接使用 AI 导入 / 手动新增继续扩库。
+                      {committedSearch
+                        ? `没有找到与“${committedSearch}”匹配的地址。可以换成地址片段、别名、标签或摘要关键词再试。`
+                        : "当前筛选下没有地址。可以尝试放宽筛选条件，或直接使用 AI 导入 / 手动新增继续扩库。"}
+                      {hasAnyFilter ? (
+                        <div className={styles.emptyActions}>
+                          {committedSearch ? (
+                            <button type="button" className={styles.ghostButton} onClick={clearSearch}>
+                              清空搜索
+                            </button>
+                          ) : null}
+                          <button type="button" className={styles.ghostButton} onClick={clearFilters}>
+                            清空全部筛选
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   </td>
                 </tr>
@@ -2213,7 +2376,7 @@ export const WalletsConsole = ({
       </Modal>
 
       {feedback ? <div className={styles.loadingOverlay}>{feedback}</div> : null}
-      {isNavigating ? <div className={styles.loadingOverlay}>正在同步最新结果...</div> : null}
+      {routeSyncing ? <div className={styles.loadingOverlay}>正在同步最新结果...</div> : null}
     </div>
   );
 };

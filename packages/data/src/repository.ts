@@ -440,6 +440,18 @@ const ensureNormalizedAddress = (value: string) => {
 
 const escapeLikeInput = (value: string) => value.replace(/[%_]/g, (match) => `\\${match}`);
 
+const compactSearchInput = (value: string) =>
+  [" ", "\t", "\n", "\r", "_", "-", ".", ":", "/"].reduce(
+    (current, token) => current.split(token).join(""),
+    value.toLowerCase()
+  );
+
+const compactSqlExpression = (expression: string) =>
+  ["' '", "char(9)", "char(10)", "char(13)", "'_'", "'-'", "'.'", "':'", "'/'"].reduce(
+    (current, token) => `replace(${current}, ${token}, '')`,
+    expression
+  );
+
 const buildWalletFilterClauses = (input?: WalletListFilters) => {
   const filters = input ?? {};
   const clauses: string[] = [];
@@ -486,27 +498,106 @@ const buildWalletFilterClauses = (input?: WalletListFilters) => {
   const query = filters.q?.trim().toLowerCase();
   if (query) {
     const like = `%${escapeLikeInput(query)}%`;
-    clauses.push(
-      `(
-        lower(normalized_address) LIKE ? ESCAPE '\\'
-        OR lower(address) LIKE ? ESCAPE '\\'
-        OR lower(display_name) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'
-        OR EXISTS (
+    const compactQuery = compactSearchInput(query);
+    const compactLike = compactQuery ? `%${escapeLikeInput(compactQuery)}%` : "";
+    const searchClauses = [
+      `lower(normalized_address) LIKE ? ESCAPE '\\'`,
+      `lower(address) LIKE ? ESCAPE '\\'`,
+      `lower(display_name) LIKE ? ESCAPE '\\'`,
+      `lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'`,
+      `lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'`,
+      `lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'`,
+      `lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'`,
+      `EXISTS (
+        SELECT 1
+        FROM wallet_finder_ai_insights
+        WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+          AND lower(wallet_finder_ai_insights.searchable_text) LIKE ? ESCAPE '\\'
+      )`,
+      `EXISTS (
+        SELECT 1
+        FROM wallet_user_labels
+        WHERE wallet_user_labels.wallet_id = wallets.id
+          AND (
+            lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
+            OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.kind, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.evidence, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.verification_note, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.source_note, '')) LIKE ? ESCAPE '\\'
+          )
+      )`
+    ];
+    const searchValues: unknown[] = [
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like
+    ];
+
+    if (compactQuery.length >= 2) {
+      searchClauses.push(
+        `${compactSqlExpression("lower(normalized_address)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(address)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(display_name)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(alias, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(strategy_focus, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(bio, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(team_note, ''))")} LIKE ? ESCAPE '\\'`,
+        `EXISTS (
+          SELECT 1
+          FROM wallet_finder_ai_insights
+          WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+            AND ${compactSqlExpression("lower(wallet_finder_ai_insights.searchable_text)")} LIKE ? ESCAPE '\\'
+        )`,
+        `EXISTS (
           SELECT 1
           FROM wallet_user_labels
           WHERE wallet_user_labels.wallet_id = wallets.id
             AND (
-              lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
-              OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+              ${compactSqlExpression("lower(wallet_user_labels.name)")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(wallet_user_labels.value)")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.kind, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.evidence, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.verification_note, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.source_note, ''))")} LIKE ? ESCAPE '\\'
             )
-        )
+        )`
+      );
+      searchValues.push(
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike
+      );
+    }
+
+    clauses.push(
+      `(
+        ${searchClauses.join("\n        OR ")}
       )`
     );
-    values.push(like, like, like, like, like, like, like, like, like);
+    values.push(...searchValues);
   }
 
   const labels = Array.from(
@@ -3059,7 +3150,9 @@ export const searchAddressSummaries = async (
 
   const chain = input.chain ?? DEFAULT_CHAIN;
   const limit = Math.max(1, Math.min(25, input.limit ?? 12));
-  const queryLike = `%${query}%`;
+  const queryLike = `%${escapeLikeInput(query)}%`;
+  const compactQuery = compactSearchInput(query);
+  const compactLike = compactQuery ? `%${escapeLikeInput(compactQuery)}%` : "";
 
   const walletRowsResult = await db
     .prepare(
@@ -3068,27 +3161,62 @@ export const searchAddressSummaries = async (
        WHERE chain = ?
          AND deleted_at IS NULL
          AND (
-           lower(normalized_address) LIKE ?
-           OR lower(address) LIKE ?
-           OR lower(display_name) LIKE ?
-           OR lower(coalesce(alias, '')) LIKE ?
-           OR lower(coalesce(strategy_focus, '')) LIKE ?
-           OR lower(coalesce(bio, '')) LIKE ?
-           OR lower(coalesce(team_note, '')) LIKE ?
+           lower(normalized_address) LIKE ? ESCAPE '\\'
+           OR lower(address) LIKE ? ESCAPE '\\'
+           OR lower(display_name) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'
            OR EXISTS (
              SELECT 1
              FROM wallet_finder_ai_insights
              WHERE wallet_finder_ai_insights.wallet_id = wallets.id
-               AND lower(wallet_finder_ai_insights.searchable_text) LIKE ?
+               AND lower(wallet_finder_ai_insights.searchable_text) LIKE ? ESCAPE '\\'
            )
            OR EXISTS (
              SELECT 1
              FROM wallet_user_labels
              WHERE wallet_user_labels.wallet_id = wallets.id
                AND (
-                 lower(wallet_user_labels.name) LIKE ?
-                 OR lower(wallet_user_labels.value) LIKE ?
+                 lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
+                 OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.kind, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.evidence, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.verification_note, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.source_note, '')) LIKE ? ESCAPE '\\'
                )
+           )
+           OR (
+             ? <> ''
+             AND (
+               ${compactSqlExpression("lower(normalized_address)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(address)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(display_name)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(alias, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(strategy_focus, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(bio, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(team_note, ''))")} LIKE ? ESCAPE '\\'
+               OR EXISTS (
+                 SELECT 1
+                 FROM wallet_finder_ai_insights
+                 WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+                   AND ${compactSqlExpression("lower(wallet_finder_ai_insights.searchable_text)")} LIKE ? ESCAPE '\\'
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM wallet_user_labels
+                 WHERE wallet_user_labels.wallet_id = wallets.id
+                   AND (
+                     ${compactSqlExpression("lower(wallet_user_labels.name)")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(wallet_user_labels.value)")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.kind, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.evidence, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.verification_note, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.source_note, ''))")} LIKE ? ESCAPE '\\'
+                   )
+               )
+             )
            )
          )
        ORDER BY watchlisted DESC, updated_at DESC, created_at DESC
@@ -3096,16 +3224,9 @@ export const searchAddressSummaries = async (
     )
     .bind(
       chain,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike
+      ...Array<string>(14).fill(queryLike),
+      compactQuery,
+      ...Array<string>(14).fill(compactLike)
     )
     .all<Record<string, unknown>>();
 
