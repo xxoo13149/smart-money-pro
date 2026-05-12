@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import type { WalletLabelKind, WalletLabelSource } from "@weather-smart-money/core";
+import type { WalletLabelKind } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../../../../lib/admin-auth";
 import { deleteUserTag, updateUserTag } from "../../../../../../lib/data";
@@ -19,7 +19,6 @@ export async function PATCH(
       name?: string;
       value?: string;
       kind?: WalletLabelKind;
-      source?: WalletLabelSource;
       evidence?: string;
       verificationNote?: string;
       sourceNote?: string;
@@ -36,7 +35,6 @@ export async function PATCH(
       body.name !== undefined ||
       body.value !== undefined ||
       body.kind !== undefined ||
-      body.source !== undefined ||
       body.evidence !== undefined ||
       body.verificationNote !== undefined ||
       body.sourceNote !== undefined;
@@ -51,7 +49,7 @@ export async function PATCH(
         name: body.name?.trim(),
         value: body.value?.trim(),
         kind: body.kind,
-        source: body.source,
+        source: "user",
         evidence: body.evidence !== undefined ? body.evidence.trim() : undefined,
         verificationNote:
           body.verificationNote !== undefined ? body.verificationNote.trim() : undefined,

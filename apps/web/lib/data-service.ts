@@ -1110,7 +1110,15 @@ const commitFinderWalletImportFast = async (
       .prepare(
         `DELETE FROM wallet_user_labels
          WHERE source = 'system'
-           AND wallet_id IN (${buildFastImportPlaceholders(chunk)})`
+           AND wallet_id IN (${buildFastImportPlaceholders(chunk)})
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wallet_user_labels official
+             WHERE official.wallet_id = wallet_user_labels.wallet_id
+               AND official.source = 'user'
+               AND official.kind = wallet_user_labels.kind
+               AND lower(trim(official.value)) = lower(trim(wallet_user_labels.value))
+           )`
       )
       .bind(...chunk)
   );
