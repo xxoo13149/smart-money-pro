@@ -241,6 +241,9 @@ type ContentRuntimeMessage =
   const PARSER_VERSION = "surface-adapter-v1";
   const REFRESH_TTL_MS = 90_000;
   const DIRECT_LOOKUP_TTL_MS = 60_000;
+  const RENDER_DEBOUNCE_MS = 80;
+  const ROUTE_REFRESH_DEBOUNCE_MS = 140;
+  const TRANSIENT_CLEAR_GRACE_MS = 900;
   const CONTENT_INSTANCE_ID = `wsm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const DEFAULT_CONFIG: ExtensionConfig = {
     enabled: true,
@@ -289,6 +292,8 @@ type ContentRuntimeMessage =
   let currentPayload: ContentMarketAnnotationResponse | null = null;
   let refreshTimer: number | null = null;
   let renderTimer: number | null = null;
+  let routeRefreshTimer: number | null = null;
+  let transientClearTimer: number | null = null;
   let renderGeneration = 0;
   let refreshGeneration = 0;
   let lastRenderAt = 0;
@@ -542,15 +547,44 @@ type ContentRuntimeMessage =
     );
   };
 
+  const getStableKeyPart = (value: string | null | undefined) =>
+    compactText(value).toLowerCase().slice(0, 96);
+
   const getRowMountKey = (row: HolderRowSnapshot) =>
     [
       row.surfaceKind,
       row.side,
       row.normalizedAddress ?? "",
-      getElementIdentity(row.mount.row),
-      getElementIdentity(row.mount.mountTarget),
-      getElementIdentity(row.mount.nameLine ?? null)
+      getStableKeyPart(row.profileHref ?? row.rawAddress),
+      getStableKeyPart(row.amountText),
+      getStableKeyPart(row.displayNameText),
+      row.normalizedAddress
+        ? ""
+        : [
+            getElementIdentity(row.mount.row),
+            getElementIdentity(row.mount.mountTarget),
+            getElementIdentity(row.mount.nameLine ?? null)
+          ].join(".")
     ].join(":");
+
+  const getAnnotationRenderSignature = (annotation: ResolvedInlineAnnotation) =>
+    [
+      annotation.aliasText,
+      annotation.activityLevel ?? "",
+      annotation.noteSnippet ?? "",
+      annotation.summaryText ?? "",
+      annotation.detailUrl,
+      annotation.hoverCard?.officialNoteText ?? "",
+      annotation.hoverCard?.aiBriefShortText ?? "",
+      annotation.hoverCard?.aiStatsNoteText ?? "",
+      annotation.hoverCard?.aiNarrativeNoteText ?? "",
+      annotation.hoverCard?.aiDeepNoteText ?? "",
+      annotation.primaryBadge ? makeBadgeKey(annotation.primaryBadge) : "",
+      ...annotation.secondaryBadges.map((badge) => makeBadgeKey(badge)),
+      ...annotation.statusBadges.map((badge) => makeBadgeKey(badge)),
+      ...(annotation.hoverCard?.officialTags ?? []).map((badge) => makeBadgeKey(badge)),
+      ...(annotation.hoverCard?.aiTags ?? []).map((badge) => makeBadgeKey(badge))
+    ].join("|");
 
   const dedupeHolderRowsByMount = (rows: HolderRowSnapshot[]) => {
     const bestByKey = new Map<string, HolderRowSnapshot>();
@@ -2550,6 +2584,52 @@ type ContentRuntimeMessage =
     node.remove();
   };
 
+  const isOwnedAnnotationNode = (node: HTMLElement) => {
+    const owner = node.dataset.wsmOwner?.trim();
+    return !owner || owner === CONTENT_INSTANCE_ID;
+  };
+
+  const getOwnedAnnotationNodes = () =>
+    Array.from(document.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)).filter(isOwnedAnnotationNode);
+
+  const hasMountedAnnotationDom = () => mountedAnnotations.size > 0 || Boolean(mountedFallbackNode);
+
+  const markAnnotationsStale = () => {
+    getOwnedAnnotationNodes().forEach((node) => {
+      node.dataset.wsmState = "stale";
+    });
+  };
+
+  const markAnnotationsFresh = () => {
+    getOwnedAnnotationNodes().forEach((node) => {
+      delete node.dataset.wsmState;
+    });
+  };
+
+  const cancelTransientClear = () => {
+    if (!transientClearTimer) {
+      return;
+    }
+    window.clearTimeout(transientClearTimer);
+    transientClearTimer = null;
+  };
+
+  const scheduleTransientClear = () => {
+    if (!hasMountedAnnotationDom()) {
+      return;
+    }
+
+    markAnnotationsStale();
+    if (transientClearTimer) {
+      return;
+    }
+
+    transientClearTimer = window.setTimeout(() => {
+      transientClearTimer = null;
+      clearAnnotations();
+    }, TRANSIENT_CLEAR_GRACE_MS);
+  };
+
   const pruneConflictingAnnotationDomNodes = (
     row: HolderRowSnapshot,
     annotation: ResolvedInlineAnnotation,
@@ -2564,9 +2644,7 @@ type ContentRuntimeMessage =
     );
     const nodes = Array.from(
       new Set(scopes.flatMap((scope) => Array.from(scope.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`))))
-    ).filter(
-      (node) => !node.classList.contains(FALLBACK_CLASS)
-    );
+    ).filter((node) => isOwnedAnnotationNode(node) && !node.classList.contains(FALLBACK_CLASS));
 
     nodes.forEach((node) => {
       if (node === keepNode) {
@@ -2584,9 +2662,7 @@ type ContentRuntimeMessage =
   };
 
   const removeAllAnnotationDomNodes = () => {
-    document
-      .querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)
-      .forEach((node) => removeAnnotationDomNode(node));
+    getOwnedAnnotationNodes().forEach((node) => removeAnnotationDomNode(node));
   };
 
   const removeMountedAnnotation = (key: string) => {
@@ -2608,6 +2684,7 @@ type ContentRuntimeMessage =
   };
 
   const clearAnnotations = () => {
+    cancelTransientClear();
     [...mountedAnnotations.keys()].forEach((key) => removeMountedAnnotation(key));
     fallbackHoverAnnotations.clear();
     clearMountedFallback();
@@ -2669,6 +2746,7 @@ type ContentRuntimeMessage =
     row.dataset.surfaceKind = annotation.surfaceKind;
     row.dataset.source = annotation.source;
     row.dataset.version = annotation.summaryVersion;
+    row.dataset.renderSignature = getAnnotationRenderSignature(annotation);
 
     const aliasButton = document.createElement("button");
     aliasButton.type = "button";
@@ -2719,13 +2797,40 @@ type ContentRuntimeMessage =
   const upsertMountedAnnotation = (row: HolderRowSnapshot, annotation: ResolvedInlineAnnotation) => {
     const existing = mountedAnnotations.get(annotation.key);
     pruneConflictingAnnotationDomNodes(row, annotation, existing?.node);
-    if (
+    const sameMount =
       existing &&
       existing.row === row.mount.row &&
       existing.mountTarget === row.mount.mountTarget &&
-      existing.node.isConnected &&
-      existing.node.dataset.version === annotation.summaryVersion
+      existing.node.isConnected;
+    if (
+      sameMount &&
+      existing.node.dataset.renderSignature === getAnnotationRenderSignature(annotation)
     ) {
+      existing.node.dataset.version = annotation.summaryVersion;
+      existing.node.dataset.source = annotation.source;
+      existing.annotation = annotation;
+      delete existing.node.dataset.wsmState;
+      return;
+    }
+
+    if (sameMount) {
+      ensureMountClasses(row.mount);
+      row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
+      row.mount.row.dataset.wsmRowSide = row.side;
+      row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
+      const built = buildAnnotationNode(annotation);
+      if (hoverOverlayManager?.getActiveKey() === annotation.key) {
+        hoverOverlayManager.close();
+      }
+      existing.node.replaceWith(built.node);
+      mountedAnnotations.set(annotation.key, {
+        node: built.node,
+        trigger: built.trigger,
+        annotation,
+        row: row.mount.row,
+        mountTarget: row.mount.mountTarget,
+        mainContainer: row.mount.mainContainer
+      });
       return;
     }
 
@@ -2839,6 +2944,7 @@ type ContentRuntimeMessage =
     annotations: ResolvedInlineAnnotation[],
     visibleAddressCount: number
   ) => {
+    cancelTransientClear();
     const rowsByKey = new Map(panel.rows.map((row) => [row.rowKey, row] as const));
     const nextKeys = new Set(annotations.map((annotation) => annotation.key));
 
@@ -2866,6 +2972,7 @@ type ContentRuntimeMessage =
 
     setDebugState("Rendered", String(annotations.length));
     setDebugState("VisibleHits", String(new Set(annotations.map((annotation) => annotation.normalizedAddress)).size));
+    markAnnotationsFresh();
     return shouldRenderFallback;
   };
 
@@ -2876,7 +2983,7 @@ type ContentRuntimeMessage =
     invalidatePendingRender();
     renderTimer = window.setTimeout(() => {
       void renderAnnotations();
-    }, 80);
+    }, RENDER_DEBOUNCE_MS);
   };
 
   const getClosestAnnotationRoot = (node: Node) => {
@@ -2978,7 +3085,7 @@ type ContentRuntimeMessage =
     syncSurfaceObserver(panel?.root ?? null);
 
     if (!panel) {
-      clearAnnotations();
+      scheduleTransientClear();
       setDebugState("Panel", "missing");
       setDebugState("PanelKind", "none");
       markRuntimeStatus("wake", "Waiting for the holders surface to appear.");
@@ -3010,7 +3117,7 @@ type ContentRuntimeMessage =
     }
 
     if (!panel.active) {
-      clearAnnotations();
+      scheduleTransientClear();
       setDebugState("Panel", "inactive");
       setDebugState("PanelKind", panel.surfaceKind);
       markRuntimeStatus("wake", "Open the holders panel to start annotations.");
@@ -3044,7 +3151,16 @@ type ContentRuntimeMessage =
 
     const payload = currentPayload;
     if (!payload) {
-      clearAnnotations();
+      scheduleTransientClear();
+      return;
+    }
+
+    const pageSlug = resolveCurrentMarketSlug();
+    if (pageSlug && payload.market.slug !== pageSlug) {
+      scheduleTransientClear();
+      setDebugState("Panel", "pending");
+      setDebugState("PanelKind", panel.surfaceKind);
+      markRuntimeStatus("wake", "Refreshing page runtime.");
       return;
     }
 
@@ -3125,6 +3241,10 @@ type ContentRuntimeMessage =
     forceVisibleLookup?: boolean;
     forceRevalidate?: boolean;
   }) => {
+    if (routeRefreshTimer) {
+      window.clearTimeout(routeRefreshTimer);
+      routeRefreshTimer = null;
+    }
     invalidatePendingRender();
     const refreshId = ++refreshGeneration;
     currentConfig = await getConfig();
@@ -3146,7 +3266,7 @@ type ContentRuntimeMessage =
     setDebugState("Slug", slug ?? "missing");
 
     if (!slug) {
-      clearAnnotations();
+      scheduleTransientClear();
       markRuntimeStatus("wake", "Open a market page to start annotations.");
       await publishPageState(buildPageState({
         surfaceFound: false,
@@ -3232,14 +3352,29 @@ type ContentRuntimeMessage =
     }
   };
 
+  const scheduleRouteRefresh = () => {
+    invalidatePendingRender();
+    if (hasMountedAnnotationDom()) {
+      scheduleTransientClear();
+    } else {
+      markAnnotationsStale();
+    }
+    if (routeRefreshTimer) {
+      window.clearTimeout(routeRefreshTimer);
+    }
+    routeRefreshTimer = window.setTimeout(() => {
+      routeRefreshTimer = null;
+      void refreshAnnotations({ lifecycle: "bootstrap" });
+    }, ROUTE_REFRESH_DEBOUNCE_MS);
+  };
+
   const handleLifecycleRefresh = (event?: PageTransitionEvent | { persisted?: boolean }) => {
     if (document.visibilityState !== "visible" && !(event?.persisted ?? false)) {
       return;
     }
     const nextSlug = resolveCurrentMarketSlug();
     if (nextSlug && nextSlug !== currentSlug) {
-      clearAnnotations();
-      void refreshAnnotations({ lifecycle: "bootstrap" });
+      scheduleRouteRefresh();
       return;
     }
     if (!currentPayload && nextSlug) {
@@ -3479,6 +3614,11 @@ type ContentRuntimeMessage =
         if ((event as PageTransitionEvent).persisted) {
           return;
         }
+        if (routeRefreshTimer) {
+          window.clearTimeout(routeRefreshTimer);
+          routeRefreshTimer = null;
+        }
+        cancelTransientClear();
         interactionAbortController?.abort();
         interactionAbortController = null;
         hoverOverlayManager?.destroy();
@@ -3563,9 +3703,7 @@ type ContentRuntimeMessage =
     ensureDiscoveryObserver();
     ensureResizeObserver();
     window.addEventListener("wsm-locationchange", () => {
-      invalidatePendingRender();
-      clearAnnotations();
-      void refreshAnnotations({ lifecycle: "bootstrap" });
+      scheduleRouteRefresh();
     });
 
     await refreshAnnotations({ lifecycle: "bootstrap" });

@@ -27,6 +27,12 @@
 
 .wsm-annotation-root {
   font: inherit;
+  transition: opacity 140ms ease;
+}
+
+.wsm-annotation-root[data-wsm-state="stale"] {
+  opacity: 0.58;
+  pointer-events: none;
 }
 
 .wsm-annotation-row {
@@ -36,7 +42,26 @@
   align-items: center;
   gap: 4px 6px;
   margin: 0;
+  min-height: 19px;
   max-width: min(420px, calc(100vw - 96px));
+}
+
+.wsm-fallback-shell {
+  display: grid;
+  gap: 6px;
+  min-height: 44px;
+}
+
+.wsm-fallback-title {
+  color: rgba(226, 235, 244, 0.66);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.wsm-fallback-list {
+  display: grid;
+  gap: 5px;
 }
 
 .wsm-alias {
