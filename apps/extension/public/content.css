@@ -46,6 +46,11 @@
   max-width: min(420px, calc(100vw - 96px));
 }
 
+.wsm-annotation-placeholder {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .wsm-fallback-shell {
   display: grid;
   gap: 6px;

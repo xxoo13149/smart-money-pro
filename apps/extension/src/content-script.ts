@@ -238,6 +238,7 @@ type ContentRuntimeMessage =
   const HOLDER_MAIN_CLASS = "wsm-holder-main-target";
   const HOLDER_META_CLASS = "wsm-holder-meta-target";
   const FALLBACK_CLASS = "wsm-fallback-shell";
+  const PLACEHOLDER_CLASS = "wsm-annotation-placeholder";
   const PARSER_VERSION = "surface-adapter-v1";
   const REFRESH_TTL_MS = 90_000;
   const DIRECT_LOOKUP_TTL_MS = 60_000;
@@ -321,6 +322,15 @@ type ContentRuntimeMessage =
       node: HTMLElement;
       trigger?: HTMLButtonElement;
       annotation: ResolvedInlineAnnotation;
+      row: HTMLElement;
+      mountTarget: HTMLElement;
+      mainContainer?: HTMLElement | null;
+    }
+  >();
+  const mountedPlaceholderSlots = new Map<
+    string,
+    {
+      node: HTMLElement;
       row: HTMLElement;
       mountTarget: HTMLElement;
       mainContainer?: HTMLElement | null;
@@ -2570,10 +2580,19 @@ type ContentRuntimeMessage =
   const findMountedAnnotationKeyByNode = (node: HTMLElement) =>
     [...mountedAnnotations.entries()].find(([, entry]) => entry.node === node)?.[0];
 
+  const findMountedPlaceholderKeyByNode = (node: HTMLElement) =>
+    [...mountedPlaceholderSlots.entries()].find(([, entry]) => entry.node === node)?.[0];
+
   const removeAnnotationDomNode = (node: HTMLElement) => {
     const mountedKey = findMountedAnnotationKeyByNode(node);
     if (mountedKey) {
       removeMountedAnnotation(mountedKey);
+      return;
+    }
+
+    const placeholderKey = findMountedPlaceholderKeyByNode(node);
+    if (placeholderKey) {
+      removePlaceholderSlot(placeholderKey);
       return;
     }
 
@@ -2592,7 +2611,8 @@ type ContentRuntimeMessage =
   const getOwnedAnnotationNodes = () =>
     Array.from(document.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)).filter(isOwnedAnnotationNode);
 
-  const hasMountedAnnotationDom = () => mountedAnnotations.size > 0 || Boolean(mountedFallbackNode);
+  const hasMountedAnnotationDom = () =>
+    mountedAnnotations.size > 0 || mountedPlaceholderSlots.size > 0 || Boolean(mountedFallbackNode);
 
   const markAnnotationsStale = () => {
     getOwnedAnnotationNodes().forEach((node) => {
@@ -2683,13 +2703,88 @@ type ContentRuntimeMessage =
     mountedFallbackNode = null;
   };
 
+  const removePlaceholderSlot = (key: string) => {
+    const entry = mountedPlaceholderSlots.get(key);
+    if (!entry) {
+      return;
+    }
+    entry.node.remove();
+    mountedPlaceholderSlots.delete(key);
+    cleanupMountClasses(entry);
+  };
+
+  const clearPlaceholderSlots = () => {
+    [...mountedPlaceholderSlots.keys()].forEach((key) => removePlaceholderSlot(key));
+  };
+
   const clearAnnotations = () => {
     cancelTransientClear();
     [...mountedAnnotations.keys()].forEach((key) => removeMountedAnnotation(key));
+    clearPlaceholderSlots();
     fallbackHoverAnnotations.clear();
     clearMountedFallback();
     removeAllAnnotationDomNodes();
     setDebugState("Rendered", "0");
+  };
+
+  const buildPlaceholderSlot = (row: HolderRowSnapshot) => {
+    const node = document.createElement("div");
+    node.className = `${ROOT_CLASS} ${ROW_CLASS} ${PLACEHOLDER_CLASS}`;
+    node.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+    node.dataset.placeholderKey = getRowMountKey(row);
+    node.dataset.address = row.normalizedAddress ?? "";
+    node.dataset.surfaceKind = row.surfaceKind;
+    node.dataset.wsmState = "pending";
+    return node;
+  };
+
+  const reserveAnnotationSlots = (panel: HolderPanelSnapshot) => {
+    const nextKeys = new Set(panel.rows.map((row) => getRowMountKey(row)));
+
+    [...mountedPlaceholderSlots.entries()].forEach(([key, entry]) => {
+      if (!nextKeys.has(key) || !entry.node.isConnected || !entry.row.isConnected || !entry.mountTarget.isConnected) {
+        removePlaceholderSlot(key);
+      }
+    });
+
+    panel.rows.forEach((row) => {
+      const key = getRowMountKey(row);
+      if (mountedAnnotations.has(key)) {
+        return;
+      }
+
+      const existing = mountedPlaceholderSlots.get(key);
+      if (
+        existing &&
+        existing.row === row.mount.row &&
+        existing.mountTarget === row.mount.mountTarget &&
+        existing.node.isConnected
+      ) {
+        return;
+      }
+
+      if (existing) {
+        removePlaceholderSlot(key);
+      }
+
+      ensureMountClasses(row.mount);
+      row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
+      row.mount.row.dataset.wsmRowSide = row.side;
+      row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
+      const node = buildPlaceholderSlot(row);
+      if (row.mount.nameLine) {
+        row.mount.nameLine.insertAdjacentElement("afterend", node);
+      } else {
+        row.mount.mountTarget.append(node);
+      }
+
+      mountedPlaceholderSlots.set(key, {
+        node,
+        row: row.mount.row,
+        mountTarget: row.mount.mountTarget,
+        mainContainer: row.mount.mainContainer
+      });
+    });
   };
 
   const invalidatePendingRender = () => {
@@ -2961,9 +3056,14 @@ type ContentRuntimeMessage =
         upsertMountedAnnotation(row, annotation);
       }
     });
+    clearPlaceholderSlots();
 
     const shouldRenderFallback =
-      Boolean(payload.matchedSummaryCount) && annotations.length === 0 && visibleAddressCount === 0;
+      panel.surfaceKind === "feed-top-holders" &&
+      panel.rows.length > 0 &&
+      Boolean(payload.matchedSummaryCount) &&
+      annotations.length === 0 &&
+      visibleAddressCount === 0;
     if (shouldRenderFallback) {
       renderFallbackList(panel, payload, annotations);
     } else {
@@ -3151,12 +3251,14 @@ type ContentRuntimeMessage =
 
     const payload = currentPayload;
     if (!payload) {
+      reserveAnnotationSlots(panel);
       scheduleTransientClear();
       return;
     }
 
     const pageSlug = resolveCurrentMarketSlug();
     if (pageSlug && payload.market.slug !== pageSlug) {
+      reserveAnnotationSlots(panel);
       scheduleTransientClear();
       setDebugState("Panel", "pending");
       setDebugState("PanelKind", panel.surfaceKind);
