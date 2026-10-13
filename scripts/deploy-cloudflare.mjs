@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
@@ -68,6 +68,7 @@ Optional:
   --skip-web                     Skip admin deploy
   --skip-extension               Skip extension release build
   --skip-seed                    Skip D1 migration and seed
+  --plan                         Resolve resources and print config drift without writing files
   --dry-run                      Resolve resources and rewrite config only
   --help                         Show this message
 
@@ -96,7 +97,7 @@ const parseArgs = (argv) => {
     }
 
     const key = token.slice(2);
-    if (["help", "dry-run", "skip-worker", "skip-web", "skip-extension", "skip-seed"].includes(key)) {
+    if (["help", "dry-run", "plan", "skip-worker", "skip-web", "skip-extension", "skip-seed"].includes(key)) {
       options[key] = true;
       continue;
     }
@@ -688,39 +689,49 @@ const main = async () => {
   process.stdout.write(`KV: ${kv.id} ${kv.created ? "(created)" : "(existing)"}\n`);
   process.stdout.write(`D1: ${d1.id} ${d1.created ? "(created)" : "(existing)"}\n`);
 
+  const nextWorkerConfig = renderWorkerConfig({
+    adminUrl,
+    appUrl,
+    kvId: kv.id,
+    d1Id: d1.id,
+    appHost,
+    approvalOwnerEmail,
+    approvalSenderEmail,
+    approvalSenderName,
+    approvalCodeTtlMinutes,
+    approvalResendCooldownSeconds
+  });
+  const nextWebConfig = renderWebConfig({
+    adminUrl,
+    appUrl,
+    kvId: kv.id,
+    d1Id: d1.id,
+    adminHost,
+    approvalOwnerEmail,
+    approvalSenderEmail,
+    approvalSenderName,
+    approvalCodeTtlMinutes,
+    approvalResendCooldownSeconds
+  });
+
+  if (options.plan) {
+    const [workerConfigText, webConfigText] = await Promise.all([
+      readFile(workerConfigPath, "utf8").catch(() => ""),
+      readFile(webConfigPath, "utf8").catch(() => "")
+    ]);
+
+    printStep("Plan complete");
+    process.stdout.write(`Worker config would ${workerConfigText === nextWorkerConfig ? "stay unchanged" : "change"}: ${workerConfigPath}\n`);
+    process.stdout.write(`Web config would ${webConfigText === nextWebConfig ? "stay unchanged" : "change"}: ${webConfigPath}\n`);
+    process.stdout.write(`Worker URL: ${appUrl}\n`);
+    process.stdout.write(`Admin URL: ${adminUrl}\n`);
+    process.stdout.write("No files were written and no deploy commands were run.\n");
+    return;
+  }
+
   printStep("Writing Wrangler configuration");
-  await writeFile(
-    workerConfigPath,
-    renderWorkerConfig({
-      adminUrl,
-      appUrl,
-      kvId: kv.id,
-      d1Id: d1.id,
-      appHost,
-      approvalOwnerEmail,
-      approvalSenderEmail,
-      approvalSenderName,
-      approvalCodeTtlMinutes,
-      approvalResendCooldownSeconds
-    }),
-    "utf8"
-  );
-  await writeFile(
-    webConfigPath,
-    renderWebConfig({
-      adminUrl,
-      appUrl,
-      kvId: kv.id,
-      d1Id: d1.id,
-      adminHost,
-      approvalOwnerEmail,
-      approvalSenderEmail,
-      approvalSenderName,
-      approvalCodeTtlMinutes,
-      approvalResendCooldownSeconds
-    }),
-    "utf8"
-  );
+  await writeFile(workerConfigPath, nextWorkerConfig, "utf8");
+  await writeFile(webConfigPath, nextWebConfig, "utf8");
 
   if (options["dry-run"]) {
     printStep("Dry run complete");
