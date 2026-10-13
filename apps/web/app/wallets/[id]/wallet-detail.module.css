@@ -1,0 +1,454 @@
+/* 钱包详情页 —— 参考 huskyweather.com/profile 的信息密度和阅读节奏：
+   顶部统计条 → 画像 → 风格份额 → 城市表 → 模式盈亏，
+   每个区块只回答一个问题，不做无效填充。 */
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border: 1px solid rgba(214, 221, 233, 0.14);
+  background: linear-gradient(160deg, rgba(56, 78, 255, 0.14), rgba(13, 18, 26, 0.6) 55%);
+}
+
+.heroTitleRow {
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.heroTitleRow h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: 0.01em;
+}
+
+.heroAddr {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: rgba(214, 221, 233, 0.55);
+  word-break: break-all;
+}
+
+.heroBio {
+  margin: 0;
+  max-width: 70ch;
+  color: rgba(214, 221, 233, 0.78);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.heroChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip,
+.chipWatch,
+.chipDanger {
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.045);
+  color: rgba(214, 221, 233, 0.85);
+}
+
+.chipWatch {
+  border-color: rgba(250, 204, 21, 0.35);
+  color: #fde047;
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.chipDanger {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
+}
+
+.kpiRow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 10px;
+}
+
+.kpi {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(13, 18, 26, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  min-width: 0;
+}
+
+.kpi span {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: rgba(214, 221, 233, 0.68);
+  white-space: nowrap;
+}
+
+.kpi strong {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi strong[data-tone="up"],
+.kpi[data-tone="up"] strong {
+  color: #4ade80;
+}
+
+.kpi strong[data-tone="down"],
+.kpi[data-tone="down"] strong {
+  color: #f87171;
+}
+
+.block {
+  display: grid;
+  gap: 14px;
+  padding: 20px 22px;
+  border-radius: 16px;
+  border: 1px solid rgba(214, 221, 233, 0.12);
+  background: rgba(13, 18, 26, 0.55);
+}
+
+.blockTitle {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0.02em;
+}
+
+/* 画像卡片 */
+.portraitGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+/* 只有一个画像标签时不铺满整行，避免大片空白 */
+.portraitGrid:has(> :only-child) {
+  grid-template-columns: minmax(150px, 220px);
+}
+
+.portraitCard {
+  display: grid;
+  gap: 6px;
+  padding: 12px 13px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.portraitCard strong {
+  font-size: 13px;
+  line-height: 1.4;
+  /* 长标签尽量两行均分，避免末字孤行 */
+  text-wrap: pretty;
+}
+
+.shareBar,
+.shareTrack {
+  position: relative;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  flex: 1;
+}
+
+.shareBar span,
+.shareTrack span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #6366f1, #22d3ee);
+}
+
+.operationalNote {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(250, 204, 21, 0.72);
+}
+
+.shareText {
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(214, 221, 233, 0.72);
+  white-space: nowrap;
+  /* 标量值（城市数 / 均价）也要和百分比共用同一条右对齐基线 */
+  text-align: right;
+}
+
+/* 风格份额 */
+.shareList {
+  display: grid;
+  gap: 9px;
+}
+
+.shareItem {
+  display: grid;
+  grid-template-columns: 130px 1fr 48px;
+  align-items: center;
+  gap: 12px;
+}
+
+/* 标量（城市数 / 平均价）没有份额，轨道不画底色 */
+.shareItem[data-kind="scalar"] .shareTrack {
+  background: transparent;
+}
+
+.shareLabel {
+  font-size: 12.5px;
+  color: rgba(214, 221, 233, 0.8);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 城市表 */
+.cityTableWrap {
+  overflow-x: auto;
+}
+
+.cityTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+.cityTable th {
+  text-align: left;
+  font-size: 10.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: rgba(214, 221, 233, 0.5);
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+
+.cityTable td {
+  padding: 9px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.cityName {
+  position: relative;
+  min-width: 130px;
+}
+
+.cityName > span:first-child {
+  position: relative;
+  z-index: 1;
+}
+
+.pnlBar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  border-radius: 2px;
+  opacity: 0.85;
+}
+
+.pnlBar[data-tone="up"] {
+  background: #4ade80;
+}
+
+.pnlBar[data-tone="down"] {
+  background: #f87171;
+}
+
+.cityDormant {
+  opacity: 0.55;
+}
+
+.cityDormantNote {
+  font-size: 12px;
+  color: rgba(214, 221, 233, 0.55);
+}
+
+.pnlUp {
+  color: #4ade80;
+}
+
+.pnlDown {
+  color: #f87171;
+}
+
+/* 模式两栏 */
+.patternCols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.patternCol {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+
+.patternColTitle {
+  margin: 0 0 2px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  color: rgba(214, 221, 233, 0.55);
+}
+
+.patternRow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.patternEmpty {
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: rgba(214, 221, 233, 0.55);
+}
+
+.patternName {
+  font-size: 13px;
+}
+
+.patternMeta {
+  font-size: 11.5px;
+  color: rgba(214, 221, 233, 0.55);
+}
+
+.patternPnl {
+  grid-row: span 2;
+  align-self: center;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* AI 解读 */
+.aiNote {
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: rgba(214, 221, 233, 0.85);
+  white-space: pre-wrap;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.07);
+  border: 1px solid rgba(99, 102, 241, 0.18);
+}
+
+/* 底部资料/标签 */
+.metaGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.metaCard {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.metaCardTitle {
+  margin: 0;
+  font-size: 13px;
+  color: rgba(214, 221, 233, 0.75);
+}
+
+.metaKv {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: rgba(214, 221, 233, 0.6);
+}
+
+.metaKv strong {
+  color: rgba(232, 237, 245, 0.9);
+}
+
+.metaFold {
+  margin-top: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.metaFold > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  color: rgba(214, 221, 233, 0.75);
+}
+
+.metaFold > summary::-webkit-details-marker {
+  display: none;
+}
+
+.metaFold > summary::before {
+  content: "▸ ";
+  color: rgba(214, 221, 233, 0.45);
+}
+
+.metaFold[open] > summary::before {
+  content: "▾ ";
+}
+
+.metaFoldBody {
+  padding: 4px 12px 12px;
+}
+
+.metaSoft {
+  font-size: 12.5px;
+  color: rgba(214, 221, 233, 0.5);
+}
+
+.labelCluster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.labelBadge {
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dangerRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+@media (max-width: 720px) {
+  .shareItem {
+    grid-template-columns: 110px 1fr 44px;
+  }
+
+  .hero {
+    padding: 16px;
+  }
+}

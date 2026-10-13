@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { requireAdminApiSession } from "../../../../lib/admin-auth";
+import { cachedJsonOrNotFound, invalidateWalletCache } from "../../../../lib/cache";
 import { deleteWallet, getWalletById, updateWallet } from "../../../../lib/data";
 
 export async function GET(
@@ -13,13 +14,10 @@ export async function GET(
   }
 
   const { id } = await params;
-  const detail = await getWalletById(id);
-
-  if (!detail) {
-    return NextResponse.json({ error: "wallet not found" }, { status: 404 });
-  }
-
-  return NextResponse.json({ data: detail });
+  return cachedJsonOrNotFound(`wallets:detail:${id}`, async () => {
+    const detail = await getWalletById(id);
+    return detail ? { data: detail } : undefined;
+  });
 }
 
 export async function PATCH(
@@ -48,6 +46,7 @@ export async function PATCH(
       return NextResponse.json({ error: "wallet not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: wallet });
   } catch (error) {
     return NextResponse.json(
@@ -81,6 +80,7 @@ export async function DELETE(
       return NextResponse.json({ error: "wallet not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: wallet });
   } catch (error) {
     return NextResponse.json(

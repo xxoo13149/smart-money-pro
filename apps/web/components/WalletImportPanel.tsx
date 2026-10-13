@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type {
   WalletAiExtractPreviewRow,
   WalletAiProviderMeta,
+  WalletImportBatch,
   WalletImportPreviewRow,
   WalletPrimarySignal
 } from "@weather-smart-money/core";
@@ -160,6 +161,8 @@ export const WalletImportPanel = ({
   const [finderBaseUrl, setFinderBaseUrl] = useState(DEFAULT_FINDER_BASE_URL);
   const [finderRunId, setFinderRunId] = useState("");
   const [preview, setPreview] = useState<WalletImportPreviewRow[] | null>(null);
+  const [previewErrorsOnly, setPreviewErrorsOnly] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{
     sourceName: string;
     detectedFormat?: string;
@@ -178,10 +181,13 @@ export const WalletImportPanel = ({
     updatedCount: number;
     finderAiUpsertedCount?: number;
     failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
+    importBatch?: WalletImportBatch;
   } | null>(null);
 
   useEffect(() => {
     setPreview(null);
+    setPreviewErrorsOnly(false);
+    setPreviewExpanded(false);
     setPreviewMeta(null);
     setResult(null);
     setStatus(null);
@@ -330,7 +336,7 @@ export const WalletImportPanel = ({
           rows: preview,
           mode:
             sourceMode === "finder"
-              ? "ai"
+              ? "finder"
               : previewMode === "ai" && previewMeta.providerMeta?.provider !== "none"
               ? "ai"
               : sourceMode === "paste"
@@ -347,6 +353,7 @@ export const WalletImportPanel = ({
           updatedCount: number;
           finderAiUpsertedCount?: number;
           failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
+          importBatch?: WalletImportBatch;
         };
         error?: string;
       };
@@ -377,6 +384,28 @@ export const WalletImportPanel = ({
   };
 
   const validRows = preview ? countValidRows(preview) : 0;
+  const filteredPreview = previewErrorsOnly
+    ? preview?.filter((row) => row.errors.length > 0) ?? []
+    : preview ?? [];
+  const visiblePreviewRows = filteredPreview.slice(0, previewExpanded ? filteredPreview.length : 6);
+  const hiddenPreviewCount = Math.max(0, filteredPreview.length - visiblePreviewRows.length);
+  const batchWalletsHref = result?.importBatch
+    ? `/wallets?${new URLSearchParams({ batch: result.importBatch.id }).toString()}`
+    : null;
+  const batchDetailHref = result?.importBatch ? `/imports/batches/${result.importBatch.id}` : null;
+  const failedRowsText =
+    result?.failedRows
+      .map((item) => `Row ${item.rowNumber} - ${item.displayName}: ${item.reason}`)
+      .join("\n") ?? "";
+
+  const copyFailedRows = async () => {
+    if (!failedRowsText) {
+      return;
+    }
+
+    await navigator.clipboard?.writeText(failedRowsText);
+    setStatus("已复制失败行。");
+  };
 
   return (
     <div className="stack-item import-panel">
@@ -610,8 +639,36 @@ export const WalletImportPanel = ({
             <div className="empty-state">AI 不可用，已自动退回文本解析：{previewMeta.fallbackReason}</div>
           ) : null}
 
+          <div className="subtle-row">
+            <span>预览视图</span>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setPreviewErrorsOnly((current) => !current)}
+            >
+              {previewErrorsOnly ? "显示全部行" : "只看异常"}
+            </button>
+            {hiddenPreviewCount > 0 ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setPreviewExpanded(true)}
+              >
+                展开其余 {hiddenPreviewCount} 行
+              </button>
+            ) : previewExpanded ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setPreviewExpanded(false)}
+              >
+                收起预览
+              </button>
+            ) : null}
+          </div>
+
           <div className="stack-list">
-            {preview.slice(0, 6).map((row) => {
+            {visiblePreviewRows.map((row) => {
               const primarySignals = getPreviewSignals(row);
               const primaryTags = getPrimarySignalTags(row);
               const tags = primaryTags.length > 0 ? primaryTags : getPreviewTags(row);
@@ -688,6 +745,23 @@ export const WalletImportPanel = ({
                 <span>更新 {result.updatedCount}</span>
                 {sourceMode === "finder" ? <span>Finder AI {result.finderAiUpsertedCount ?? 0}</span> : null}
                 <span>失败 {result.failedRows.length}</span>
+              </div>
+              <div className="subtle-row">
+                {batchWalletsHref ? (
+                  <a className="secondary-button" href={batchWalletsHref}>
+                    打开本批地址
+                  </a>
+                ) : null}
+                {batchDetailHref ? (
+                  <a className="secondary-button" href={batchDetailHref}>
+                    查看批次详情
+                  </a>
+                ) : null}
+                {result.failedRows.length > 0 ? (
+                  <button type="button" className="secondary-button" onClick={() => void copyFailedRows()}>
+                    复制失败行
+                  </button>
+                ) : null}
               </div>
               {result.failedRows.slice(0, 5).map((item) => (
                 <div key={`${item.rowNumber}-${item.displayName}`} className="subtle-row">

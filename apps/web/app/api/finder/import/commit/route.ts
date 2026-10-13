@@ -6,6 +6,7 @@ import {
   withFinderCors
 } from "../../../../../lib/finder-auth";
 import { commitFinderImport, type FinderImportRequest } from "../../../../../lib/finder-sync";
+import { invalidateWalletCache } from "../../../../../lib/cache";
 
 export const OPTIONS = finderOptionsResponse;
 
@@ -19,6 +20,7 @@ export async function POST(request: Request) {
 
   try {
     const data = await commitFinderImport(body, auth.actor);
+    await invalidateWalletCache();
     return withFinderCors(request, NextResponse.json({ ok: true, data }));
   } catch (error) {
     return withFinderCors(

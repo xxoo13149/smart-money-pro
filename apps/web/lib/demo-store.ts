@@ -30,6 +30,7 @@ import type {
   Trade,
   Wallet,
   WalletFinderAiInsight,
+  WalletFinderProfile,
   WalletLabel,
   WalletLabelKind,
   WalletTableRow,
@@ -69,6 +70,7 @@ export interface WalletDetailData {
   metrics: ReturnType<typeof computeWalletMetrics>;
   labels: WalletLabel[];
   finderAi?: WalletFinderAiInsight;
+  finderProfile?: WalletFinderProfile;
   trades: Trade[];
   positions: PositionSnapshot[];
   notes: NoteAuditLog[];

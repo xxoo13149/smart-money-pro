@@ -12,7 +12,9 @@ type QueryLike =
   | Record<string, string | string[] | undefined>;
 
 const DEFAULT_SORT: WalletListSort = "updated_desc";
-const DEFAULT_LIMIT = 100;
+// 默认 25 行：地址库每行都带完整画像，单页 100 行会让 page-data 响应膨胀到 1.7MB，
+// 在 Workers Free 上既慢又容易触发资源限制。工具栏可切到 50/100。
+const DEFAULT_LIMIT = 25;
 const VALID_STATUSES = new Set<WalletListStatus>([
   "all",
   "active",
@@ -62,6 +64,7 @@ export const clampWalletListLimit = (value?: number) => {
 
 export const normalizeWalletListQuery = (input?: Partial<WalletListQuery>): WalletListQuery => {
   const normalizedLabels = normalizeLabels(input?.labels);
+  const normalizedVersion = input?.version?.trim() || undefined;
   const normalizedStatus =
     input?.status && VALID_STATUSES.has(input.status) ? input.status : "all";
   const normalizedSource =
@@ -79,6 +82,7 @@ export const normalizeWalletListQuery = (input?: Partial<WalletListQuery>): Wall
     source: normalizedSource,
     batch: input?.batch?.trim() || undefined,
     labels: normalizedLabels.length > 0 ? normalizedLabels : undefined,
+    version: normalizedVersion,
     sort: normalizedSort,
     cursor: input?.cursor?.trim() || undefined,
     limit: clampWalletListLimit(input?.limit),
@@ -111,6 +115,7 @@ export const parseWalletListQueryInput = (
       : undefined,
     batch: readSingleValue(source, "batch"),
     labels: readValues(source, "labels"),
+    version: readSingleValue(source, "version"),
     sort: sortRaw && VALID_SORTS.has(sortRaw as WalletListSort)
       ? (sortRaw as WalletListSort)
       : undefined,
@@ -141,6 +146,7 @@ export const resolveWalletListQuery = (
     source: input?.source !== undefined ? input.source : savedViewQuery?.source,
     batch: input?.batch !== undefined ? input.batch : savedViewQuery?.batch,
     labels: input?.labels !== undefined ? input.labels : savedViewQuery?.labels,
+    version: input?.version !== undefined ? input.version : savedViewQuery?.version,
     sort: input?.sort !== undefined ? input.sort : savedViewQuery?.sort,
     cursor: input?.cursor,
     limit: input?.limit !== undefined ? input.limit : savedViewQuery?.limit,
@@ -175,6 +181,7 @@ export const sanitizeWalletSavedViewQuery = (
     source: normalized.source,
     batch: normalized.batch,
     labels: normalized.labels,
+    version: normalized.version,
     sort: normalized.sort,
     limit: normalized.limit,
     includeDeleted: normalized.includeDeleted,
@@ -201,6 +208,7 @@ export const stringifyWalletListQuery = (query?: WalletListQuery) => {
   if (normalized.createdAfter) params.set("createdAfter", normalized.createdAfter);
   if (normalized.createdBefore) params.set("createdBefore", normalized.createdBefore);
   normalized.labels?.forEach((label) => params.append("labels", label));
+  if (normalized.version) params.set("version", normalized.version);
   if (normalized.selected) params.set("selected", normalized.selected);
   if (normalized.selected && normalized.panel) params.set("panel", normalized.panel);
 

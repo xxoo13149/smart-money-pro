@@ -21,6 +21,9 @@ export async function GET(request: NextRequest) {
   if (!query) {
     return NextResponse.json({ error: "q is required" }, { status: 400 });
   }
+  if (query.length > 160) {
+    return NextResponse.json({ error: "q is too long" }, { status: 400 });
+  }
 
   const payload = await searchAddressSummariesPayload(query, {
     chain: "polygon",

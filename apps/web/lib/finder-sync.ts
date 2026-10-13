@@ -1,9 +1,19 @@
 import {
+  FINDER_LABEL_CATALOG,
   PRIMARY_SIGNAL_KIND_PRIORITY,
+  fallbackFinderLabelMeta,
+  getFinderLabelMeta,
   normalizeAddress,
+  normalizeWalletLabelText,
+  type FinderLabelMeta,
   type WalletAiExtractPreviewRow,
   type WalletAiProviderMeta,
   type WalletFinderAiInsight,
+  type WalletFinderCityRow,
+  type WalletFinderPatternRow,
+  type WalletFinderPortraitLabel,
+  type WalletFinderProfile,
+  type WalletFinderProfileMetric,
   type WalletImportCommitRequest,
   type WalletImportLabelDraft,
   type WalletImportPreviewRow,
@@ -72,7 +82,7 @@ const UNKNOWN_WEATHER_SIGNALS: WalletWeatherSignalDraft = {
   evidenceQuality: "insufficient"
 };
 
-const LABEL_KEY_META: Record<
+const LEGACY_LABEL_KEY_META: Record<
   string,
   {
     reportTitle: string;
@@ -154,6 +164,24 @@ const LABEL_KEY_META: Record<
     kind: "early_entry_signal",
     fallbackValue: "提前埋伏"
   }
+};
+
+/**
+ * Finder 大更新后的标签映射：核心目录（含风格画像/外部画像/数据状态）打底，
+ * 老 key 的既有映射原样覆盖，保证既有标签展示不变。
+ */
+const LABEL_KEY_META: Record<
+  string,
+  {
+    reportTitle: string;
+    name: string;
+    kind: WalletLabelKind;
+    signalKind?: WalletPrimarySignalKind;
+    fallbackValue: string;
+  }
+> = {
+  ...FINDER_LABEL_CATALOG,
+  ...LEGACY_LABEL_KEY_META
 };
 
 const text = (value: unknown) => {
@@ -299,7 +327,10 @@ const KNOWN_LABEL_KINDS = new Set<WalletLabelKind>([
   "timing_window",
   "edge_style",
   "weather_driver",
-  "signal_quality"
+  "signal_quality",
+  "portrait_style",
+  "husky_profile",
+  "data_status"
 ]);
 
 const FINDER_AI_KIND_NAME: Partial<Record<WalletLabelKind, string>> = {
@@ -332,6 +363,27 @@ const normalizeFinderAiLabelText = (
   const normalized = text(rawValue).replace(/高爆击/gu, "高暴击");
   if (!normalized) {
     return undefined;
+  }
+
+  // 新标签（风格画像/外部画像/数据状态）优先按目录规范化展示名
+  const normalizedKey = normalizeWalletLabelText(normalized);
+  const catalogMeta = Object.values(FINDER_LABEL_CATALOG).find(
+    (item) =>
+      normalizeWalletLabelText(item.fallbackValue) === normalizedKey ||
+      normalizeWalletLabelText(item.reportTitle) === normalizedKey
+  );
+  if (catalogMeta && !kindHint) {
+    return { name: catalogMeta.name, value: catalogMeta.fallbackValue, kind: catalogMeta.kind };
+  }
+  if (catalogMeta) {
+    return {
+      name: catalogMeta.name,
+      value: catalogMeta.fallbackValue,
+      kind:
+        kindHint && kindHint !== "signal_quality" && kindHint !== "confidence" && kindHint !== "market_scope"
+          ? kindHint
+          : catalogMeta.kind
+    };
   }
 
   if (kindHint === "frequency_region" || /^高频/u.test(normalized)) {
@@ -417,14 +469,21 @@ const addFinderAiLabelDraft = (
   labels.set(labelDraftKey(label), label);
 };
 
-const getMatchedFinderEvaluations = (detail: JsonRecord) => {
+const getMatchedFinderEvaluations = (detail: JsonRecord, row?: JsonRecord) => {
   const evaluations = asArray(detail.label_evaluations)
     .map(asRecord)
     .filter((item) => item.matched === true);
   const labels = asArray(detail.labels)
     .map(asRecord)
     .filter((item) => item.matched !== false);
-  return [...evaluations, ...labels];
+  const labelFamilies = asRecord(row?.labelFamilies);
+  const familyLabels = [
+    ...asArray(labelFamilies.systemCore).map(asRecord),
+    ...asArray(labelFamilies.supplementary).map(asRecord),
+    ...asArray(labelFamilies.system_core_labels).map(asRecord),
+    ...asArray(labelFamilies.supplementary_labels).map(asRecord)
+  ].filter((item) => Object.keys(item).length > 0 && item.matched !== false);
+  return [...evaluations, ...labels, ...familyLabels];
 };
 
 const hasFinderAiMatchedLabels = (finderAi: JsonRecord) =>
@@ -437,8 +496,9 @@ const hasFinderAiMatchedLabels = (finderAi: JsonRecord) =>
 const hasFinderMatchedLabels = (row: JsonRecord, detail: JsonRecord) => {
   const finderAi = asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai);
   return (
-    getMatchedFinderEvaluations(detail).length > 0 ||
+    getMatchedFinderEvaluations(detail, row).length > 0 ||
     asArray(row.labels).map(text).some(Boolean) ||
+    asArray(detail.other_labels).length > 0 ||
     hasFinderAiMatchedLabels(finderAi)
   );
 };
@@ -457,9 +517,9 @@ const buildFinderLabels = (
       ? finderAi
       : asRecord(row.finderAi ?? row.finder_ai ?? detail.finderAi ?? detail.finder_ai);
 
-  for (const item of getMatchedFinderEvaluations(detail)) {
+  for (const item of getMatchedFinderEvaluations(detail, row)) {
     const key = text(item.key);
-    const meta = LABEL_KEY_META[key];
+    const meta = LABEL_KEY_META[key] ?? (key ? fallbackFinderLabelMeta(key) : undefined);
     if (!meta) {
       continue;
     }
@@ -513,18 +573,58 @@ const buildFinderLabels = (
     if (!labelText) {
       continue;
     }
-    const label: WalletImportLabelDraft = {
-      name: "Finder 标签",
-      value: truncate(labelText, 24),
-      kind: "group",
+    addFinderAiLabelDraft(labels, labelText, {
       evidence: fallbackEvidence || undefined,
+      sourceName
+    });
+  }
+
+  // 画像/数据状态标签：detail.other_labels（Finder 自算画像 + Husky 外部画像）
+  // 与 detail.data_quality_states（运行/数据状态），含分类与份额
+  const otherLabelItems = [
+    ...asArray(detail.other_labels).map(asRecord),
+    ...asArray(detail.data_quality_states).map(asRecord),
+    ...asArray(asRecord(row.labelFamilies).other).map(asRecord),
+    ...asArray(asRecord(row.labelFamilies).otherLabels).map(asRecord)
+  ];
+  for (const item of otherLabelItems) {
+    const key = text(item.key);
+    const display = text(item.display_name) || text(item.displayName);
+    const category = text(item.category);
+    const source = text(item.source);
+    const meta = getFinderLabelMeta(key);
+    const isDataStatus =
+      meta?.kind === "data_status" || category.includes("数据状态") || category.includes("运行");
+    const isHusky =
+      meta?.kind === "husky_profile" ||
+      key.toLowerCase().startsWith("husky:") ||
+      category.includes("外部") ||
+      source.toLowerCase().includes("husky");
+    const value = truncate(display || meta?.fallbackValue || key.replace(/^(?:finder|husky):/u, ""), 24);
+    if (!value) {
+      continue;
+    }
+    const share = typeof item.share === "number" ? item.share : Number.parseFloat(text(item.share));
+    const shareText = Number.isFinite(share)
+      ? `份额 ${(share <= 1 ? share * 100 : share).toFixed(1)}%`
+      : "";
+    const label: WalletImportLabelDraft = {
+      name: isDataStatus ? "数据状态" : isHusky ? "外部画像" : "画像/风格",
+      value,
+      kind: isDataStatus ? "data_status" : isHusky ? "husky_profile" : "portrait_style",
+      evidence: truncate(
+        [category ? `分类：${category}` : "", shareText, text(item.reason), source]
+          .filter(Boolean)
+          .join("，") || fallbackEvidence || "Finder 画像标签",
+        320
+      ),
       source: "system",
-      sourceNote: sourceName
+      sourceNote: `${sourceName}${isHusky ? "（外部画像）" : ""}`
     };
     labels.set(labelDraftKey(label), label);
   }
 
-  return Array.from(labels.values()).slice(0, 10);
+  return Array.from(labels.values()).slice(0, 24);
 };
 
 const buildFinderMetrics = (row: JsonRecord, detail: JsonRecord) => {
@@ -545,6 +645,243 @@ const buildFinderMetrics = (row: JsonRecord, detail: JsonRecord) => {
   ].filter(Boolean);
 
   return Array.from(new Set(values)).slice(0, 8);
+};
+
+const numericValue = (value: unknown) => {
+  const numeric = typeof value === "number" ? value : Number.parseFloat(text(value));
+  return Number.isFinite(numeric) ? numeric : undefined;
+};
+
+const scalarRecord = (input: JsonRecord) => {
+  const output: JsonRecord = {};
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "number" || typeof value === "string" || typeof value === "boolean") {
+      output[key] = value;
+    }
+  }
+  return output;
+};
+
+const PROFILE_METRIC_SPECS: Array<{
+  key: string;
+  label: string;
+  unit: WalletFinderProfileMetric["unit"];
+  rowKeys?: string[];
+  overviewKeys?: string[];
+  coverageKeys?: string[];
+  source?: string;
+}> = [
+  { key: "total_pnl_usd", label: "总盈亏", unit: "usd", overviewKeys: ["pnl_usd"], rowKeys: ["pnl"], source: "Finder 账本" },
+  { key: "trade_exit_pnl_usd", label: "交易退出盈亏", unit: "usd", overviewKeys: ["trade_exit_pnl_usd"], source: "Finder 账本" },
+  { key: "settlement_pnl_usd", label: "结算盈亏", unit: "usd", overviewKeys: ["settlement_pnl_usd"], source: "Finder 账本" },
+  { key: "roi", label: "投资回报率", unit: "percent", overviewKeys: ["roi"], rowKeys: ["display_roi", "falcon_total_roi"] },
+  { key: "position_win_rate", label: "胜率（已结算仓位）", unit: "percent", overviewKeys: ["position_win_rate"], rowKeys: ["wallet_win_rate", "closed_position_win_rate", "display_win_rate", "falcon_win_rate"] },
+  { key: "resolved_positions", label: "已结算仓位", unit: "count", overviewKeys: ["resolved_positions"], rowKeys: ["weather_position_resolved_count", "ledger_resolved_position_count"] },
+  { key: "won_positions", label: "获胜仓位", unit: "count", overviewKeys: ["won_positions"] },
+  { key: "open_value_usd", label: "未平仓价值", unit: "usd", overviewKeys: ["open_value_usd"] },
+  { key: "open_position_count", label: "未平仓仓位数", unit: "count", coverageKeys: ["open_position_count"], rowKeys: ["weather_open_position_count"] },
+  { key: "avg_stake_usd", label: "单仓平均成本", unit: "usd", overviewKeys: ["avg_stake_usd"] },
+  { key: "settled_position_cost_usd", label: "已结算仓位成本", unit: "usd", overviewKeys: ["settled_position_cost_usd"] },
+  { key: "volume_usd", label: "成交量", unit: "usd", overviewKeys: ["volume_usd"], rowKeys: ["volume"] },
+  { key: "trades", label: "交易笔数", unit: "count", overviewKeys: ["trades"], rowKeys: ["trade_count", "total_trade_count"] },
+  { key: "weather_trade_count", label: "天气交易笔数", unit: "count", coverageKeys: ["weather_trade_count"], rowKeys: ["weather_trade_count"] },
+  { key: "weather_notional_ratio", label: "天气成交占比", unit: "percent", rowKeys: ["weather_notional_ratio", "weather_trade_ratio"] },
+  { key: "weather_position_pnl", label: "天气仓位盈亏", unit: "usd", rowKeys: ["weather_position_pnl"] },
+  { key: "weather_position_roi", label: "天气仓位 ROI", unit: "percent", rowKeys: ["weather_position_roi"] },
+  { key: "closed_position_win_rate", label: "已平仓胜率", unit: "percent", rowKeys: ["closed_position_win_rate", "closed_position_sample_win_rate"] },
+  { key: "closed_profit_multiple", label: "盈利倍数", unit: "multiple", rowKeys: ["closed_profit_multiple"] },
+  { key: "median_trade_notional", label: "中位交易额", unit: "usd", rowKeys: ["median_trade_notional"] },
+  { key: "trades_per_active_day", label: "活跃日均交易", unit: "count", rowKeys: ["trades_per_active_day"] },
+  { key: "dominant_region", label: "主交易城市", unit: "text", rowKeys: ["dominant_region", "main_region", "v2_dominant_region"] },
+  { key: "max_region_daily_profit_multiple", label: "同城单日最高回报", unit: "multiple", rowKeys: ["max_region_daily_profit_multiple"] },
+  { key: "highest_burst", label: "最高爆发收益", unit: "usd", rowKeys: ["highest_burst"] },
+  { key: "max_closed_position_profit_multiple", label: "单仓最高盈利倍数", unit: "multiple", rowKeys: ["max_closed_position_profit_multiple"] },
+  { key: "unreconciled_position_count", label: "未对账仓位数", unit: "count", coverageKeys: ["unreconciled_position_count"] }
+];
+
+const buildFinderProfile = (
+  row: JsonRecord,
+  detail: JsonRecord,
+  input: { sourceName: string; runId?: string }
+): WalletFinderProfile | undefined => {
+  const metricsRecord = asRecord(detail.metrics);
+  const weatherProfile = asRecord(
+    metricsRecord.weather_profile_v2 ?? detail.weather_profile_v2 ?? detail.weatherProfileV2
+  );
+  const overview = asRecord(weatherProfile.overview);
+  const coverage = asRecord(weatherProfile.coverage);
+  const strategy = asRecord(weatherProfile.strategy);
+  const strategyMetrics = scalarRecord(asRecord(strategy.metrics));
+
+  const pick = (record: JsonRecord, keys?: string[]) => {
+    for (const key of keys ?? []) {
+      const value = record[key];
+      if (value !== undefined && value !== null && value !== "") {
+        return value;
+      }
+    }
+    return undefined;
+  };
+
+  const metrics: WalletFinderProfileMetric[] = [];
+  for (const spec of PROFILE_METRIC_SPECS) {
+    const raw =
+      pick(overview, spec.overviewKeys) ??
+      pick(coverage, spec.coverageKeys) ??
+      pick(row, spec.rowKeys);
+    if (raw === undefined) {
+      continue;
+    }
+    const numeric = spec.unit === "text" ? undefined : numericValue(raw);
+    const value =
+      spec.unit === "text"
+        ? text(raw)
+        : spec.unit === "percent"
+          ? numeric
+          : numeric;
+    if (value === undefined || value === "") {
+      continue;
+    }
+    metrics.push({
+      key: spec.key,
+      label: spec.label,
+      value,
+      unit: spec.unit,
+      source: spec.source
+    });
+  }
+
+  const portraitLabels: WalletFinderPortraitLabel[] = [];
+  const seenPortrait = new Set<string>();
+  const pushPortrait = (label: WalletFinderPortraitLabel) => {
+    const key = `${label.group ?? "portrait_style"}:${label.code}:${label.name}`;
+    if (seenPortrait.has(key)) {
+      return;
+    }
+    seenPortrait.add(key);
+    portraitLabels.push(label);
+  };
+
+  for (const item of asArray(detail.labels).map(asRecord)) {
+    const display = text(item.display_name);
+    if (!display || item.system_core !== true) {
+      continue;
+    }
+    pushPortrait({
+      code: text(item.key) || display,
+      name: display,
+      group: "core_screening",
+      description: text(asRecord(item.evidence).reason) || text(item.description) || undefined
+    });
+  }
+
+  const portraitItems = [
+    ...asArray(detail.other_labels).map(asRecord),
+    ...asArray(weatherProfile.portrait_labels).map(asRecord)
+  ];
+  for (const item of portraitItems) {
+    const display = text(item.display_name);
+    const key = text(item.key);
+    if (!display && !key) {
+      continue;
+    }
+    const category = text(item.category);
+    const source = text(item.source);
+    const isHusky =
+      key.toLowerCase().startsWith("husky:") || category.includes("外部") || source.toLowerCase().includes("husky");
+    const share = numericValue(item.share);
+    pushPortrait({
+      code: key || display,
+      name: display || key,
+      share,
+      sampleCount: numericValue(item.sample_count) ?? undefined,
+      group: isHusky ? "husky_profile" : "portrait_style",
+      description: [category, text(item.facet), text(item.formula_confidence)]
+        .filter(Boolean)
+        .join("，") || undefined
+    });
+  }
+
+  for (const item of asArray(detail.data_quality_states).map(asRecord)) {
+    const display = text(item.display_name) || text(item.key);
+    if (!display) {
+      continue;
+    }
+    pushPortrait({
+      code: text(item.key) || display,
+      name: display,
+      group: "operational",
+      description: text(item.reason) || text(item.category) || undefined
+    });
+  }
+
+  const cities: WalletFinderCityRow[] = asArray(weatherProfile.cities)
+    .map(asRecord)
+    .map((item) => ({
+      city: text(item.city) || text(item.region) || "未知城市",
+      region: text(item.region) || undefined,
+      positionCount: numericValue(item.positions) ?? undefined,
+      tradeCount: numericValue(item.trades) ?? undefined,
+      pnlUsd: numericValue(item.pnl_usd) ?? undefined,
+      roi: numericValue(item.roi) ?? undefined,
+      winRate: numericValue(item.win_rate) ?? undefined,
+      resolvedCount: numericValue(item.resolved_positions) ?? undefined,
+      wonCount: numericValue(item.won_positions) ?? undefined,
+      avgEntryPrice: numericValue(item.avg_entry_price) ?? undefined,
+      costUsd: numericValue(item.cost_usd) ?? numericValue(item.staked_usd) ?? undefined,
+      payoutUsd: numericValue(item.payout_usd) ?? undefined,
+      volumeUsd: numericValue(item.volume_usd) ?? numericValue(item.observed_volume_usd) ?? undefined,
+      share: numericValue(item.share) ?? undefined
+    }))
+    .filter((item) => item.city)
+    .sort((left, right) => (right.positionCount ?? 0) - (left.positionCount ?? 0))
+    .slice(0, 40);
+
+  const patterns: WalletFinderPatternRow[] = asArray(weatherProfile.patterns)
+    .map(asRecord)
+    .map((item) => ({
+      key: text(item.key) || undefined,
+      name: text(item.name) || text(item.key) || undefined,
+      tradeCount: numericValue(item.n) ?? numericValue(item.trade_count) ?? undefined,
+      resolvedCount: numericValue(item.resolved) ?? numericValue(item.resolved_count) ?? undefined,
+      wonCount: numericValue(item.wins) ?? undefined,
+      winRate: numericValue(item.win_rate) ?? undefined,
+      pnlUsd: numericValue(item.pnl_usd) ?? undefined,
+      roi: numericValue(item.roi) ?? undefined,
+      stakedUsd: numericValue(item.staked_usd) ?? undefined,
+      share: numericValue(item.share) ?? undefined
+    }))
+    .filter((item) => item.name)
+    .sort((left, right) => (right.pnlUsd ?? 0) - (left.pnlUsd ?? 0))
+    .slice(0, 12);
+
+  const profile: WalletFinderProfile = {
+    runId: input.runId,
+    sourceName: input.sourceName,
+    snapshotAsOf:
+      text(detail.snapshot_as_of) ||
+      text(asRecord(detail.evidence_summary).latest_evidence_date) ||
+      undefined,
+    analysisSource: text(row.analysis_source) || undefined,
+    metrics,
+    portraitLabels,
+    cities,
+    patterns,
+    strategyMetrics: Object.fromEntries(
+      Object.entries(strategyMetrics).slice(0, 32)
+    ) as Record<string, number | string | boolean>,
+    overview: scalarRecord(overview),
+    coverage: scalarRecord(coverage)
+  };
+
+  const hasContent =
+    metrics.length > 0 ||
+    portraitLabels.length > 0 ||
+    cities.length > 0 ||
+    patterns.length > 0 ||
+    Object.keys(profile.overview).length > 0;
+
+  return hasContent ? profile : undefined;
 };
 
 const buildPrimarySignals = (labels: WalletImportLabelDraft[]) => {
@@ -572,7 +909,7 @@ const buildPrimarySignals = (labels: WalletImportLabelDraft[]) => {
 
 const buildSourceExcerpt = (row: JsonRecord, detail: JsonRecord) => {
   const evidenceSummary = asRecord(detail.evidence_summary);
-  const evaluations = getMatchedFinderEvaluations(detail)
+  const evaluations = getMatchedFinderEvaluations(detail, row)
     .map((item) => labelEvidenceText(item))
     .slice(0, 4);
   const notes = asArray(detail.strategy_notes).map(text).filter(Boolean).slice(0, 3);
@@ -804,6 +1141,10 @@ const buildFinderPreviewRows = (
         }
       ],
       finderAi: normalizedFinderAi,
+      finderProfile: buildFinderProfile(row, detail, {
+        sourceName: input.sourceName,
+        runId: input.runId
+      }),
       watchlistNote: shouldWatchlist(row, detail) ? "Finder 建议进入观察名单" : undefined,
       sourceExcerpt: normalizedFinderAi?.sourceExcerpt || sourceExcerpt || undefined,
       warnings: labels.length === 0 ? ["Finder 未提供命中标签，建议补充证据"] : [],

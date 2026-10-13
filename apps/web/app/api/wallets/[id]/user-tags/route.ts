@@ -3,6 +3,7 @@ import type { WalletLabelKind } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../../../lib/admin-auth";
 import { createUserTag } from "../../../../../lib/data";
+import { invalidateWalletCache } from "../../../../../lib/cache";
 
 export async function POST(
   request: Request,
@@ -46,6 +47,7 @@ export async function POST(
       return NextResponse.json({ error: "wallet not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: tag }, { status: 201 });
   } catch (error) {
     console.error("create user tag failed", error);

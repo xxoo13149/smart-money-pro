@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import type { WalletManualCreateInput } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../lib/admin-auth";
+import { cachedJsonResponse, invalidateWalletCache } from "../../../lib/cache";
 import { createManualWallet, listWalletAdminRowsPage } from "../../../lib/data";
 import { parseWalletListQueryInput } from "../../../lib/wallets-query";
 
@@ -11,10 +12,11 @@ export async function GET(request: NextRequest) {
     return auth.response;
   }
 
-  const query = parseWalletListQueryInput(request.nextUrl.searchParams);
-  const data = await listWalletAdminRowsPage(query);
-
-  return NextResponse.json({ data });
+  const search = request.nextUrl.search;
+  return cachedJsonResponse(`wallets:list:${search}`, async () => {
+    const query = parseWalletListQueryInput(request.nextUrl.searchParams);
+    return { data: await listWalletAdminRowsPage(query) };
+  });
 }
 
 export async function POST(request: Request) {
@@ -31,6 +33,7 @@ export async function POST(request: Request) {
 
   try {
     const wallet = await createManualWallet(body, auth.session.user.email);
+    await invalidateWalletCache();
     return NextResponse.json({ data: wallet }, { status: 201 });
   } catch (error) {
     return NextResponse.json(

@@ -29,6 +29,7 @@ const DEFAULT_APPROVAL_OWNER_EMAIL = "owner@example.com";
 const DEFAULT_APPROVAL_SENDER_EMAIL = "noreply@example.com";
 const DEFAULT_APPROVAL_SENDER_NAME = "Smart Money Admin";
 const APPROVAL_SECRET_HEADER = "x-admin-approval-secret";
+const ACCESS_JWT_HEADERS = ["cf-access-jwt-assertion", "cf-access-token"] as const;
 const SCHEMA_READY = new Map<string, Promise<unknown>>();
 const SHOULD_BOOTSTRAP_SCHEMA =
   process.env.SMART_MONEY_BOOTSTRAP_SCHEMA === "true" || process.env.NODE_ENV !== "production";
@@ -167,6 +168,35 @@ const extractAccessEmail = (source: Pick<Headers, "get">) => {
 
   return undefined;
 };
+
+const hasAccessJwt = (source: Pick<Headers, "get">) =>
+  ACCESS_JWT_HEADERS.some((key) => Boolean(source.get(key)?.trim()));
+
+const isStrictAccessRequired = (bindings?: SmartMoneyBindings | null) => {
+  const configured =
+    bindings?.ADMIN_ACCESS_STRICT?.trim() ||
+    process.env.ADMIN_ACCESS_STRICT?.trim() ||
+    "";
+  return process.env.NODE_ENV === "production" && ["1", "true", "yes", "required"].includes(configured.toLowerCase());
+};
+
+const assertAccessBoundary = (
+  source: Pick<Headers, "get">,
+  bindings?: SmartMoneyBindings | null
+) => {
+  if (isAccessBoundarySatisfied(source, bindings)) {
+    return;
+  }
+
+  throw new Error("Cloudflare Access verification is required");
+};
+
+const isAccessBoundarySatisfied = (
+  source: Pick<Headers, "get">,
+  bindings?: SmartMoneyBindings | null
+) =>
+  !isStrictAccessRequired(bindings) ||
+  Boolean(extractAccessEmail(source) && hasAccessJwt(source));
 
 const extractCookieValue = (cookieHeader: string | null, key: string) => {
   if (!cookieHeader) {
@@ -601,7 +631,12 @@ const createSessionRecord = async (
   };
 };
 
-const resolveLoginEmail = (request: Request, submittedEmail?: string | null) => {
+const resolveLoginEmail = (
+  request: Request,
+  submittedEmail?: string | null,
+  bindings?: SmartMoneyBindings | null
+) => {
+  assertAccessBoundary(request.headers, bindings);
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const normalizedSubmitted = submittedEmail ? normalizeEmail(submittedEmail) : undefined;
 
@@ -616,7 +651,12 @@ const resolveLoginEmail = (request: Request, submittedEmail?: string | null) => 
   return normalizedSubmitted;
 };
 
-const resolveRegistrationEmail = (request: Request, submittedEmail?: string | null) => {
+const resolveRegistrationEmail = (
+  request: Request,
+  submittedEmail?: string | null,
+  bindings?: SmartMoneyBindings | null
+) => {
+  assertAccessBoundary(request.headers, bindings);
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const normalizedSubmitted = submittedEmail ? normalizeEmail(submittedEmail) : undefined;
 
@@ -697,6 +737,14 @@ const resolveSessionFromRequest = async (
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const sessionToken = extractCookieValue(request.headers.get("cookie"), ADMIN_SESSION_COOKIE_NAME);
 
+  if (!isAccessBoundarySatisfied(request.headers, auth?.bindings)) {
+    return {
+      session: null,
+      accessEmail: undefined,
+      shouldClearCookie: Boolean(sessionToken)
+    };
+  }
+
   if (!auth || !sessionToken) {
     return {
       session: null,
@@ -744,6 +792,14 @@ const resolveAdminRequestState = cache(async (): Promise<AdminAuthRequestState> 
   const accessEmail = extractAccessEmail(headerStore);
   const sessionToken = cookieStore.get(ADMIN_SESSION_COOKIE_NAME)?.value;
   const registrationApproval = getApprovalConfigFromBindings(auth?.bindings);
+
+  if (!isAccessBoundarySatisfied(headerStore, auth?.bindings)) {
+    return {
+      authReady: Boolean(auth),
+      session: null,
+      registrationApproval
+    };
+  }
 
   if (!auth) {
     return {
@@ -866,7 +922,7 @@ export const requestAdminRegistrationApprovalCode = async (
     throw new Error("管理员审批邮件尚未配置完成");
   }
 
-  const normalizedEmail = resolveRegistrationEmail(request, input.email);
+  const normalizedEmail = resolveRegistrationEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("请先填写注册邮箱");
   }
@@ -1008,7 +1064,7 @@ export const registerAdminUser = async (
     throw new Error("admin auth storage is unavailable");
   }
 
-  const normalizedEmail = resolveRegistrationEmail(request, input.email);
+  const normalizedEmail = resolveRegistrationEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("请先填写注册邮箱");
   }
@@ -1121,7 +1177,7 @@ export const loginAdminUser = async (
     throw new Error("admin auth storage is unavailable");
   }
 
-  const normalizedEmail = resolveLoginEmail(request, input.email);
+  const normalizedEmail = resolveLoginEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("缺少登录邮箱");
   }

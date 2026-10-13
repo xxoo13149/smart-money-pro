@@ -11,6 +11,7 @@ export interface SmartMoneyBindings {
   ADMIN_APPROVAL_CODE_TTL_MINUTES?: string;
   ADMIN_APPROVAL_RESEND_COOLDOWN_SECONDS?: string;
   ADMIN_APPROVAL_SHARED_SECRET?: string;
+  ADMIN_ACCESS_STRICT?: string;
   PUBLIC_EXTENSION_BASE_URL?: string;
   GEMINI_API_KEY?: string;
   GROQ_API_KEY?: string;

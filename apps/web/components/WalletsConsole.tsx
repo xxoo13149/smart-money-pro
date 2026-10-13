@@ -7,32 +7,23 @@ import type {
   WalletListPanelMode,
   WalletListQuery,
   WalletListResponse,
-  WalletSavedView,
   WalletStatusBadge
 } from "@weather-smart-money/core";
+import { getLabelKindTone } from "@weather-smart-money/core";
 
 import type { WalletDetailData } from "../lib/data";
 import { stringifyWalletListQuery } from "../lib/wallets-query";
 import { AppLink } from "./AppLink";
 import { Modal } from "./Modal";
 import { WalletCreateForm } from "./WalletCreateForm";
+import { WalletDigestCard } from "./WalletDigestCard";
+import { WalletInspectorDigest } from "./WalletInspectorDigest";
 import { WalletImportPanel, type WalletImportSourceMode } from "./WalletImportPanel";
 import styles from "./WalletsConsole.module.css";
 
 type ColumnPreset = "compact" | "standard";
-type InspectorSection = "overview" | "labels" | "records" | "analysis";
+type InspectorSection = "digest" | "meta";
 type DensityMode = "compact" | "comfortable";
-type LabelDraft = {
-  name: string;
-  value: string;
-  kind: string;
-  source: string;
-  evidence: string;
-  verificationNote: string;
-  sourceNote: string;
-};
-
-const EMPTY_PANEL_LABELS: WalletDetailData["labels"] = [];
 
 const DENSITY_STORAGE_KEY = "wallet-workspace-density";
 const PANEL_PINNED_STORAGE_KEY = "wallet-workspace-panel-pinned";
@@ -45,7 +36,7 @@ const SORT_OPTIONS = [
   { value: "name_asc", label: "名称 A-Z" }
 ] as const;
 
-const LIMIT_OPTIONS = [50, 100, 200] as const;
+const LIMIT_OPTIONS = [25, 50, 100, 200] as const;
 
 const SOURCE_OPTIONS = [
   { value: "all", label: "全部来源" },
@@ -60,6 +51,7 @@ const STATUS_OPTIONS = [
   { value: "all", label: "全部状态" },
   { value: "active", label: "正常" },
   { value: "watchlist", label: "Watchlist" },
+  { value: "review_needed", label: "需复核" },
   { value: "deleted", label: "已删除" }
 ] as const;
 
@@ -71,15 +63,16 @@ const COLUMN_PRESETS: Array<{ value: ColumnPreset; label: string }> = [
 const SYSTEM_VIEWS = [
   { id: "all", label: "全部地址" },
   { id: "watchlist", label: "Watchlist" },
+  { id: "review-needed", label: "需复核" },
   { id: "recent-created", label: "最近新增" },
   { id: "deleted", label: "已删除" }
 ] as const;
 
+// 检查器只保留两段：先看画像速览（值不值得跟），需要改资料时再看第二段。
+// 标签逐项编辑、记录流、分析摘要都已移到详情页，这里不再重复。
 const INSPECTOR_SECTIONS: Array<{ id: InspectorSection; label: string }> = [
-  { id: "overview", label: "概览" },
-  { id: "labels", label: "标签" },
-  { id: "records", label: "记录" },
-  { id: "analysis", label: "分析摘要" }
+  { id: "digest", label: "画像速览" },
+  { id: "meta", label: "资料" }
 ];
 
 const shortAddress = (address: string) =>
@@ -149,6 +142,9 @@ const getSystemViewId = (query: WalletListQuery) => {
   if (query.status === "watchlist") {
     return "watchlist";
   }
+  if (query.status === "review_needed") {
+    return "review-needed";
+  }
   if ((query.sort ?? "updated_desc") === "created_desc") {
     return "recent-created";
   }
@@ -198,24 +194,13 @@ const renderStatusBadge = (badge: WalletStatusBadge) => (
   </span>
 );
 
-const toLabelDraft = (label: WalletAdminRow["labels"][number]): LabelDraft => ({
-  name: label.name,
-  value: label.value,
-  kind: label.kind,
-  source: label.source,
-  evidence: label.evidence ?? "",
-  verificationNote: label.verificationNote ?? "",
-  sourceNote: label.sourceNote ?? ""
-});
 
 export const WalletsConsole = ({
   initialData,
-  savedViews,
   initialQuery,
   initialSelectedWalletDetail
 }: {
   initialData: WalletListResponse;
-  savedViews: WalletSavedView[];
   initialQuery: WalletListQuery;
   initialSelectedWalletDetail: WalletDetailData | null;
 }) => {
@@ -230,13 +215,15 @@ export const WalletsConsole = ({
   const [panelMode, setPanelMode] = useState<WalletListPanelMode>(initialQuery.panel ?? "inspect");
   const [panelTargetId, setPanelTargetId] = useState<string | null>(initialQuery.selected ?? null);
   const [panelOpen, setPanelOpen] = useState(Boolean(initialQuery.selected && initialQuery.panel));
-  const [panelSection, setPanelSection] = useState<InspectorSection>("overview");
+  const [panelSection, setPanelSection] = useState<InspectorSection>("digest");
   const [detail, setDetail] = useState<WalletDetailData | null>(initialSelectedWalletDetail);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const [columnPreset, setColumnPreset] = useState<ColumnPreset>("standard");
   const [density, setDensity] = useState<DensityMode>("compact");
+  const [labelPickerOpen, setLabelPickerOpen] = useState(false);
+  const [labelFacetQuery, setLabelFacetQuery] = useState("");
   const [panelPinned, setPanelPinned] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -256,15 +243,12 @@ export const WalletsConsole = ({
     labelVerificationNote: "",
     labelSourceNote: ""
   });
-  const [labelDrafts, setLabelDrafts] = useState<Record<string, LabelDraft>>({});
   const [viewportWidth, setViewportWidth] = useState(0);
   const [navigationHint, setNavigationHint] = useState(false);
 
   const sectionRefs = useRef<Record<InspectorSection, HTMLDivElement | null>>({
-    overview: null,
-    labels: null,
-    records: null,
-    analysis: null
+    digest: null,
+    meta: null
   });
   const deleteTimerRef = useRef<number | null>(null);
   const feedbackTimerRef = useRef<number | null>(null);
@@ -279,6 +263,28 @@ export const WalletsConsole = ({
     () => currentData.items.filter((row) => !optimisticDeletedIds.includes(row.wallet.id)),
     [currentData.items, optimisticDeletedIds]
   );
+  const labelFacetItems = useMemo(() => {
+    const query = labelFacetQuery.trim().toLowerCase();
+    const items = currentData.facetCounts.labelCounts.filter((item) =>
+      query
+        ? item.label.toLowerCase().includes(query) || item.key.toLowerCase().includes(query)
+        : true
+    );
+    return {
+      total: items.length,
+      visible: items
+    };
+  }, [currentData.facetCounts.labelCounts, labelFacetQuery]);
+  const versionGroups = useMemo(() => {
+    const groups = new Map<string, typeof currentData.facetCounts.versionCounts>();
+    for (const item of currentData.facetCounts.versionCounts) {
+      const name = item.name ?? "版本";
+      const list = groups.get(name) ?? [];
+      list.push(item);
+      groups.set(name, list);
+    }
+    return Array.from(groups.entries()).map(([name, items]) => ({ name, items }));
+  }, [currentData.facetCounts.versionCounts]);
   const currentPageIds = useMemo(() => visibleRows.map((row) => row.wallet.id), [visibleRows]);
   const selectedRows = useMemo(
     () => visibleRows.filter((row) => selectedIds.includes(row.wallet.id)),
@@ -289,14 +295,12 @@ export const WalletsConsole = ({
     detail?.wallet.id === panelTargetId
       ? detail.wallet
       : panelRow?.wallet ?? null;
-  const panelLabels =
-    detail?.wallet.id === panelTargetId
-      ? detail.labels
-      : panelRow?.labels ?? EMPTY_PANEL_LABELS;
   const panelFinderAi =
     detail?.wallet.id === panelTargetId
       ? detail.finderAi
       : panelRow?.finderAi;
+  const panelFinderProfile =
+    detail?.wallet.id === panelTargetId ? detail.finderProfile : undefined;
   const allCurrentPageSelected =
     currentPageIds.length > 0 && currentPageIds.every((walletId) => selectedIds.includes(walletId));
   const routeSyncing = navigationHint;
@@ -464,7 +468,7 @@ export const WalletsConsole = ({
     setPanelOpen(true);
     setPanelTargetId(walletId);
     setPanelMode(mode);
-    setPanelSection("overview");
+    setPanelSection("digest");
     setDetailError(null);
     updateLocalQuery({ ...queryState, selected: walletId, panel: mode, cursor: queryState.cursor });
   };
@@ -473,7 +477,7 @@ export const WalletsConsole = ({
     setFocusRowId(walletId);
     setPanelTargetId(walletId);
     setPanelMode("inspect");
-    setPanelSection("analysis");
+    setPanelSection("digest");
     setDetailError(null);
     setFinderAiOpen(true);
   };
@@ -503,6 +507,14 @@ export const WalletsConsole = ({
       return;
     }
 
+    if (viewId === "review-needed") {
+      patchQuery(
+        { view: viewId, status: "review_needed", includeDeleted: false, sort: "updated_desc" },
+        { resetCursor: true, clearSelection: true, closePanel: true }
+      );
+      return;
+    }
+
     if (viewId === "deleted") {
       patchQuery(
         { view: viewId, status: "deleted", includeDeleted: true, sort: "updated_desc" },
@@ -515,53 +527,6 @@ export const WalletsConsole = ({
       { view: viewId, status: "all", includeDeleted: false, sort: "updated_desc" },
       { resetCursor: true, clearSelection: true, closePanel: true }
     );
-  };
-
-  const applySavedView = (viewId: string) => {
-    const view = savedViews.find((item) => item.id === viewId);
-    if (!view) {
-      return;
-    }
-
-    setSearchDraft(view.query.q ?? "");
-    patchQuery(
-      {
-        ...view.query,
-        view: view.id,
-        selected: undefined,
-        panel: undefined
-      },
-      { resetCursor: true, clearSelection: true, closePanel: true }
-    );
-  };
-
-  const saveCurrentView = async () => {
-    const name = window.prompt("给这个视图起一个名字");
-    if (!name?.trim()) {
-      return;
-    }
-
-    const result = await fetchJson<WalletSavedView>("/api/wallets/views", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: name.trim(),
-        query: {
-          ...queryState,
-          cursor: undefined,
-          selected: undefined,
-          panel: undefined
-        }
-      })
-    });
-
-    if (!result.ok || !result.data) {
-      pushFeedback(result.error ?? "保存视图失败");
-      return;
-    }
-
-    pushFeedback(`已保存视图：${result.data.name}`);
-    refreshWorkspace();
   };
 
   const runBulkAction = async (action: "watchlist_add" | "watchlist_remove" | "soft_delete") => {
@@ -734,93 +699,6 @@ export const WalletsConsole = ({
       labelSourceNote: ""
     }));
     pushFeedback("已新增官方标签并写入备注");
-    refreshWorkspace();
-  };
-
-  const updateLabelDraftField = (
-    tagId: string,
-    field: keyof LabelDraft,
-    value: string
-  ) => {
-    setLabelDrafts((current) => {
-      const draft = current[tagId];
-      if (!draft) {
-        return current;
-      }
-      return {
-        ...current,
-        [tagId]: {
-          ...draft,
-          [field]: value
-        }
-      };
-    });
-  };
-
-  const saveLabelDraft = async (tagId: string) => {
-    const targetWalletId = panelTargetId;
-    if (!targetWalletId) {
-      return;
-    }
-
-    const draft = labelDrafts[tagId];
-    if (!draft?.name.trim() || !draft.value.trim()) {
-      pushFeedback("标签名称和值不能为空");
-      return;
-    }
-    if (draft.source !== "user") {
-      pushFeedback("仅官方标签支持在线编辑，AI/系统标签请通过导入流程调整。");
-      return;
-    }
-
-    const response = await fetch(`/api/wallets/${targetWalletId}/user-tags/${tagId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: draft.name.trim(),
-        value: draft.value.trim(),
-        kind: draft.kind,
-        source: draft.source,
-        evidence: draft.evidence.trim() || undefined,
-        verificationNote: draft.verificationNote.trim() || undefined,
-        sourceNote: draft.sourceNote.trim() || undefined
-      })
-    });
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    if (!response.ok) {
-      pushFeedback(payload.error ?? "标签更新失败");
-      return;
-    }
-
-    pushFeedback("标签已更新");
-    refreshWorkspace();
-  };
-
-  const removeLabelDraft = async (tagId: string) => {
-    const targetWalletId = panelTargetId;
-    if (!targetWalletId) {
-      return;
-    }
-
-    const draft = labelDrafts[tagId];
-    if (!draft) {
-      return;
-    }
-    if (draft.source !== "user") {
-      pushFeedback("仅官方标签支持删除。");
-      return;
-    }
-
-    const response = await fetch(`/api/wallets/${targetWalletId}/user-tags/${tagId}`, {
-      method: "DELETE"
-    });
-    const payload = (await response.json().catch(() => ({}))) as { error?: string };
-    if (!response.ok) {
-      pushFeedback(payload.error ?? "标签删除失败");
-      return;
-    }
-
-    pushFeedback("标签已删除");
     refreshWorkspace();
   };
 
@@ -1078,13 +956,6 @@ export const WalletsConsole = ({
   ]);
 
   useEffect(() => {
-    setLabelDrafts((current) => ({
-      ...current,
-      ...Object.fromEntries(panelLabels.map((label) => [label.id, toLabelDraft(label)]))
-    }));
-  }, [panelLabels]);
-
-  useEffect(() => {
     if (focusRowId && !visibleRows.some((row) => row.wallet.id === focusRowId)) {
       setFocusRowId(null);
     }
@@ -1197,7 +1068,7 @@ export const WalletsConsole = ({
             )
         }
       : null,
-    queryState.status && queryState.status !== "all" && queryState.status !== "review_needed"
+    queryState.status && queryState.status !== "all"
       ? {
           id: `status:${queryState.status}`,
           label: `状态：${STATUS_OPTIONS.find((item) => item.value === queryState.status)?.label ?? queryState.status}`,
@@ -1349,52 +1220,6 @@ export const WalletsConsole = ({
           </label>
 
           <label className={styles.compactField}>
-            <span className={styles.fieldLabel}>保存视图</span>
-            <select
-              className={styles.select}
-              value={queryState.view ?? ""}
-              onChange={(event) => {
-                const value = event.target.value;
-                if (!value) {
-                  patchQuery({ view: undefined }, { resetCursor: true, closePanel: true });
-                  return;
-                }
-                applySavedView(value);
-              }}
-            >
-              <option value="">未选择</option>
-              {savedViews.map((view) => (
-                <option key={view.id} value={view.id}>
-                  {view.name}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className={styles.compactField}>
-            <span className={styles.fieldLabel}>状态</span>
-            <select
-              className={styles.select}
-              value={queryState.status === "review_needed" ? "all" : queryState.status ?? "all"}
-              onChange={(event) =>
-                patchQuery(
-                  {
-                    status: event.target.value as WalletListQuery["status"],
-                    includeDeleted: event.target.value === "deleted"
-                  },
-                  { resetCursor: true, clearSelection: true, closePanel: true }
-                )
-              }
-            >
-              {STATUS_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className={styles.compactField}>
             <span className={styles.fieldLabel}>来源</span>
             <select
               className={styles.select}
@@ -1415,21 +1240,26 @@ export const WalletsConsole = ({
           </label>
 
           <label className={styles.compactField}>
-            <span className={styles.fieldLabel}>排序</span>
+            <span className={styles.fieldLabel}>版本</span>
             <select
               className={styles.select}
-              value={queryState.sort ?? "updated_desc"}
+              value={queryState.version ?? ""}
               onChange={(event) =>
                 patchQuery(
-                  { sort: event.target.value as WalletListQuery["sort"] },
+                  { version: event.target.value || undefined },
                   { resetCursor: true, clearSelection: true, closePanel: true }
                 )
               }
             >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
+              <option value="">全部版本</option>
+              {versionGroups.map((group) => (
+                <optgroup key={group.name} label={group.name}>
+                  {group.items.map((item) => (
+                    <option key={item.key} value={item.key}>
+                      {item.label}（{item.count}）
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </label>
@@ -1482,9 +1312,6 @@ export const WalletsConsole = ({
           </label>
 
           <div className={styles.filterActions}>
-            <button type="button" className={styles.ghostButton} onClick={saveCurrentView}>
-              保存当前视图
-            </button>
             <button type="button" className={styles.ghostButton} onClick={clearFilters}>
               清空筛选
             </button>
@@ -1493,24 +1320,66 @@ export const WalletsConsole = ({
 
         <div className={styles.filterFooter}>
           <div className={styles.viewRail}>
-            <span className={styles.fieldLabel}>热门标签</span>
-            <div className={styles.inlineTags}>
-              {currentData.facetCounts.labelCounts.slice(0, 8).map((label) => {
-                const active = (queryState.labels ?? []).includes(label.key);
-                return (
-                  <button
-                    key={label.key}
-                    type="button"
-                    className={`${styles.labelChip} ${active ? styles.labelChipActive : ""}`}
-                    onClick={() => toggleLabelFilter(label.key)}
-                  >
-                    <span>{label.label}</span>
-                    <strong>{label.count}</strong>
-                  </button>
-                );
-              })}
-            </div>
+            <span className={styles.fieldLabel}>标签筛选</span>
+            <button
+              type="button"
+              className={styles.ghostButton}
+              onClick={() => setLabelPickerOpen(true)}
+            >
+              {(queryState.labels ?? []).length > 0
+                ? `选择标签（已选 ${(queryState.labels ?? []).length}）`
+                : "选择标签"}
+            </button>
           </div>
+
+          {labelPickerOpen ? (
+            <div className={styles.labelPickerBackdrop} onClick={() => setLabelPickerOpen(false)}>
+              <div
+                className={styles.labelPickerPanel}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className={styles.labelPickerHead}>
+                  <strong>标签筛选 · 可多选 · 点空白处关闭</strong>
+                  <button
+                    type="button"
+                    className={styles.ghostButton}
+                    onClick={() => setLabelPickerOpen(false)}
+                  >
+                    关闭
+                  </button>
+                </div>
+                <input
+                  type="search"
+                  value={labelFacetQuery}
+                  onChange={(event) => setLabelFacetQuery(event.target.value)}
+                  placeholder="输入标签名快速定位"
+                  aria-label="按标签名快速定位筛选"
+                  className={styles.select}
+                />
+                <div className={styles.labelPickerTags}>
+                  {labelFacetItems.visible.map((label) => {
+                    const active = (queryState.labels ?? []).includes(label.key);
+                    return (
+                      <button
+                        key={label.key}
+                        type="button"
+                        data-tone={getLabelKindTone(label.kind)}
+                        className={`${styles.labelChip} ${active ? styles.labelChipActive : ""}`}
+                        onClick={() => toggleLabelFilter(label.key)}
+                        title={`${label.label}（${label.count} 个地址）`}
+                      >
+                        <span>{label.label}</span>
+                        <strong>{label.count}</strong>
+                      </button>
+                    );
+                  })}
+                  {labelFacetItems.visible.length === 0 ? (
+                    <span className={styles.fieldLabel}>没有匹配的标签</span>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           <div className={styles.activeFilters}>
             {activeFilterChips.map((chip) => (
@@ -1687,7 +1556,8 @@ export const WalletsConsole = ({
                     </td>
 
                     <td>
-                      <div className={styles.identityBlock}>
+                      <div className={styles.identityCell}>
+                        <div className={styles.identityBlock}>
                         <div className={styles.identityTop}>
                           <div className={styles.identityStack}>
                             <div className={styles.identityTitleRow}>
@@ -1752,7 +1622,7 @@ export const WalletsConsole = ({
 
                         <div className={styles.inlineTags}>
                           {highlightChips.map((badge) => (
-                            <span key={badge.id} className={styles.inlineTag}>
+                            <span key={badge.id} className={styles.inlineTag} data-tone={badge.tone}>
                               {badge.text}
                             </span>
                           ))}
@@ -1792,6 +1662,14 @@ export const WalletsConsole = ({
                           <div className={styles.inlineSuccess}>已删除，正在同步列表…</div>
                         ) : null}
                         {deleteError ? <div className={styles.inlineError}>{deleteError}</div> : null}
+                        </div>
+                        <WalletDigestCard
+                          row={row}
+                          onOpenInspector={(walletId) => openInspector(walletId, "inspect")}
+                          onOpenDetail={(walletId) => {
+                            window.location.href = `/wallets/${walletId}`;
+                          }}
+                        />
                       </div>
                     </td>
 
@@ -1927,11 +1805,28 @@ export const WalletsConsole = ({
             <>
               <div
                 ref={(node) => {
-                  sectionRefs.current.overview = node;
+                  sectionRefs.current.digest = node;
                 }}
                 className={styles.panelSection}
               >
-                <div className={styles.panelSectionTitle}>概览</div>
+                <div className={styles.panelSectionTitle}>画像速览</div>
+                <WalletInspectorDigest
+                  walletId={panelWallet.id}
+                  detail={detail}
+                  onOpenDetail={() => {
+                    closeInspector();
+                    window.location.href = `/wallets/${panelWallet.id}`;
+                  }}
+                />
+              </div>
+
+              <div
+                ref={(node) => {
+                  sectionRefs.current.meta = node;
+                }}
+                className={styles.panelSection}
+              >
+                <div className={styles.panelSectionTitle}>资料</div>
                 <div className={styles.metaCard}>
                   <div className={styles.metaRow}>
                     <span>显示名</span>
@@ -1977,29 +1872,33 @@ export const WalletsConsole = ({
                     <strong>{panelRow?.sourceMeta.label ?? panelWallet.sourceType}</strong>
                   </div>
                   <div className={styles.metaRow}>
-                    <span>来源批次</span>
-                    <strong>{panelRow?.sourceMeta.importBatchId ?? "未关联"}</strong>
+                    <span>Finder run</span>
+                    <strong>
+                      {panelRow?.sourceMeta.sourceName
+                        ? shortText(panelRow.sourceMeta.sourceName, 42)
+                        : "未记录"}
+                    </strong>
                   </div>
                   <div className={styles.metaRow}>
-                    <span>来源名称</span>
-                    <strong>{panelRow?.sourceMeta.sourceName ?? "未记录"}</strong>
+                    <span>导入批次</span>
+                    <strong>
+                      {panelRow?.sourceMeta.importBatchId
+                        ? `${panelRow.sourceMeta.importBatchId.slice(0, 8)}…`
+                        : "未关联"}
+                    </strong>
                   </div>
                   <div className={styles.metaRow}>
-                    <span>导入时间</span>
-                    <strong>{formatDate(panelRow?.sourceMeta.importedAt)}</strong>
+                    <span>导入 / 更新</span>
+                    <strong>
+                      {formatDate(panelRow?.sourceMeta.importedAt)} · {formatDate(panelWallet.updatedAt)}
+                    </strong>
                   </div>
-                  <div className={styles.metaRow}>
-                    <span>创建时间</span>
-                    <strong>{formatDate(panelWallet.createdAt)}</strong>
-                  </div>
-                  <div className={styles.metaRow}>
-                    <span>更新时间</span>
-                    <strong>{formatDate(panelWallet.updatedAt)}</strong>
-                  </div>
-                  <div className={styles.metaRow}>
-                    <span>删除时间</span>
-                    <strong>{panelWallet.deletedAt ? formatDate(panelWallet.deletedAt) : "未删除"}</strong>
-                  </div>
+                  {panelWallet.deletedAt ? (
+                    <div className={styles.metaRow}>
+                      <span>删除时间</span>
+                      <strong>{formatDate(panelWallet.deletedAt)}</strong>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className={styles.metaCard}>
@@ -2040,187 +1939,6 @@ export const WalletsConsole = ({
                     >
                       {panelWallet.watchlisted ? "移出 Watchlist" : "加入 Watchlist"}
                     </button>
-                  </div>
-                </div>
-              </div>
-
-              <div
-                ref={(node) => {
-                  sectionRefs.current.labels = node;
-                }}
-                className={styles.panelSection}
-              >
-                <div className={styles.panelSectionTitle}>标签维护</div>
-                <div className={styles.metaCard}>
-                  <div className={styles.labelCreateGrid}>
-                    <input
-                      className={styles.textInput}
-                      value={editForm.labelValue}
-                      placeholder="新增官方标签值，例如：高胜率-首尔"
-                      onChange={(event) =>
-                        setEditForm((current) => ({ ...current, labelValue: event.target.value }))
-                      }
-                    />
-                    <input
-                      className={styles.textInput}
-                      value={editForm.labelVerificationNote}
-                      placeholder="验证说明（可选）"
-                      onChange={(event) =>
-                        setEditForm((current) => ({ ...current, labelVerificationNote: event.target.value }))
-                      }
-                    />
-                    <input
-                      className={styles.textInput}
-                      value={editForm.labelSourceNote}
-                      placeholder="数据来源备注（可选）"
-                      onChange={(event) =>
-                        setEditForm((current) => ({ ...current, labelSourceNote: event.target.value }))
-                      }
-                    />
-                    <button type="button" className={styles.primaryButton} onClick={() => void addQuickLabel()}>
-                      新增官方标签
-                    </button>
-                  </div>
-
-                  <div className={styles.labelEditorList}>
-                    {panelLabels.length > 0 ? (
-                      panelLabels.map((label) => {
-                        const draft = labelDrafts[label.id] ?? toLabelDraft(label);
-                        const editable = label.source === "user";
-                        return (
-                          <div key={label.id} className={styles.labelEditorCard}>
-                            <div className={styles.labelEditorTop}>
-                              <span className={styles.panelTag}>{label.source === "user" ? "官方" : "AI"}</span>
-                              <span className={styles.identitySubtle}>{label.kind}</span>
-                            </div>
-                            <input
-                              className={styles.textInput}
-                              value={draft.value}
-                              readOnly={!editable}
-                              onChange={(event) => updateLabelDraftField(label.id, "value", event.target.value)}
-                            />
-                            <input
-                              className={styles.textInput}
-                              value={draft.verificationNote}
-                              placeholder="验证说明（官方标签建议填写）"
-                              readOnly={!editable}
-                              onChange={(event) =>
-                                updateLabelDraftField(label.id, "verificationNote", event.target.value)
-                              }
-                            />
-                            <input
-                              className={styles.textInput}
-                              value={draft.sourceNote}
-                              placeholder="来源备注（如 NOAA/NWS 或团队校验来源）"
-                              readOnly={!editable}
-                              onChange={(event) => updateLabelDraftField(label.id, "sourceNote", event.target.value)}
-                            />
-                            {editable ? (
-                              <div className={styles.inlineForm}>
-                                <button
-                                  type="button"
-                                  className={styles.ghostButton}
-                                  onClick={() => void saveLabelDraft(label.id)}
-                                >
-                                  保存
-                                </button>
-                                <button
-                                  type="button"
-                                  className={styles.dangerTextButton}
-                                  onClick={() => void removeLabelDraft(label.id)}
-                                >
-                                  删除
-                                </button>
-                              </div>
-                            ) : (
-                              <span className={styles.identitySubtle}>AI/系统标签为只读展示</span>
-                            )}
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <span className={styles.identitySubtle}>暂时还没有标签。</span>
-                    )}
-                  </div>
-                </div>
-              </div>
-
-              <div
-                ref={(node) => {
-                  sectionRefs.current.records = node;
-                }}
-                className={styles.panelSection}
-              >
-                <div className={styles.panelSectionTitle}>记录</div>
-                <div className={styles.timeline}>
-                  {(detail?.notes ?? []).slice(0, 5).map((note) => (
-                    <div key={note.id} className={styles.timelineItem}>
-                      <div className={styles.subtleHeader}>
-                        <strong>{note.action}</strong>
-                        <span>{formatDate(note.createdAt)}</span>
-                      </div>
-                      <div className={styles.longText}>{note.content}</div>
-                      <span>{note.actor}</span>
-                    </div>
-                  ))}
-                  {(detail?.notes?.length ?? 0) === 0 ? (
-                    <div className={styles.metaCard}>最近还没有操作记录。</div>
-                  ) : null}
-                </div>
-              </div>
-
-              <div
-                ref={(node) => {
-                  sectionRefs.current.analysis = node;
-                }}
-                className={styles.panelSection}
-              >
-                <div className={styles.panelSectionTitle}>分析摘要</div>
-                {panelFinderAi ? (
-                  <div className={styles.metaCard}>
-                    <div className={styles.subtleHeader}>
-                      <strong>Finder AI v6</strong>
-                      <span>{panelFinderAiMeta || formatDate(panelFinderAi.updatedAt)}</span>
-                    </div>
-                    <div className={styles.metaRow}>
-                      <span>结论 / 策略结论</span>
-                      <strong>{panelFinderAi.aiBriefShort || panelFinderAi.strategyFocus || "待补充"}</strong>
-                    </div>
-                    {panelFinderAi.aiBriefNote ? (
-                      <div>
-                        <span className={styles.identitySubtle}>摘要说明</span>
-                        <div className={styles.longText}>{shortText(panelFinderAi.aiBriefNote, 160)}</div>
-                      </div>
-                    ) : null}
-                    <div className={styles.editActions}>
-                      <button
-                        type="button"
-                        className={styles.primaryButton}
-                        onClick={() => setFinderAiOpen(true)}
-                      >
-                        查看 AI 解读详情
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className={styles.metaCard}>暂时还没有 Finder AI v6 深度解读。下一次 Finder 同步带上 finderAi 后会显示在这里。</div>
-                )}
-                <div className={styles.analysisGrid}>
-                  <div className={styles.metricCard}>
-                    <span>胜率</span>
-                    <strong>{detail?.metrics.weatherWinRate ?? "--"}%</strong>
-                  </div>
-                  <div className={styles.metricCard}>
-                    <span>平均提前</span>
-                    <strong>{detail?.metrics.averageEntryLeadMinutes ?? "--"}m</strong>
-                  </div>
-                  <div className={styles.metricCard}>
-                    <span>风险收益比</span>
-                    <strong>{detail?.metrics.avgRiskReward ?? "--"}</strong>
-                  </div>
-                  <div className={styles.metricCard}>
-                    <span>总 PnL</span>
-                    <strong>{detail?.metrics.totalRealizedPnlUsd ?? "--"} USD</strong>
                   </div>
                 </div>
               </div>
@@ -2375,8 +2093,8 @@ export const WalletsConsole = ({
         )}
       </Modal>
 
-      {feedback ? <div className={styles.loadingOverlay}>{feedback}</div> : null}
-      {routeSyncing ? <div className={styles.loadingOverlay}>正在同步最新结果...</div> : null}
+      {feedback ? <div className={styles.loadingOverlay} role="status" aria-live="polite">{feedback}</div> : null}
+      {routeSyncing ? <div className={styles.loadingOverlay} role="status" aria-live="polite">正在同步最新结果...</div> : null}
     </div>
   );
 };

@@ -3,6 +3,7 @@ import type { WalletLabelKind } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../../../../lib/admin-auth";
 import { deleteUserTag, updateUserTag } from "../../../../../../lib/data";
+import { invalidateWalletCache } from "../../../../../../lib/cache";
 
 export async function PATCH(
   request: Request,
@@ -65,6 +66,7 @@ export async function PATCH(
       return NextResponse.json({ error: "tag not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: tag }, { status: 200 });
   } catch (error) {
     console.error("update user tag failed", error);
@@ -92,6 +94,7 @@ export async function DELETE(
       return NextResponse.json({ error: "tag not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: removed }, { status: 200 });
   } catch (error) {
     console.error("delete user tag failed", error);
