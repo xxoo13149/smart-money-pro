@@ -110,6 +110,62 @@ CREATE TABLE IF NOT EXISTS wallet_import_batches (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS wallet_finder_ai_insights (
+  wallet_id TEXT PRIMARY KEY,
+  source_name TEXT,
+  run_id TEXT,
+  normalized_address TEXT,
+  strategy_focus TEXT,
+  ai_brief_short TEXT,
+  ai_brief_note TEXT,
+  ai_deep_note TEXT,
+  source_excerpt TEXT,
+  evidence_level TEXT,
+  has_conflict INTEGER NOT NULL DEFAULT 0,
+  needs_review INTEGER NOT NULL DEFAULT 0,
+  labels_json TEXT,
+  primary_signals_json TEXT,
+  key_metrics_json TEXT,
+  weather_signals_json TEXT,
+  provider_meta_json TEXT,
+  raw_json TEXT,
+  searchable_text TEXT NOT NULL DEFAULT '',
+  import_batch_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_finder_ai_run
+  ON wallet_finder_ai_insights(run_id, updated_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_finder_ai_updated
+  ON wallet_finder_ai_insights(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS wallet_finder_profiles (
+  wallet_id TEXT PRIMARY KEY,
+  source_name TEXT,
+  run_id TEXT,
+  normalized_address TEXT,
+  snapshot_as_of TEXT,
+  analysis_source TEXT,
+  metrics_json TEXT,
+  portrait_labels_json TEXT,
+  cities_json TEXT,
+  patterns_json TEXT,
+  strategy_metrics_json TEXT,
+  overview_json TEXT,
+  coverage_json TEXT,
+  searchable_text TEXT NOT NULL DEFAULT '',
+  import_batch_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (wallet_id) REFERENCES wallets(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_wallet_finder_profiles_updated
+  ON wallet_finder_profiles(updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS extension_invites (
   code TEXT PRIMARY KEY,
   member_label TEXT NOT NULL,
