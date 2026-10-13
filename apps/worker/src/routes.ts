@@ -58,6 +58,11 @@ const ADMIN_APPROVAL_SECRET_HEADER = "x-admin-approval-secret";
 const PASSWORD_ITERATIONS = 100_000;
 const PASSWORD_KEY_BITS = 256;
 const PASSWORD_SALT_BYTES = 16;
+const MAX_LOOKUP_ADDRESSES = 500;
+const clampSearchLimit = (value: string | null) => {
+  const parsed = Number(value ?? "12");
+  return Number.isFinite(parsed) ? Math.max(1, Math.min(25, Math.floor(parsed))) : 12;
+};
 const marketAnnotationInflight = new Map<
   string,
   Promise<{
@@ -830,6 +835,14 @@ export const handleLabelsLookup = async (request: Request, env: Env, ctx: Worker
     return buildJsonResponse({ error: "addresses is required" }, {}, 400);
   }
 
+  if (body.addresses.length > MAX_LOOKUP_ADDRESSES) {
+    return buildJsonResponse(
+      { error: `addresses cannot exceed ${MAX_LOOKUP_ADDRESSES} per request` },
+      {},
+      413
+    );
+  }
+
   const normalizedAddresses = Array.from(
     new Set(
       body.addresses
@@ -916,10 +929,14 @@ export const handleAddressSearch = async (request: Request, env: Env, ctx: Worke
 
   const url = new URL(request.url);
   const query = url.searchParams.get("q")?.trim() ?? "";
-  const limit = Number(url.searchParams.get("limit") ?? "12");
+  const limit = clampSearchLimit(url.searchParams.get("limit"));
 
   if (!query) {
     return buildJsonResponse({ items: [] satisfies AddressSearchResult[], version: "v0" });
+  }
+
+  if (query.length > 160) {
+    return buildJsonResponse({ error: "q is too long" }, {}, 400);
   }
 
   const version = `v${await getDatasetVersion(env.SMART_MONEY_DB, "address_labels")}`;

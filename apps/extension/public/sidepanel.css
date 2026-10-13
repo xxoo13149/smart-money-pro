@@ -378,6 +378,24 @@ body {
   border-color: rgba(112, 159, 255, 0.22);
 }
 
+.badge--core {
+  color: #d3c4ff;
+  background: rgba(148, 120, 255, 0.15);
+  border-color: rgba(148, 120, 255, 0.26);
+}
+
+.badge--portrait {
+  color: #a5e8d2;
+  background: rgba(72, 207, 170, 0.13);
+  border-color: rgba(72, 207, 170, 0.22);
+}
+
+.badge--external {
+  color: #e0bcff;
+  background: rgba(190, 120, 255, 0.12);
+  border-color: rgba(190, 120, 255, 0.2);
+}
+
 .badge--neutral {
   color: rgba(231, 239, 247, 0.82);
   background: rgba(231, 239, 247, 0.07);
@@ -446,4 +464,36 @@ body {
   .sidepanel-header {
     flex-direction: column;
   }
+}
+
+/* 版本更新通知（一次性可关闭） */
+.wsmx-update-notice {
+  margin: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(112, 159, 255, 0.35);
+  border-radius: 10px;
+  background: rgba(112, 159, 255, 0.1);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.wsmx-update-notice__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.wsmx-update-notice__close {
+  border: none;
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.wsmx-update-notice__close:hover {
+  opacity: 1;
+}
+.wsmx-update-notice__list {
+  margin: 6px 0 0;
+  padding-left: 18px;
 }

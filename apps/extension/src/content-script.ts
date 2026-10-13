@@ -675,6 +675,9 @@ type ContentRuntimeMessage =
 .wsmx-tag-list{display:flex;flex-wrap:wrap;gap:6px}
 .wsmx-tag{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:10px;border:1px solid transparent;max-width:236px}
 .wsmx-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-tag--core{color:#d3c4ff;background:rgba(148,120,255,.16);border-color:rgba(148,120,255,.3)}
+.wsmx-tag--portrait{color:#a5e8d2;background:rgba(72,207,170,.14);border-color:rgba(72,207,170,.26)}
+.wsmx-tag--external{color:#e0bcff;background:rgba(190,120,255,.13);border-color:rgba(190,120,255,.24)}
 .wsmx-tag--neutral,.wsmx-tag--ai-review{color:rgba(231,239,247,.9);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
 .wsmx-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.2)}
 .wsmx-tag--alert,.wsmx-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
@@ -722,6 +725,9 @@ type ContentRuntimeMessage =
         case "alert":
         case "danger":
         case "ai-review":
+        case "core":
+        case "portrait":
+        case "external":
           return tone;
         default:
           return "neutral";
@@ -1084,6 +1090,9 @@ type ContentRuntimeMessage =
 .wsmx-reader-tags{display:flex;flex-wrap:wrap;gap:6px}
 .wsmx-reader-tag{display:inline-flex;align-items:center;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid transparent;font-size:10px;line-height:1.2}
 .wsmx-reader-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-reader-tag--core{color:#d3c4ff;background:rgba(148,120,255,.16);border-color:rgba(148,120,255,.3)}
+.wsmx-reader-tag--portrait{color:#a5e8d2;background:rgba(72,207,170,.14);border-color:rgba(72,207,170,.26)}
+.wsmx-reader-tag--external{color:#e0bcff;background:rgba(190,120,255,.13);border-color:rgba(190,120,255,.24)}
 .wsmx-reader-tag--neutral{color:rgba(231,239,247,.86);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
 .wsmx-reader-tag--ai-review{color:#d7ddff;background:rgba(129,140,248,.13);border-color:rgba(129,140,248,.22)}
 .wsmx-reader-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.22)}
@@ -1117,6 +1126,9 @@ type ContentRuntimeMessage =
         case "alert":
         case "danger":
         case "ai-review":
+        case "core":
+        case "portrait":
+        case "external":
           return tone;
         default:
           return "neutral";

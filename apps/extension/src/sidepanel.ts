@@ -9,6 +9,7 @@ import {
   readStoredPopupState,
   sendExtensionMessage
 } from "./ui-state.js";
+import { maybeShowUpdateNotice } from "./update-notice.js";
 
 interface AddressSearchResult {
   address: string;
@@ -894,6 +895,11 @@ void hydrateStoredState()
   .finally(() => {
     void refreshState();
     void openStoredFocusTarget();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => void maybeShowUpdateNotice());
+    } else {
+      void maybeShowUpdateNotice();
+    }
   });
 startSurfaceInfoPoll();
 
