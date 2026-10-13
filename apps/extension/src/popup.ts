@@ -5,6 +5,7 @@ import {
   readStoredPopupState,
   sendExtensionMessage
 } from "./ui-state.js";
+import { maybeShowUpdateNotice } from "./update-notice.js";
 
 const loginForm = document.querySelector<HTMLFormElement>("#login-form");
 const emailInput = document.querySelector<HTMLInputElement>("#email");
@@ -415,6 +416,11 @@ void hydrateStoredState()
   .finally(() => {
     syncLoginButtonLabel();
     void refreshState();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => void maybeShowUpdateNotice());
+    } else {
+      void maybeShowUpdateNotice();
+    }
   });
 
 export {};

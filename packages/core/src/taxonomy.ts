@@ -64,8 +64,13 @@ export const LABEL_KIND_PRIORITY: Partial<Record<WalletLabelKind, number>> = {
   frequency_region: 540,
   geo_specialty: 460,
   trader_archetype: 380,
+  portrait_style: 340,
+  style: 330,
   new_wallet_signal: 300,
   early_entry_signal: 220,
+  husky_profile: 180,
+  strategy: 160,
+  data_status: 40,
   activity_level: 120
 };
 
@@ -75,6 +80,9 @@ const BADGE_TONE_PRIORITY: Record<AddressLabelBadge["tone"], number> = {
   danger: 25,
   "ai-review": 22,
   accent: 50,
+  core: 54,
+  portrait: 36,
+  external: 26,
   neutral: 10
 };
 

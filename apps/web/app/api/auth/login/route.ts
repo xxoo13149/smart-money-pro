@@ -51,12 +51,12 @@ export async function POST(request: Request) {
           session: result.session
         }
       });
-      attachAdminSessionCookie(response, request, result.token);
+      await attachAdminSessionCookie(response, request, result.token);
       return response;
     }
 
     const response = NextResponse.redirect(buildAuthRedirectLocation(request, nextPath), 303);
-    attachAdminSessionCookie(response, request, result.token);
+    await attachAdminSessionCookie(response, request, result.token);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : "登录失败";

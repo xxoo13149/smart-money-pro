@@ -1,7 +1,11 @@
 export type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
 export type {
-  WalletReviewAction,
-  WalletReviewActionInput
+  WalletLibraryExportData,
+  WalletLibraryExportRecord,
+  WalletImportBatchDetail,
+  WalletImportBatchSummary,
+  WalletImportOverview,
+  WalletImportsPageData
 } from "./data-service";
 export { getWalletsPageData } from "./wallets-page-data";
 export {
@@ -17,7 +21,6 @@ export {
 
 export {
   createAdminExtensionInvite,
-  applyWalletReviewAction,
   createManualWallet,
   createUserTag,
   updateUserTag,
@@ -26,10 +29,10 @@ export {
   createWalletNote,
   deleteWallet,
   getAdminExtensionOverview,
-  getAlertItems,
-  getAlerts,
   getDashboardData,
   getSmartMoneySchemaStatusReport,
+  exportWalletLibrary,
+  getWalletImportsPageData,
   getWalletDetail as getWalletById,
   getWalletList,
   listWalletAdminRows,

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAdminApiSession } from "../../../../lib/admin-auth";
 import { commitWalletImport, previewWalletImportText } from "../../../../lib/data";
+import { invalidateWalletCache } from "../../../../lib/cache";
 
 export async function POST(request: Request) {
   const auth = await requireAdminApiSession(request);
@@ -39,6 +40,7 @@ export async function POST(request: Request) {
       sourceName: file.name || "wallet-import.txt"
     }, auth.session.user.email);
 
+    await invalidateWalletCache();
     return NextResponse.json({
       data: {
         ...preview,

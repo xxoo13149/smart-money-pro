@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import type {
   WalletAiExtractPreviewRow,
   WalletAiProviderMeta,
+  WalletImportBatch,
   WalletImportPreviewRow,
   WalletPrimarySignal
 } from "@weather-smart-money/core";
@@ -12,10 +13,24 @@ import type {
 import { WALLET_IMPORT_FIELD_GUIDE, type WalletImportPreview } from "../lib/wallet-import";
 
 type PreviewMode = "ai" | "text";
-type SourceMode = "file" | "paste";
+export type WalletImportSourceMode = "file" | "paste" | "finder";
 
 interface AiPreviewResponse {
   rows: WalletAiExtractPreviewRow[];
+  providerMeta?: WalletAiProviderMeta;
+  fallbackReason?: string;
+}
+
+interface FinderPreviewResponse {
+  rows: WalletImportPreviewRow[];
+  sourceName: string;
+  runId?: string;
+  finderBaseUrl?: string;
+  totalRows: number;
+  validRows: number;
+  pulledRows?: number;
+  matchedRows?: number;
+  filteredOutRows?: number;
   providerMeta?: WalletAiProviderMeta;
   fallbackReason?: string;
 }
@@ -41,7 +56,7 @@ const WEATHER_GUIDE_BLOCKS = [
   {
     title: "系统现在怎么处理",
     body:
-      "现在会尽量接收搜索系统 AI 返回的全部结果，不再做过强的二次拦截。系统主要负责提炼短标签、压缩关键数据、方便人工查看。"
+      "现在会尽量接收搜索系统 AI 返回的全部结果，不再做过强的二次拦截。系统主要负责提炼短标签、压缩关键数据、方便后台快速查看。"
   },
   {
     title: "推荐输入模板",
@@ -73,6 +88,8 @@ const TEMPLATE_TEXT = `地址: 0x...
 重点观察原因: 持续跟踪样本
 原文证据摘录: Uses NWS/NOAA obs, watches D1 ensemble spread, leans upper tail when cloud cover clears late.`;
 
+const DEFAULT_FINDER_BASE_URL = "http://127.0.0.1:41874";
+
 const countValidRows = (rows: WalletImportPreviewRow[]) =>
   rows.filter((row) => row.errors.length === 0).length;
 
@@ -91,7 +108,7 @@ const getSignalQualityLabel = (row: WalletImportPreviewRow) => {
     case "high_signal":
       return "高信号";
     case "needs_review":
-      return "需复核";
+      return "信号不足";
     default:
       return "低信号";
   }
@@ -106,7 +123,7 @@ const getSignalQualityTone = (row: WalletImportPreviewRow) => {
     case "high_signal":
       return "watch";
     case "needs_review":
-      return "ai-review";
+      return "neutral";
     default:
       return "danger";
   }
@@ -128,21 +145,32 @@ const getPreviewSignals = (row: WalletImportPreviewRow): WalletPrimarySignal[] =
   isAiPreviewRow(row) ? row.primarySignals.slice(0, 4) : [];
 
 export const WalletImportPanel = ({
-  onCommitted
+  onCommitted,
+  initialSourceMode = "file"
 }: {
   onCommitted?: () => void;
+  initialSourceMode?: WalletImportSourceMode;
 }) => {
   const router = useRouter();
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [sourceMode, setSourceMode] = useState<SourceMode>("file");
+  const [sourceMode, setSourceMode] = useState<WalletImportSourceMode>(initialSourceMode);
   const [previewMode, setPreviewMode] = useState<PreviewMode>("ai");
   const [file, setFile] = useState<File | null>(null);
   const [pastedText, setPastedText] = useState("");
+  const [finderBaseUrl, setFinderBaseUrl] = useState(DEFAULT_FINDER_BASE_URL);
+  const [finderRunId, setFinderRunId] = useState("");
   const [preview, setPreview] = useState<WalletImportPreviewRow[] | null>(null);
+  const [previewErrorsOnly, setPreviewErrorsOnly] = useState(false);
+  const [previewExpanded, setPreviewExpanded] = useState(false);
   const [previewMeta, setPreviewMeta] = useState<{
     sourceName: string;
     detectedFormat?: string;
+    finderRunId?: string;
+    finderBaseUrl?: string;
+    pulledRows?: number;
+    matchedRows?: number;
+    filteredOutRows?: number;
     providerMeta?: WalletAiProviderMeta;
     fallbackReason?: string;
   } | null>(null);
@@ -151,15 +179,23 @@ export const WalletImportPanel = ({
   const [result, setResult] = useState<{
     createdCount: number;
     updatedCount: number;
+    finderAiUpsertedCount?: number;
     failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
+    importBatch?: WalletImportBatch;
   } | null>(null);
 
   useEffect(() => {
     setPreview(null);
+    setPreviewErrorsOnly(false);
+    setPreviewExpanded(false);
     setPreviewMeta(null);
     setResult(null);
     setStatus(null);
   }, [previewMode, sourceMode]);
+
+  useEffect(() => {
+    setSourceMode(initialSourceMode);
+  }, [initialSourceMode]);
 
   const resolveSource = async () => {
     if (sourceMode === "file") {
@@ -187,12 +223,50 @@ export const WalletImportPanel = ({
     setPending("preview");
     setResult(null);
     setStatus(
-      previewMode === "ai"
+      sourceMode === "finder"
+        ? "正在读取 Finder 候选地址并生成 AI 预览..."
+        : previewMode === "ai"
         ? "正在调用 AI 做天气交易结构化提取..."
         : "正在生成文本预览..."
     );
 
     try {
+      if (sourceMode === "finder") {
+        const response = await fetch("/api/finder/import/preview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            finderBaseUrl,
+            runId: finderRunId.trim() || "latest",
+            limit: 100
+          })
+        });
+        const payload = (await response.json().catch(() => ({}))) as {
+          data?: FinderPreviewResponse;
+          error?: string;
+        };
+
+        if (!response.ok || !payload.data) {
+          throw new Error(payload.error ?? "Finder 预览生成失败，请确认 Finder API 已启动。");
+        }
+
+        setPreview(payload.data.rows ?? []);
+        setPreviewMeta({
+          sourceName: payload.data.sourceName,
+          finderRunId: payload.data.runId,
+          finderBaseUrl: payload.data.finderBaseUrl,
+          pulledRows: payload.data.pulledRows,
+          matchedRows: payload.data.matchedRows,
+          filteredOutRows: payload.data.filteredOutRows,
+          providerMeta: payload.data.providerMeta,
+          fallbackReason: payload.data.fallbackReason
+        });
+        setStatus(
+          `Finder 预览完成：共拉取 ${payload.data.pulledRows ?? payload.data.totalRows} 条，命中标签 ${payload.data.matchedRows ?? payload.data.totalRows} 条，过滤 ${payload.data.filteredOutRows ?? 0} 条，${payload.data.validRows} 条可导入。`
+        );
+        return;
+      }
+
       const source = await resolveSource();
       const response = await fetch(
         previewMode === "ai" ? "/api/wallets/import/ai-preview" : "/api/wallets/import/text",
@@ -248,7 +322,11 @@ export const WalletImportPanel = ({
     }
 
     setPending("commit");
-    setStatus("正在提交地址资料并写入地址库...");
+    setStatus(
+      sourceMode === "finder"
+        ? "正在提交 Finder 地址资料并写入地址库..."
+        : "正在提交地址资料并写入地址库..."
+    );
 
     try {
       const response = await fetch("/api/wallets/import/commit", {
@@ -257,19 +335,25 @@ export const WalletImportPanel = ({
         body: JSON.stringify({
           rows: preview,
           mode:
-            previewMode === "ai" && previewMeta.providerMeta?.provider !== "none"
+            sourceMode === "finder"
+              ? "finder"
+              : previewMode === "ai" && previewMeta.providerMeta?.provider !== "none"
               ? "ai"
               : sourceMode === "paste"
                 ? "text"
                 : "file",
-          sourceName: previewMeta.sourceName
+          sourceType: sourceMode === "finder" ? "finder" : undefined,
+          sourceName: previewMeta.sourceName,
+          preserveExistingManualFields: sourceMode === "finder"
         })
       });
       const payload = (await response.json().catch(() => ({}))) as {
         data?: {
           createdCount: number;
           updatedCount: number;
+          finderAiUpsertedCount?: number;
           failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
+          importBatch?: WalletImportBatch;
         };
         error?: string;
       };
@@ -279,8 +363,12 @@ export const WalletImportPanel = ({
       }
 
       setResult(payload.data);
+      const finderAiStatus =
+        sourceMode === "finder"
+          ? `，Finder AI 深度解读 ${payload.data.finderAiUpsertedCount ?? 0} 条`
+          : "";
       setStatus(
-        `导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条，失败 ${payload.data.failedRows.length} 条。`
+        `${sourceMode === "finder" ? "Finder " : ""}导入完成：新增 ${payload.data.createdCount} 条，更新 ${payload.data.updatedCount} 条${finderAiStatus}，失败 ${payload.data.failedRows.length} 条。`
       );
 
       if (onCommitted) {
@@ -296,6 +384,28 @@ export const WalletImportPanel = ({
   };
 
   const validRows = preview ? countValidRows(preview) : 0;
+  const filteredPreview = previewErrorsOnly
+    ? preview?.filter((row) => row.errors.length > 0) ?? []
+    : preview ?? [];
+  const visiblePreviewRows = filteredPreview.slice(0, previewExpanded ? filteredPreview.length : 6);
+  const hiddenPreviewCount = Math.max(0, filteredPreview.length - visiblePreviewRows.length);
+  const batchWalletsHref = result?.importBatch
+    ? `/wallets?${new URLSearchParams({ batch: result.importBatch.id }).toString()}`
+    : null;
+  const batchDetailHref = result?.importBatch ? `/imports/batches/${result.importBatch.id}` : null;
+  const failedRowsText =
+    result?.failedRows
+      .map((item) => `Row ${item.rowNumber} - ${item.displayName}: ${item.reason}`)
+      .join("\n") ?? "";
+
+  const copyFailedRows = async () => {
+    if (!failedRowsText) {
+      return;
+    }
+
+    await navigator.clipboard?.writeText(failedRowsText);
+    setStatus("已复制失败行。");
+  };
 
   return (
     <div className="stack-item import-panel">
@@ -323,24 +433,33 @@ export const WalletImportPanel = ({
         >
           粘贴文本
         </button>
+        <button
+          type="button"
+          className={`segmented__item${sourceMode === "finder" ? " segmented__item--active" : ""}`}
+          onClick={() => setSourceMode("finder")}
+        >
+          Finder
+        </button>
       </div>
 
-      <div className="segmented">
-        <button
-          type="button"
-          className={`segmented__item${previewMode === "ai" ? " segmented__item--active" : ""}`}
-          onClick={() => setPreviewMode("ai")}
-        >
-          AI 结构化预览
-        </button>
-        <button
-          type="button"
-          className={`segmented__item${previewMode === "text" ? " segmented__item--active" : ""}`}
-          onClick={() => setPreviewMode("text")}
-        >
-          文本解析预览
-        </button>
-      </div>
+      {sourceMode !== "finder" ? (
+        <div className="segmented">
+          <button
+            type="button"
+            className={`segmented__item${previewMode === "ai" ? " segmented__item--active" : ""}`}
+            onClick={() => setPreviewMode("ai")}
+          >
+            AI 结构化预览
+          </button>
+          <button
+            type="button"
+            className={`segmented__item${previewMode === "text" ? " segmented__item--active" : ""}`}
+            onClick={() => setPreviewMode("text")}
+          >
+            文本解析预览
+          </button>
+        </div>
+      ) : null}
 
       <div className="import-grid">
         <div>
@@ -381,6 +500,27 @@ export const WalletImportPanel = ({
                 onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               />
             </>
+          ) : sourceMode === "finder" ? (
+            <div className="stack-list">
+              <label className="field-shell">
+                <span className="field-label">Finder API 地址</span>
+                <input
+                  value={finderBaseUrl}
+                  onChange={(event) => setFinderBaseUrl(event.target.value)}
+                  placeholder={DEFAULT_FINDER_BASE_URL}
+                  className="field-input"
+                />
+              </label>
+              <label className="field-shell">
+                <span className="field-label">分析任务 ID</span>
+                <input
+                  value={finderRunId}
+                  onChange={(event) => setFinderRunId(event.target.value)}
+                  placeholder="留空读取最近完成的 Finder 任务"
+                  className="field-input"
+                />
+              </label>
+            </div>
           ) : (
             <label className="field-shell">
               <span className="field-label">粘贴地址资料</span>
@@ -395,7 +535,9 @@ export const WalletImportPanel = ({
 
           <div className="subtle-row" style={{ marginTop: "0.85rem" }}>
             <span>
-              {previewMode === "ai"
+              {sourceMode === "finder"
+                ? "读取 Finder 的 selected_wallets 和钱包详情，先走 AI 识别预览，再确认写库。"
+                : previewMode === "ai"
                 ? "默认按 Gemini → Groq → 文本解析 的顺序降级，尽量保留搜索系统 AI 返回的重点结果。"
                 : "跳过 AI，直接用本地解析规则生成预览。"}
             </span>
@@ -407,18 +549,27 @@ export const WalletImportPanel = ({
                 void loadPreview();
               }}
             >
-              {pending === "preview" ? "生成中..." : "生成预览"}
+              {pending === "preview"
+                ? sourceMode === "finder"
+                  ? "读取中..."
+                  : "生成中..."
+                : sourceMode === "finder"
+                  ? "读取 Finder 候选"
+                  : "生成预览"}
             </button>
           </div>
 
           <div className="status-line" style={{ marginTop: "0.85rem" }}>
-            {status ?? "导入前会先生成预览，不会直接写库。"}
+              {status ??
+              (sourceMode === "finder"
+                ? "Finder 导入会保护已有手动维护字段，不会直接覆盖手动备注和手动标签。"
+                : "导入前会先生成预览，不会直接写库。")}
           </div>
         </div>
 
         <div className="stack-item import-guide">
           <h4 className="inline-title" style={{ marginBottom: "0.5rem" }}>
-            AI 导入指南
+            {sourceMode === "finder" ? "Finder 导入指南" : "AI 导入指南"}
           </h4>
           <div className="stack-list">
             {WEATHER_GUIDE_BLOCKS.map((block) => (
@@ -470,9 +621,13 @@ export const WalletImportPanel = ({
             <span>总条数 {preview.length}</span>
             <span>可导入 {validRows}</span>
             <span>异常 {preview.length - validRows}</span>
+            {previewMeta?.pulledRows ? <span>Finder 拉取 {previewMeta.pulledRows}</span> : null}
+            {previewMeta?.matchedRows !== undefined ? <span>命中标签 {previewMeta.matchedRows}</span> : null}
+            {previewMeta?.filteredOutRows ? <span>已过滤 {previewMeta.filteredOutRows}</span> : null}
             {previewMeta?.detectedFormat ? (
               <span>格式 {previewMeta.detectedFormat.toUpperCase()}</span>
             ) : null}
+            {previewMeta?.finderRunId ? <span>Finder {previewMeta.finderRunId}</span> : null}
             {previewMeta?.providerMeta ? (
               <span>
                 Provider {previewMeta.providerMeta.provider} / {previewMeta.providerMeta.model}
@@ -484,8 +639,36 @@ export const WalletImportPanel = ({
             <div className="empty-state">AI 不可用，已自动退回文本解析：{previewMeta.fallbackReason}</div>
           ) : null}
 
+          <div className="subtle-row">
+            <span>预览视图</span>
+            <button
+              type="button"
+              className="secondary-button"
+              onClick={() => setPreviewErrorsOnly((current) => !current)}
+            >
+              {previewErrorsOnly ? "显示全部行" : "只看异常"}
+            </button>
+            {hiddenPreviewCount > 0 ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setPreviewExpanded(true)}
+              >
+                展开其余 {hiddenPreviewCount} 行
+              </button>
+            ) : previewExpanded ? (
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setPreviewExpanded(false)}
+              >
+                收起预览
+              </button>
+            ) : null}
+          </div>
+
           <div className="stack-list">
-            {preview.slice(0, 6).map((row) => {
+            {visiblePreviewRows.map((row) => {
               const primarySignals = getPreviewSignals(row);
               const primaryTags = getPrimarySignalTags(row);
               const tags = primaryTags.length > 0 ? primaryTags : getPreviewTags(row);
@@ -560,7 +743,25 @@ export const WalletImportPanel = ({
               <div className="subtle-row">
                 <span>新增 {result.createdCount}</span>
                 <span>更新 {result.updatedCount}</span>
+                {sourceMode === "finder" ? <span>Finder AI {result.finderAiUpsertedCount ?? 0}</span> : null}
                 <span>失败 {result.failedRows.length}</span>
+              </div>
+              <div className="subtle-row">
+                {batchWalletsHref ? (
+                  <a className="secondary-button" href={batchWalletsHref}>
+                    打开本批地址
+                  </a>
+                ) : null}
+                {batchDetailHref ? (
+                  <a className="secondary-button" href={batchDetailHref}>
+                    查看批次详情
+                  </a>
+                ) : null}
+                {result.failedRows.length > 0 ? (
+                  <button type="button" className="secondary-button" onClick={() => void copyFailedRows()}>
+                    复制失败行
+                  </button>
+                ) : null}
               </div>
               {result.failedRows.slice(0, 5).map((item) => (
                 <div key={`${item.rowNumber}-${item.displayName}`} className="subtle-row">
@@ -583,7 +784,11 @@ export const WalletImportPanel = ({
                 void commitImport();
               }}
             >
-              {pending === "commit" ? "导入中..." : "确认导入"}
+              {pending === "commit"
+                ? "导入中..."
+                : sourceMode === "finder"
+                  ? "确认导入 Finder 地址"
+                  : "确认导入"}
             </button>
           </div>
         </div>

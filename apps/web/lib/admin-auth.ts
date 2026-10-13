@@ -3,6 +3,7 @@ import type { D1Database } from "@cloudflare/workers-types";
 import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { NextResponse } from "next/server";
+import { cache } from "react";
 
 import { getSmartMoneyBindings, type SmartMoneyBindings } from "./cloudflare-env";
 
@@ -16,7 +17,10 @@ const PASSWORD_ITERATIONS = 100_000;
 const PASSWORD_KEY_BITS = 256;
 const PASSWORD_SALT_BYTES = 16;
 const SESSION_TOKEN_BYTES = 32;
-const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1_000;
+const DEFAULT_ADMIN_SESSION_TTL_DAYS = 14;
+const MIN_ADMIN_SESSION_TTL_DAYS = 7;
+const MAX_ADMIN_SESSION_TTL_DAYS = 60;
+const DEFAULT_ADMIN_SESSION_TTL_MS = DEFAULT_ADMIN_SESSION_TTL_DAYS * 24 * 60 * 60 * 1_000;
 const SESSION_TOUCH_INTERVAL_MS = 5 * 60 * 1_000;
 const APPROVAL_CODE_DIGITS = 6;
 const DEFAULT_APPROVAL_CODE_TTL_MINUTES = 10;
@@ -25,7 +29,10 @@ const DEFAULT_APPROVAL_OWNER_EMAIL = "owner@example.com";
 const DEFAULT_APPROVAL_SENDER_EMAIL = "noreply@example.com";
 const DEFAULT_APPROVAL_SENDER_NAME = "Smart Money Admin";
 const APPROVAL_SECRET_HEADER = "x-admin-approval-secret";
+const ACCESS_JWT_HEADERS = ["cf-access-jwt-assertion", "cf-access-token"] as const;
 const SCHEMA_READY = new Map<string, Promise<unknown>>();
+const SHOULD_BOOTSTRAP_SCHEMA =
+  process.env.SMART_MONEY_BOOTSTRAP_SCHEMA === "true" || process.env.NODE_ENV !== "production";
 
 interface AdminUserRow {
   id: string;
@@ -100,6 +107,13 @@ export interface AdminAuthState {
   registrationApproval: AdminRegistrationApprovalConfig;
 }
 
+interface AdminAuthRequestState {
+  authReady: boolean;
+  session: AdminSessionContext | null;
+  accessEmail?: string;
+  registrationApproval: AdminRegistrationApprovalConfig;
+}
+
 const nowIso = () => new Date().toISOString();
 
 const normalizeEmail = (value: string) => value.trim().toLowerCase();
@@ -107,6 +121,18 @@ const normalizeEmail = (value: string) => value.trim().toLowerCase();
 const parsePositiveInt = (value: string | undefined, fallback: number) => {
   const parsed = Number.parseInt((value ?? "").trim(), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const resolveSessionTtlMs = (bindings?: SmartMoneyBindings | null) => {
+  const ttlDays = Math.min(
+    MAX_ADMIN_SESSION_TTL_DAYS,
+    Math.max(
+      MIN_ADMIN_SESSION_TTL_DAYS,
+      parsePositiveInt(bindings?.ADMIN_SESSION_TTL_DAYS, DEFAULT_ADMIN_SESSION_TTL_DAYS)
+    )
+  );
+
+  return ttlDays * 24 * 60 * 60 * 1_000;
 };
 
 const encodeHex = (buffer: ArrayBuffer) =>
@@ -142,6 +168,35 @@ const extractAccessEmail = (source: Pick<Headers, "get">) => {
 
   return undefined;
 };
+
+const hasAccessJwt = (source: Pick<Headers, "get">) =>
+  ACCESS_JWT_HEADERS.some((key) => Boolean(source.get(key)?.trim()));
+
+const isStrictAccessRequired = (bindings?: SmartMoneyBindings | null) => {
+  const configured =
+    bindings?.ADMIN_ACCESS_STRICT?.trim() ||
+    process.env.ADMIN_ACCESS_STRICT?.trim() ||
+    "";
+  return process.env.NODE_ENV === "production" && ["1", "true", "yes", "required"].includes(configured.toLowerCase());
+};
+
+const assertAccessBoundary = (
+  source: Pick<Headers, "get">,
+  bindings?: SmartMoneyBindings | null
+) => {
+  if (isAccessBoundarySatisfied(source, bindings)) {
+    return;
+  }
+
+  throw new Error("Cloudflare Access verification is required");
+};
+
+const isAccessBoundarySatisfied = (
+  source: Pick<Headers, "get">,
+  bindings?: SmartMoneyBindings | null
+) =>
+  !isStrictAccessRequired(bindings) ||
+  Boolean(extractAccessEmail(source) && hasAccessJwt(source));
 
 const extractCookieValue = (cookieHeader: string | null, key: string) => {
   if (!cookieHeader) {
@@ -182,25 +237,34 @@ const getSecureRequest = (request: Request) => {
   }
 };
 
-const buildCookieOptions = (request: Request) => ({
+const buildCookieOptions = (request: Request, sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS) => ({
   name: ADMIN_SESSION_COOKIE_NAME,
   httpOnly: true,
   sameSite: "lax" as const,
   secure: getSecureRequest(request),
   path: "/",
-  maxAge: Math.floor(SESSION_TTL_MS / 1_000)
+  maxAge: Math.floor(sessionTtlMs / 1_000)
 });
 
-const setSessionCookie = (response: NextResponse, request: Request, token: string) => {
+const setSessionCookie = (
+  response: NextResponse,
+  request: Request,
+  token: string,
+  sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS
+) => {
   response.cookies.set({
-    ...buildCookieOptions(request),
+    ...buildCookieOptions(request, sessionTtlMs),
     value: token
   });
 };
 
-const clearSessionCookie = (response: NextResponse, request: Request) => {
+const clearSessionCookie = (
+  response: NextResponse,
+  request: Request,
+  sessionTtlMs = DEFAULT_ADMIN_SESSION_TTL_MS
+) => {
   response.cookies.set({
-    ...buildCookieOptions(request),
+    ...buildCookieOptions(request, sessionTtlMs),
     value: "",
     maxAge: 0
   });
@@ -337,15 +401,17 @@ const ensureAuthDb = async () => {
     return null;
   }
 
-  const scopeKey = [
-    bindings.ADMIN_BASE_URL ?? "admin",
-    bindings.PUBLIC_EXTENSION_BASE_URL ?? "app"
-  ].join("|");
-  if (!SCHEMA_READY.has(scopeKey)) {
-    SCHEMA_READY.set(scopeKey, bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB));
-  }
+  if (SHOULD_BOOTSTRAP_SCHEMA) {
+    const scopeKey = [
+      bindings.ADMIN_BASE_URL ?? "admin",
+      bindings.PUBLIC_EXTENSION_BASE_URL ?? "app"
+    ].join("|");
+    if (!SCHEMA_READY.has(scopeKey)) {
+      SCHEMA_READY.set(scopeKey, bootstrapSmartMoneyDb(bindings.SMART_MONEY_DB));
+    }
 
-  await SCHEMA_READY.get(scopeKey)!;
+    await SCHEMA_READY.get(scopeKey)!;
+  }
 
   return {
     db: bindings.SMART_MONEY_DB,
@@ -467,24 +533,31 @@ const findSessionByToken = async (
   return result ?? null;
 };
 
-const touchSession = async (db: D1Database, session: AdminSessionRow) => {
+const touchSession = async (
+  db: D1Database,
+  session: AdminSessionRow,
+  sessionTtlMs: number
+) => {
   const lastSeenAt = Date.parse(session.last_seen_at);
-  if (Number.isNaN(lastSeenAt) || Date.now() - lastSeenAt < SESSION_TOUCH_INTERVAL_MS) {
+  if (!Number.isNaN(lastSeenAt) && Date.now() - lastSeenAt < SESSION_TOUCH_INTERVAL_MS) {
     return;
   }
 
   const touchedAt = nowIso();
+  const nextExpiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
   await db
     .prepare(
       `UPDATE admin_sessions
        SET last_seen_at = ?,
+           expires_at = ?,
            updated_at = ?
        WHERE id = ?`
     )
-    .bind(touchedAt, touchedAt, session.id)
+    .bind(touchedAt, nextExpiresAt, touchedAt, session.id)
     .run();
 
   session.last_seen_at = touchedAt;
+  session.expires_at = nextExpiresAt;
   session.updated_at = touchedAt;
 };
 
@@ -506,12 +579,13 @@ const revokeSessionByToken = async (db: D1Database, token: string) => {
 const createSessionRecord = async (
   db: D1Database,
   request: Request,
-  user: AdminUserRow
+  user: AdminUserRow,
+  sessionTtlMs: number
 ): Promise<{ token: string; session: AdminSessionContext }> => {
   const token = createSessionToken();
   const tokenHash = await hashSessionToken(token);
   const createdAt = nowIso();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
+  const expiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
   const sessionId = crypto.randomUUID();
 
   await db
@@ -557,7 +631,12 @@ const createSessionRecord = async (
   };
 };
 
-const resolveLoginEmail = (request: Request, submittedEmail?: string | null) => {
+const resolveLoginEmail = (
+  request: Request,
+  submittedEmail?: string | null,
+  bindings?: SmartMoneyBindings | null
+) => {
+  assertAccessBoundary(request.headers, bindings);
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const normalizedSubmitted = submittedEmail ? normalizeEmail(submittedEmail) : undefined;
 
@@ -572,7 +651,12 @@ const resolveLoginEmail = (request: Request, submittedEmail?: string | null) => 
   return normalizedSubmitted;
 };
 
-const resolveRegistrationEmail = (request: Request, submittedEmail?: string | null) => {
+const resolveRegistrationEmail = (
+  request: Request,
+  submittedEmail?: string | null,
+  bindings?: SmartMoneyBindings | null
+) => {
+  assertAccessBoundary(request.headers, bindings);
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const normalizedSubmitted = submittedEmail ? normalizeEmail(submittedEmail) : undefined;
 
@@ -653,6 +737,14 @@ const resolveSessionFromRequest = async (
   const accessEmail = getAccessVerifiedEmailFromRequest(request);
   const sessionToken = extractCookieValue(request.headers.get("cookie"), ADMIN_SESSION_COOKIE_NAME);
 
+  if (!isAccessBoundarySatisfied(request.headers, auth?.bindings)) {
+    return {
+      session: null,
+      accessEmail: undefined,
+      shouldClearCookie: Boolean(sessionToken)
+    };
+  }
+
   if (!auth || !sessionToken) {
     return {
       session: null,
@@ -678,7 +770,8 @@ const resolveSessionFromRequest = async (
     };
   }
 
-  await touchSession(auth.db, row);
+  const sessionTtlMs = resolveSessionTtlMs(auth.bindings);
+  await touchSession(auth.db, row, sessionTtlMs);
 
   return {
     session: buildSessionContext(row),
@@ -692,7 +785,7 @@ export const getAccessVerifiedEmailFromRequest = (request: Request) =>
 
 export const getAccessVerifiedEmail = async () => extractAccessEmail(await headers());
 
-export const getAdminAuthState = async (): Promise<AdminAuthState> => {
+const resolveAdminRequestState = cache(async (): Promise<AdminAuthRequestState> => {
   const auth = await ensureAuthDb();
   const headerStore = await headers();
   const cookieStore = await cookies();
@@ -700,12 +793,19 @@ export const getAdminAuthState = async (): Promise<AdminAuthState> => {
   const sessionToken = cookieStore.get(ADMIN_SESSION_COOKIE_NAME)?.value;
   const registrationApproval = getApprovalConfigFromBindings(auth?.bindings);
 
+  if (!isAccessBoundarySatisfied(headerStore, auth?.bindings)) {
+    return {
+      authReady: Boolean(auth),
+      session: null,
+      registrationApproval
+    };
+  }
+
   if (!auth) {
     return {
       authReady: false,
       session: null,
       accessEmail,
-      hasAccountForAccessEmail: false,
       registrationApproval
     };
   }
@@ -714,32 +814,57 @@ export const getAdminAuthState = async (): Promise<AdminAuthState> => {
   if (sessionToken) {
     const row = await findSessionByToken(auth.db, sessionToken);
     if (row && !row.revoked_at && !row.user_disabled_at && Date.parse(row.expires_at) > Date.now()) {
-      await touchSession(auth.db, row);
+      await touchSession(auth.db, row, resolveSessionTtlMs(auth.bindings));
       session = buildSessionContext(row);
     }
   }
-
-  const hasAccountForAccessEmail = accessEmail
-    ? Boolean(await findUserByNormalizedEmail(auth.db, accessEmail))
-    : false;
 
   return {
     authReady: true,
     session,
     accessEmail,
-    hasAccountForAccessEmail,
     registrationApproval
+  };
+});
+
+const resolveHasAccountForAccessEmail = cache(async (accessEmail?: string) => {
+  if (!accessEmail) {
+    return false;
+  }
+
+  const auth = await ensureAuthDb();
+  if (!auth) {
+    return false;
+  }
+
+  return Boolean(await findUserByNormalizedEmail(auth.db, accessEmail));
+});
+
+export const getAdminAuthState = async (): Promise<AdminAuthState> => {
+  const state = await resolveAdminRequestState();
+  const hasAccountForAccessEmail =
+    state.authReady && !state.session && state.accessEmail
+      ? await resolveHasAccountForAccessEmail(state.accessEmail)
+      : false;
+
+  return {
+    ...state,
+    hasAccountForAccessEmail
   };
 };
 
 export const requireAdminPageSession = async (nextPath = "/") => {
-  const state = await getAdminAuthState();
+  const state = await resolveAdminRequestState();
   if (state.session) {
     return state.session;
   }
 
+  const hasAccountForAccessEmail =
+    state.authReady && state.accessEmail
+      ? await resolveHasAccountForAccessEmail(state.accessEmail)
+      : false;
   const target = state.accessEmail
-    ? state.hasAccountForAccessEmail
+    ? hasAccountForAccessEmail
       ? "/auth/login"
       : "/auth/register"
     : "/auth/login";
@@ -797,7 +922,7 @@ export const requestAdminRegistrationApprovalCode = async (
     throw new Error("管理员审批邮件尚未配置完成");
   }
 
-  const normalizedEmail = resolveRegistrationEmail(request, input.email);
+  const normalizedEmail = resolveRegistrationEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("请先填写注册邮箱");
   }
@@ -939,7 +1064,7 @@ export const registerAdminUser = async (
     throw new Error("admin auth storage is unavailable");
   }
 
-  const normalizedEmail = resolveRegistrationEmail(request, input.email);
+  const normalizedEmail = resolveRegistrationEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("请先填写注册邮箱");
   }
@@ -1037,7 +1162,7 @@ export const registerAdminUser = async (
     disabled_at: null
   };
 
-  return createSessionRecord(auth.db, request, createdUser);
+  return createSessionRecord(auth.db, request, createdUser, resolveSessionTtlMs(auth.bindings));
 };
 
 export const loginAdminUser = async (
@@ -1052,7 +1177,7 @@ export const loginAdminUser = async (
     throw new Error("admin auth storage is unavailable");
   }
 
-  const normalizedEmail = resolveLoginEmail(request, input.email);
+  const normalizedEmail = resolveLoginEmail(request, input.email, auth.bindings);
   if (!normalizedEmail) {
     throw new Error("缺少登录邮箱");
   }
@@ -1097,7 +1222,7 @@ export const loginAdminUser = async (
     updated_at: loggedAt,
     last_login_at: loggedAt,
     access_verified_at: accessVerifiedEmail ?? user.access_verified_at
-  });
+  }, resolveSessionTtlMs(auth.bindings));
 };
 
 export const logoutAdminSession = async (request: Request) => {
@@ -1108,19 +1233,26 @@ export const logoutAdminSession = async (request: Request) => {
   }
 };
 
-export const attachAdminSessionCookie = (
+export const attachAdminSessionCookie = async (
   response: NextResponse,
   request: Request,
   token: string
 ) => {
-  setSessionCookie(response, request, token);
+  const bindings = await getSmartMoneyBindings();
+  setSessionCookie(response, request, token, resolveSessionTtlMs(bindings));
 };
 
 export const clearAdminSessionCookie = (response: NextResponse, request: Request) => {
   clearSessionCookie(response, request);
 };
 
-export const getAdminLayoutState = async () => getAdminAuthState();
+export const getAdminLayoutState = async (): Promise<AdminAuthState> => {
+  const state = await resolveAdminRequestState();
+  return {
+    ...state,
+    hasAccountForAccessEmail: false
+  };
+};
 
 export const getAdminSessionSnapshot = async () => {
   const state = await getAdminAuthState();

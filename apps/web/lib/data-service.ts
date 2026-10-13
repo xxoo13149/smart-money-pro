@@ -1,11 +1,10 @@
 ﻿import {
-  ALERT_EVENT_META,
   computeDashboardSummary,
   computeMarketDigests,
   computeWalletMetrics,
   deriveSystemLabels,
-  generateAlertEvents,
   getLabelKindPriority,
+  getLabelKindTone,
   getWalletLabelDisplayKey,
   isPrimarySignalLabelKind,
   markets as seedMarkets,
@@ -19,11 +18,18 @@
   type AdminExtensionSessionItem,
   type AlertEvent,
   type NoteAuditLog,
+  type PositionSnapshot,
+  type Trade,
   type Wallet,
+  type DashboardLibraryDigest,
   type WalletAdminRow,
   type WalletAiExtractRequest,
   type WalletAiExtractPreviewRow,
   type WalletFacetSummary,
+  type WalletFinderAiInsight,
+  type WalletFinderMetricsDigest,
+  type WalletFinderProfile,
+  type WalletFinderProfileMetric,
   type WalletImportBatch,
   type WalletImportCommitRequest,
   type WalletImportPreviewRow,
@@ -37,6 +43,7 @@
   type WalletTableRow,
   type WatchlistEntry
 } from "@weather-smart-money/core";
+import type { D1Database } from "@cloudflare/workers-types";
 import {
   bootstrapSmartMoneyDb,
   createExtensionInvite as createPersistedExtensionInvite,
@@ -50,15 +57,24 @@ import {
   deleteWalletSavedView as deletePersistedWalletSavedView,
   getExtensionOverview as getPersistedExtensionOverview,
   getSmartMoneySchemaStatus as getPersistedSmartMoneySchemaStatus,
+  getWalletImportBatchById as getPersistedWalletImportBatchById,
+  getLabelLibraryStats,
   getWalletFacetSummary as getPersistedWalletFacetSummary,
   getWalletById as getPersistedWalletById,
   getWalletSavedViewById as getPersistedWalletSavedViewById,
   listExtensionInvites as listPersistedExtensionInvites,
   listExtensionSessions as listPersistedExtensionSessions,
+  listWalletImportBatches as listPersistedWalletImportBatches,
+  listWalletImportBatchesByIds,
+  incrementDatasetVersion,
   listWalletPage as listPersistedWalletPage,
+  listWalletNotesByWalletIds,
   listWalletSavedViews as listPersistedWalletSavedViews,
   listWalletAuditLogsByWalletIds,
   listWalletLabelsByWalletIds,
+  listWalletFinderAiInsightsByWalletIds,
+  listWalletFinderProfileMetricsByWalletIds,
+  listWalletsByImportBatchIds,
   listWallets as listPersistedWallets,
   removeWalletWatchlist as removePersistedWalletWatchlist,
   revokeExtensionSession as revokePersistedExtensionSession,
@@ -74,18 +90,22 @@ import {
   updateWalletLabel as updatePersistedWalletLabel,
   updateWalletSavedView as updatePersistedWalletSavedView,
   updateWallet as updatePersistedWallet,
+  upsertWalletFinderAiInsight as upsertPersistedWalletFinderAiInsight,
+  upsertWalletFinderProfile as upsertPersistedWalletFinderProfile,
+  getDashboardLibraryDigest,
+  listWalletFinderProfilesByWalletIds as listPersistedWalletFinderProfilesByWalletIds,
   upsertWalletWatchlist as upsertPersistedWalletWatchlist,
   listWatchlistEntriesByWalletIds
 } from "@weather-smart-money/data";
+import { cache } from "react";
 
-import type { AlertListItem, DashboardData, WalletDetailData } from "./demo-store";
+import type { DashboardData, WalletDetailData } from "./demo-store";
 import {
   createUserTag as createDemoUserTag,
   createWallet as createDemoWallet,
   createWalletNote as createDemoWalletNote,
   getDashboardData as getDemoDashboardData,
   getWalletDetail as getDemoWalletDetail,
-  listAlerts as listDemoAlerts,
   listWalletRows as listDemoWalletRows,
   removeWatchlistEntry as removeDemoWatchlistEntry,
   softDeleteWallet as softDeleteDemoWallet,
@@ -113,10 +133,8 @@ import {
 interface PersistedWalletContext {
   wallets: Wallet[];
   walletRows: WalletTableRow[];
-  alertItems: AlertListItem[];
   labelsByWalletId: Map<string, WalletLabel[]>;
-  auditLogsByWalletId: Map<string, NoteAuditLog[]>;
-  watchlistByWalletId: Map<string, WatchlistEntry>;
+  finderAiByWalletId: Map<string, WalletFinderAiInsight>;
 }
 
 export interface WalletImportCommitResult {
@@ -124,16 +142,106 @@ export interface WalletImportCommitResult {
   updatedCount: number;
   failedRows: Array<{ rowNumber: number; displayName: string; reason: string }>;
   importBatch?: WalletImportBatch;
+  finderAiUpsertedCount?: number;
+}
+
+export interface WalletImportBatchSummary {
+  batch: WalletImportBatch;
+  sourceLabel: string;
+  walletCount: number;
+  successCount: number;
+  existingOverlapCount: number;
+  activeCount: number;
+  deletedCount: number;
+  watchlistedCount: number;
+  officialLabelCount: number;
+  aiLabelCount: number;
+  promotedLabels: string[];
+}
+
+export interface WalletImportOverview {
+  totalBatches: number;
+  finderBatches: number;
+  importedWallets: number;
+  importedRows7d: number;
+  failedRows7d: number;
+  promotedLabels7d: number;
+}
+
+export interface WalletImportBatchDetail extends WalletImportBatchSummary {
+  latestOperationAt?: string;
+  operationActors: string[];
+}
+
+export interface WalletImportsPageData {
+  overview: WalletImportOverview;
+  batches: WalletImportBatchSummary[];
+  selectedBatch: WalletImportBatchDetail | null;
+  selectedBatchRows: WalletAdminRow[];
+}
+
+export interface WalletExportNoteRecord {
+  id: string;
+  content: string;
+  actor: string;
+  createdAt: string;
+}
+
+export interface WalletLibraryExportRecord {
+  wallet: Wallet;
+  summaryText: string;
+  highlights: AddressLabelBadge[];
+  statusBadges: WalletStatusBadge[];
+  sourceMeta: WalletAdminRow["sourceMeta"];
+  lastActivityAt: string;
+  labels: WalletLabel[];
+  notes: WalletExportNoteRecord[];
+  auditLogs: NoteAuditLog[];
+  watchlistEntry?: WatchlistEntry;
+  importBatch?: WalletImportBatch;
+  finderAi?: WalletFinderAiInsight;
+  metrics: WalletDetailData["metrics"];
+  trades: Trade[];
+  positions: PositionSnapshot[];
+  alerts: AlertEvent[];
+}
+
+export interface WalletLibraryExportData {
+  schemaVersion: "wallet-library-export/v1";
+  source: "smart-money-admin";
+  exportMode: "full" | "delta";
+  exportedAt: string;
+  changedSince?: string;
+  totalWallets: number;
+  includeDeleted: boolean;
+  query: WalletListQuery;
+  mergeHints: {
+    primaryKey: "wallet.normalizedAddress";
+    deletedFlagField: "wallet.deletedAt";
+    walletUpdatedAtField: "wallet.updatedAt";
+    labelIdentityFields: readonly ["kind", "value", "source"];
+    noteIdentityField: "id";
+    auditLogIdentityField: "id";
+  };
+  wallets: WalletLibraryExportRecord[];
 }
 
 const demoSavedViews: WalletSavedView[] = [];
 const SCHEMA_READY = new Map<string, Promise<void>>();
+const SHOULD_BOOTSTRAP_SCHEMA =
+  process.env.SMART_MONEY_BOOTSTRAP_SCHEMA === "true" || process.env.NODE_ENV !== "production";
 const MAX_IMPORT_ALIAS_LENGTH = 18;
 const MAX_IMPORT_SUMMARY_LENGTH = 84;
 const MAX_IMPORT_NOTE_LENGTH = 320;
 const MAX_IMPORT_EXCERPT_LENGTH = 320;
 const compactImportText = (value: string | null | undefined) =>
   (value ?? "").replace(/\s+/g, " ").trim();
+
+const compactSearchText = (value: string) =>
+  [" ", "\t", "\n", "\r", "_", "-", ".", ":", "/"].reduce(
+    (current, token) => current.split(token).join(""),
+    value.toLowerCase()
+  );
 
 const truncateImportText = (value: string, maxLength: number) =>
   value.length <= maxLength ? value : `${value.slice(0, maxLength - 3).trimEnd()}...`;
@@ -260,16 +368,16 @@ const sanitizeWalletImportRowForCommit = (
 };
 
 const resolveImportCurationStatus = (row: WalletImportPreviewRow): Wallet["curationStatus"] => {
-  if (isWalletAiPreviewRow(row)) {
-    return "review_needed";
-  }
-
-  return row.warnings.length > 0 ? "review_needed" : "active";
+  return "active";
 };
 
 const ensurePersistedBindings = async (): Promise<SmartMoneyBindings | null> => {
   const bindings = await getSmartMoneyBindings();
   if (!bindings?.SMART_MONEY_DB) {
+    return bindings;
+  }
+
+  if (!SHOULD_BOOTSTRAP_SCHEMA) {
     return bindings;
   }
 
@@ -308,35 +416,74 @@ const groupByWalletId = <T extends { walletId: string }>(items: T[]) => {
   return map;
 };
 
-const buildPersistedAlertItems = (wallets: Wallet[]): AlertListItem[] => {
-  const alerts = generateAlertEvents(wallets, seedTrades, seedPositions);
-
-  return alerts
-    .map((alert) => {
-      const wallet = wallets.find((item) => item.id === alert.walletId);
-      if (!wallet) {
-        return null;
-      }
-
-      const market = seedMarkets.find((item) => item.id === alert.marketId);
-      return {
-        alert,
-        wallet,
-        market,
-        eventLabel: ALERT_EVENT_META[alert.eventType].label,
-        eventDescription: ALERT_EVENT_META[alert.eventType].description
-      };
-    })
-    .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((left, right) => right.alert.alertScore - left.alert.alertScore);
+const buildLatestTradeByWalletId = () => {
+  const map = new Map<string, (typeof seedTrades)[number]>();
+  seedTrades.forEach((trade) => {
+    const current = map.get(trade.walletId);
+    if (!current || Date.parse(trade.enteredAt) > Date.parse(current.enteredAt)) {
+      map.set(trade.walletId, trade);
+    }
+  });
+  return map;
 };
+
+const latestTradeByWalletId = buildLatestTradeByWalletId();
+
+const getWalletSourceShortLabel = (sourceType: WalletSourceType) =>
+  sourceType === "manual"
+    ? "手动"
+    : sourceType === "finder"
+      ? "Finder"
+      : sourceType === "ai"
+        ? "AI"
+        : sourceType === "file"
+          ? "文件"
+          : "系统";
+
+const getWalletSourceLabel = (sourceType: WalletSourceType) =>
+  sourceType === "manual"
+    ? "手动录入"
+    : sourceType === "finder"
+      ? "Finder 导入"
+      : sourceType === "ai"
+        ? "AI 导入"
+        : sourceType === "file"
+        ? "文件导入"
+        : "系统内置";
+
+const isFinderImportBatch = (batch?: WalletImportBatch) =>
+  batch?.sourceType === "finder" || batch?.sourceName?.toLowerCase().includes("finder") === true;
+
+const getImportBatchSourceLabel = (batch: WalletImportBatch) =>
+  isFinderImportBatch(batch) ? "Finder 导入" : getWalletSourceLabel(batch.sourceType);
+
+const buildWalletAdminSourceMeta = (
+  wallet: Wallet,
+  importBatch?: WalletImportBatch
+): WalletAdminRow["sourceMeta"] => ({
+  type: wallet.sourceType,
+  label:
+    isFinderImportBatch(importBatch)
+      ? importBatch?.sourceName
+        ? `Finder / ${importBatch.sourceName}`
+        : "Finder 导入"
+      : getWalletSourceLabel(wallet.sourceType),
+  importedAt: wallet.lastImportedAt,
+  importBatchId: wallet.importBatchId,
+  sourceName: importBatch?.sourceName,
+  provider: importBatch?.provider,
+  model: importBatch?.model,
+  fallbackUsed: importBatch?.fallbackUsed,
+  batchCreatedAt: importBatch?.createdAt
+});
 
 const buildHighlightBadges = (wallet: Wallet, labels: WalletLabel[]): AddressLabelBadge[] => {
   const preferredLabels = labels.filter(
     (label) =>
       label.kind !== "signal_quality" &&
       label.kind !== "market_scope" &&
-      label.kind !== "confidence"
+      label.kind !== "confidence" &&
+      label.kind !== "data_status"
   );
 
   return sortAddressBadges(
@@ -348,7 +495,7 @@ const buildHighlightBadges = (wallet: Wallet, labels: WalletLabel[]): AddressLab
           ? "accent"
           : label.kind === "activity_level" && label.value.includes("正常")
             ? "watch"
-            : "neutral",
+            : getLabelKindTone(label.kind),
       kind: label.kind,
       priority: getLabelKindPriority(label.kind) + (label.source === "user" ? 2000 : 0),
       detailText: label.name,
@@ -377,43 +524,16 @@ const buildStatusBadges = (wallet: Wallet): WalletStatusBadge[] => {
       text: "已删除",
       tone: "danger"
     });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "AI 待确认",
-      tone: "ai-review"
-    });
   }
 
   badges.push({
     id: `${wallet.id}-${wallet.sourceType}`,
-    text:
-      wallet.sourceType === "manual"
-        ? "手动"
-        : wallet.sourceType === "ai"
-          ? "AI"
-          : wallet.sourceType === "file"
-            ? "文件"
-            : "系统",
+    text: getWalletSourceShortLabel(wallet.sourceType),
     tone: "neutral"
   });
 
   return badges;
 };
-
-const buildSourceMeta = (wallet: Wallet): WalletAdminRow["sourceMeta"] => ({
-  type: wallet.sourceType,
-  label:
-    wallet.sourceType === "manual"
-      ? "手动录入"
-      : wallet.sourceType === "ai"
-        ? "AI 结构化"
-        : wallet.sourceType === "file"
-          ? "文件导入"
-          : "系统内置",
-  importedAt: wallet.lastImportedAt,
-  importBatchId: wallet.importBatchId
-});
 
 const buildWalletAdminSummaryText = (wallet: Wallet) =>
   buildSummaryText(wallet);
@@ -434,87 +554,118 @@ const buildWalletAdminStatusBadges = (wallet: Wallet): WalletStatusBadge[] => {
       text: "已删除",
       tone: "danger"
     });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "AI 待确认",
-      tone: "ai-review"
-    });
   }
 
   badges.push({
     id: `${wallet.id}-${wallet.sourceType}`,
-    text:
-      wallet.sourceType === "manual"
-        ? "手动"
-        : wallet.sourceType === "ai"
-          ? "AI"
-          : wallet.sourceType === "file"
-            ? "文件"
-            : "系统",
+    text: getWalletSourceShortLabel(wallet.sourceType),
     tone: "neutral"
   });
 
   return badges;
 };
 
-const buildWalletAdminSourceMeta = (wallet: Wallet): WalletAdminRow["sourceMeta"] => ({
-  type: wallet.sourceType,
-  label:
-    wallet.sourceType === "manual"
-      ? "手动录入"
-      : wallet.sourceType === "ai"
-        ? "AI 导入"
-        : wallet.sourceType === "file"
-          ? "文件导入"
-          : "系统内置",
-  importedAt: wallet.lastImportedAt,
-  importBatchId: wallet.importBatchId
-});
-
-const buildWalletAdminRow = (row: WalletTableRow): WalletAdminRow => ({
+const buildWalletAdminRow = (
+  row: WalletTableRow,
+  importBatch?: WalletImportBatch,
+  finderDigest?: WalletFinderMetricsDigest
+): WalletAdminRow => ({
   wallet: row.wallet,
   labels: row.labels,
+  finderAi: row.finderAi,
+  finderDigest,
   highlights: buildHighlightBadges(row.wallet, row.labels),
-  summaryText: buildWalletAdminSummaryText(row.wallet),
+  summaryText: row.finderAi?.aiBriefShort || row.finderAi?.strategyFocus || buildWalletAdminSummaryText(row.wallet),
   statusBadges: buildWalletAdminStatusBadges(row.wallet),
-  sourceMeta: buildWalletAdminSourceMeta(row.wallet),
-  lastActivityAt: row.wallet.updatedAt
+  sourceMeta: buildWalletAdminSourceMeta(row.wallet, importBatch),
+  lastActivityAt:
+    [row.wallet.updatedAt, row.finderAi?.updatedAt]
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0] ?? row.wallet.updatedAt
 });
 
-const buildPersistedContext = async (filters?: WalletListFilters): Promise<PersistedWalletContext | null> => {
+// 把画像的 metrics 列表压成悬浮卡直接可用的几个数字。
+// 百分比类指标在 Finder 侧已经是 0-1 小数，这里原样保留，展示层再乘 100。
+const buildFinderDigest = (
+  walletId: string,
+  source?: { metrics: WalletFinderProfileMetric[]; snapshotAsOf?: string }
+): WalletFinderMetricsDigest | undefined => {
+  if (!source || source.metrics.length === 0) {
+    return undefined;
+  }
+
+  const byKey = new Map(source.metrics.map((metric) => [metric.key, metric.value]));
+  const num = (key: string): number | undefined => {
+    const value = byKey.get(key);
+    return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+  };
+  const str = (key: string): string | undefined => {
+    const value = byKey.get(key);
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  };
+
+  return {
+    totalPnlUsd: num("total_pnl_usd"),
+    volumeUsd: num("volume_usd"),
+    trades: num("trades"),
+    resolvedPositions: num("resolved_positions"),
+    winRate: num("position_win_rate") ?? num("closed_position_win_rate"),
+    roi: num("roi"),
+    avgStakeUsd: num("avg_stake_usd"),
+    weatherShare: num("weather_notional_ratio"),
+    topCity: str("dominant_region"),
+    peakBurstUsd: num("highest_burst"),
+    bestMultiple: num("max_closed_position_profit_multiple"),
+    snapshotAsOf: source.snapshotAsOf
+  };
+};
+
+const buildPersistedWalletsContextUncached = async (
+  filters?: WalletListFilters
+): Promise<{ wallets: Wallet[] } | null> => {
   const bindings = await ensurePersistedBindings();
   if (!bindings?.SMART_MONEY_DB) {
     return null;
   }
 
-  const wallets = await listPersistedWallets(bindings.SMART_MONEY_DB, filters);
-  const walletIds = wallets.map((wallet) => wallet.id);
-  const [userLabelsByWalletId, auditLogsByWalletId, watchlistByWalletId] = await Promise.all([
+  return {
+    wallets: await listPersistedWallets(bindings.SMART_MONEY_DB, filters)
+  };
+};
+
+const getPersistedWalletsContext = cache(async () => buildPersistedWalletsContextUncached());
+
+const buildPersistedWalletsContext = async (
+  filters?: WalletListFilters
+): Promise<{ wallets: Wallet[] } | null> =>
+  filters ? buildPersistedWalletsContextUncached(filters) : getPersistedWalletsContext();
+
+const buildPersistedContextUncached = async (
+  filters?: WalletListFilters
+): Promise<PersistedWalletContext | null> => {
+  const persisted = await buildPersistedWalletsContext(filters);
+  const bindings = await ensurePersistedBindings();
+  if (!persisted || !bindings?.SMART_MONEY_DB) {
+    return null;
+  }
+
+  const walletIds = persisted.wallets.map((wallet) => wallet.id);
+  const [userLabelsByWalletId, finderAiByWalletId] = await Promise.all([
     listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
-    listWalletAuditLogsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
-    listWatchlistEntriesByWalletIds(bindings.SMART_MONEY_DB, walletIds)
+    listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
   ]);
-
   const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
-  const allLabels = deriveSystemLabels(wallets, allUserLabels, seedTrades);
+  const allLabels = deriveSystemLabels(persisted.wallets, allUserLabels, seedTrades);
   const labelsByWalletId = groupByWalletId(allLabels);
-  const alertItems = buildPersistedAlertItems(wallets);
 
-  const walletRows = wallets
+  const walletRows = persisted.wallets
     .map((wallet) => ({
       wallet,
       metrics: computeWalletMetrics(wallet, seedTrades),
       labels: labelsByWalletId.get(wallet.id) ?? [],
-      activeAlertCount: alertItems.filter(
-        (item) => item.wallet.id === wallet.id && item.alert.status === "open"
-      ).length,
-      latestTrade: seedTrades
-        .filter((trade) => trade.walletId === wallet.id)
-        .sort(
-          (left, right) =>
-            new Date(right.enteredAt).getTime() - new Date(left.enteredAt).getTime()
-        )[0]
+      finderAi: finderAiByWalletId.get(wallet.id),
+      activeAlertCount: 0,
+      latestTrade: latestTradeByWalletId.get(wallet.id)
     }))
     .sort((left, right) => {
       if (left.wallet.watchlisted !== right.wallet.watchlisted) {
@@ -524,17 +675,39 @@ const buildPersistedContext = async (filters?: WalletListFilters): Promise<Persi
     });
 
   return {
-    wallets,
+    ...persisted,
     walletRows,
-    alertItems,
     labelsByWalletId,
-    auditLogsByWalletId,
-    watchlistByWalletId
+    finderAiByWalletId
   };
 };
 
-const mapWalletRowsToAdminRows = (walletRows: WalletTableRow[]): WalletAdminRow[] =>
-  walletRows.map(buildWalletAdminRow);
+const getPersistedContext = cache(async () => buildPersistedContextUncached());
+
+const buildPersistedContext = async (filters?: WalletListFilters): Promise<PersistedWalletContext | null> =>
+  filters ? buildPersistedContextUncached(filters) : getPersistedContext();
+
+const getImportBatchMapForWallets = async (
+  db: NonNullable<SmartMoneyBindings["SMART_MONEY_DB"]>,
+  wallets: Wallet[]
+) => {
+  const batchIds = Array.from(
+    new Set(wallets.map((wallet) => wallet.importBatchId).filter((value): value is string => Boolean(value)))
+  );
+
+  return listWalletImportBatchesByIds(db, batchIds);
+};
+
+const mapWalletRowsToAdminRows = (
+  walletRows: WalletTableRow[],
+  importBatchesById?: Map<string, WalletImportBatch>
+): WalletAdminRow[] =>
+  walletRows.map((row) =>
+    buildWalletAdminRow(
+      row,
+      row.wallet.importBatchId ? importBatchesById?.get(row.wallet.importBatchId) : undefined
+    )
+  );
 
 const createManualWalletInput = (payload: WalletManualCreateInput): WalletInput => ({
   address: payload.address,
@@ -569,6 +742,734 @@ const createImportWalletPayload = (
   lastImportedAt: input.importedAt
 });
 
+const createPreservedImportWalletUpdate = (
+  existing: Wallet,
+  row: WalletImportPreviewRow,
+  input: {
+    sourceType: WalletSourceType;
+    curationStatus: Wallet["curationStatus"];
+    importBatchId?: string;
+    importedAt: string;
+  }
+): WalletUpdate => ({
+  address: row.wallet.address || existing.address,
+  displayName: existing.displayName || row.wallet.displayName,
+  alias: existing.alias ?? row.wallet.alias,
+  bio: existing.bio || row.wallet.bio,
+  strategyFocus: existing.strategyFocus || row.wallet.strategyFocus,
+  teamNote: existing.teamNote ?? row.wallet.teamNote,
+  firstSeenAt: existing.firstSeenAt || row.wallet.firstSeenAt,
+  sourceType: input.sourceType,
+  curationStatus: input.curationStatus,
+  lastImportedAt: input.importedAt,
+  importBatchId: input.importBatchId
+});
+
+const FAST_IMPORT_CHAIN = "polygon" as const;
+const FAST_IMPORT_SQL_IN_CHUNK_SIZE = 80;
+const FAST_IMPORT_BATCH_SIZE = 50;
+
+type FastImportPreparedRow = {
+  row: WalletImportPreviewRow | WalletAiExtractPreviewRow;
+  normalizedAddress: Wallet["normalizedAddress"];
+};
+
+type FastImportWalletRecord = {
+  id: string;
+  chain: Wallet["chain"];
+  address: string;
+  normalizedAddress: Wallet["normalizedAddress"];
+  displayName: string;
+  alias?: string;
+  bio: string;
+  strategyFocus: string;
+  teamNote?: string;
+  firstSeenAt: string;
+  sourceType: WalletSourceType;
+  curationStatus: Wallet["curationStatus"];
+  lastImportedAt?: string;
+  importBatchId?: string;
+  createdAt: string;
+  updatedAt: string;
+  watchlisted: boolean;
+};
+
+const chunkFastImportItems = <T,>(items: readonly T[], size: number) => {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+  return chunks;
+};
+
+const buildFastImportPlaceholders = (items: readonly unknown[]) =>
+  items.map(() => "?").join(", ");
+
+const toDbString = (value: unknown) => (value === undefined || value === null ? "" : String(value));
+
+const mapFastImportWalletRow = (row: Record<string, unknown>): Wallet => ({
+  id: String(row.id),
+  chain: (row.chain ? String(row.chain) : FAST_IMPORT_CHAIN) as Wallet["chain"],
+  address: String(row.address),
+  normalizedAddress: String(row.normalized_address) as Wallet["normalizedAddress"],
+  displayName: toDbString(row.display_name),
+  alias: row.alias ? String(row.alias) : undefined,
+  bio: row.bio ? String(row.bio) : "",
+  firstSeenAt: toDbString(row.first_seen_at || row.created_at || new Date().toISOString()),
+  strategyFocus: row.strategy_focus ? String(row.strategy_focus) : "",
+  teamNote: row.team_note ? String(row.team_note) : undefined,
+  watchlisted: Number(row.watchlisted ?? 0) === 1,
+  createdAt: toDbString(row.created_at || row.first_seen_at || new Date().toISOString()),
+  updatedAt: toDbString(row.updated_at || row.created_at || row.first_seen_at || new Date().toISOString()),
+  deletedAt: row.deleted_at ? String(row.deleted_at) : undefined,
+  sourceType: (row.source_type ? String(row.source_type) : "system") as WalletSourceType,
+  curationStatus: (
+    row.curation_status
+      ? String(row.curation_status)
+      : row.deleted_at
+        ? "deleted"
+        : "active"
+  ) as Wallet["curationStatus"],
+  lastImportedAt: row.last_imported_at ? String(row.last_imported_at) : undefined,
+  importBatchId: row.import_batch_id ? String(row.import_batch_id) : undefined
+});
+
+const stringifyFastImportJsonField = (value: unknown) =>
+  value === undefined || value === null ? null : JSON.stringify(value);
+
+const buildFastImportFinderProfileSearchableText = (input: WalletFinderProfile) =>
+  [
+    input.runId,
+    input.sourceName,
+    input.analysisSource,
+    ...input.metrics.flatMap((metric) => [metric.label, String(metric.value ?? "")]),
+    ...input.portraitLabels.flatMap((label) => [label.name, label.code, label.description]),
+    ...input.cities.map((city) => city.city)
+  ]
+    .map((value) => compactImportText(value))
+    .filter(Boolean)
+    .join(" ");
+
+const buildFastImportFinderAiSearchableText = (input: WalletFinderAiInsight) =>
+  [
+    input.strategyFocus,
+    input.aiBriefShort,
+    input.aiBriefNote,
+    input.aiDeepNote,
+    input.sourceExcerpt,
+    input.evidenceLevel,
+    input.providerMeta?.model,
+    input.providerMeta?.promptVersion,
+    ...(input.labels ?? []).flatMap((label) => [label.kind, label.value, label.source, label.evidence]),
+    ...(input.primarySignals ?? []).flatMap((signal) => [signal.key, signal.label, signal.reason]),
+    ...(input.keyMetrics ?? []).flatMap((metric) => [metric.key, metric.label, String(metric.value ?? "")])
+  ]
+    .map((value) => compactImportText(value))
+    .filter(Boolean)
+    .join(" ");
+
+const nullableFastImportText = (value?: string | null) => {
+  const text = value?.trim();
+  return text ? text : null;
+};
+
+const runFastImportStatements = async (
+  db: D1Database,
+  statements: ReturnType<D1Database["prepare"]>[]
+) => {
+  for (const chunk of chunkFastImportItems(statements, FAST_IMPORT_BATCH_SIZE)) {
+    if (chunk.length > 0) {
+      await db.batch(chunk);
+    }
+  }
+};
+
+const listFastImportWalletRowsByAddress = async (
+  db: D1Database,
+  normalizedAddresses: readonly Wallet["normalizedAddress"][]
+) => {
+  const uniqueAddresses = Array.from(new Set(normalizedAddresses));
+  const rows: Record<string, unknown>[] = [];
+
+  for (const chunk of chunkFastImportItems(uniqueAddresses, FAST_IMPORT_SQL_IN_CHUNK_SIZE)) {
+    const result = await db
+      .prepare(
+        `SELECT *
+         FROM wallets
+         WHERE chain = ?
+           AND normalized_address IN (${buildFastImportPlaceholders(chunk)})`
+      )
+      .bind(FAST_IMPORT_CHAIN, ...chunk)
+      .all<Record<string, unknown>>();
+    rows.push(...(result.results ?? []));
+  }
+
+  return rows;
+};
+
+const listFastImportUserLabelKeysByWalletId = async (
+  db: D1Database,
+  walletIds: readonly string[]
+) => {
+  const keysByWalletId = new Map<string, Set<string>>();
+  const uniqueWalletIds = Array.from(new Set(walletIds));
+
+  for (const walletId of uniqueWalletIds) {
+    keysByWalletId.set(walletId, new Set());
+  }
+
+  for (const chunk of chunkFastImportItems(uniqueWalletIds, FAST_IMPORT_SQL_IN_CHUNK_SIZE)) {
+    const result = await db
+      .prepare(
+        `SELECT wallet_id, kind, value
+         FROM wallet_user_labels
+         WHERE source = 'user'
+           AND wallet_id IN (${buildFastImportPlaceholders(chunk)})`
+      )
+      .bind(...chunk)
+      .all<Record<string, unknown>>();
+
+    for (const row of result.results ?? []) {
+      const walletId = String(row.wallet_id);
+      const labelKey = getWalletLabelDisplayKey(
+        String(row.kind) as WalletLabel["kind"],
+        String(row.value ?? "")
+      );
+      const keys = keysByWalletId.get(walletId) ?? new Set<string>();
+      keys.add(labelKey);
+      keysByWalletId.set(walletId, keys);
+    }
+  }
+
+  return keysByWalletId;
+};
+
+const buildFastImportWalletRecord = (
+  existing: Wallet | undefined,
+  row: WalletImportPreviewRow | WalletAiExtractPreviewRow,
+  input: {
+    sourceType: WalletSourceType;
+    curationStatus: Wallet["curationStatus"];
+    importBatchId?: string;
+    importedAt: string;
+    preserveExistingManualFields?: boolean;
+  }
+): FastImportWalletRecord => {
+  const normalizedAddress = normalizeAddress(row.wallet.address);
+  if (!normalizedAddress) {
+    throw new Error("缺少有效地址");
+  }
+
+  const base = createImportWalletPayload(row, input);
+  const update =
+    existing && !existing.deletedAt && input.preserveExistingManualFields
+      ? createPreservedImportWalletUpdate(existing, row, input)
+      : base;
+  const timestamp = input.importedAt;
+
+  return {
+    id: existing?.id ?? crypto.randomUUID(),
+    chain: existing?.chain ?? FAST_IMPORT_CHAIN,
+    address: update.address?.trim() || existing?.address || row.wallet.address.trim(),
+    normalizedAddress,
+    displayName: update.displayName?.trim() || existing?.displayName || row.wallet.displayName.trim(),
+    alias: update.alias?.trim() || undefined,
+    bio: update.bio?.trim() ?? "",
+    strategyFocus: update.strategyFocus?.trim() ?? "",
+    teamNote: update.teamNote?.trim() || undefined,
+    firstSeenAt: update.firstSeenAt?.trim() || existing?.firstSeenAt || timestamp,
+    sourceType: input.sourceType,
+    curationStatus: input.curationStatus,
+    lastImportedAt: input.importedAt,
+    importBatchId: input.importBatchId,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    watchlisted: existing?.watchlisted ?? false
+  };
+};
+
+const commitFinderWalletImportFast = async (
+  request: WalletImportCommitRequest,
+  actor: string,
+  db: D1Database,
+  input: {
+    importedAt: string;
+    sourceType: WalletSourceType;
+    providerMeta?: WalletAiExtractPreviewRow["providerMeta"];
+  }
+): Promise<WalletImportCommitResult> => {
+  const importBatch = await createPersistedWalletImportBatch(db, {
+    sourceType: input.sourceType,
+    sourceName: request.sourceName ?? null,
+    provider: input.providerMeta?.provider ?? null,
+    model: input.providerMeta?.model ?? null,
+    fallbackUsed: input.providerMeta?.fallbackUsed ?? false,
+    actor,
+    rowCount: request.rows.length,
+    createdCount: 0,
+    updatedCount: 0,
+    failedCount: 0
+  });
+  const failedRows: WalletImportCommitResult["failedRows"] = [];
+  const preparedByAddress = new Map<string, FastImportPreparedRow>();
+
+  for (const row of request.rows) {
+    if (row.errors.length > 0) {
+      failedRows.push({
+        rowNumber: row.rowNumber,
+        displayName: getWalletImportDisplayName(row),
+        reason: row.errors.join(" / ")
+      });
+      continue;
+    }
+
+    try {
+      const commitRow = sanitizeWalletImportRowForCommit(row);
+      const normalizedAddress = normalizeAddress(commitRow.wallet.address);
+      if (!normalizedAddress) {
+        throw new Error("缺少有效地址");
+      }
+      preparedByAddress.set(normalizedAddress, {
+        row: commitRow,
+        normalizedAddress
+      });
+    } catch (error) {
+      failedRows.push({
+        rowNumber: row.rowNumber,
+        displayName: getWalletImportDisplayName(row),
+        reason: error instanceof Error ? error.message : "unknown import error"
+      });
+    }
+  }
+
+  const preparedRows = Array.from(preparedByAddress.values());
+  if (preparedRows.length === 0) {
+    const finalizedEmptyBatch =
+      (await updatePersistedWalletImportBatch(db, importBatch.id, {
+        createdCount: 0,
+        updatedCount: 0,
+        failedCount: failedRows.length
+      })) ?? importBatch;
+
+    return {
+      createdCount: 0,
+      updatedCount: 0,
+      failedRows,
+      finderAiUpsertedCount: 0,
+      importBatch: finalizedEmptyBatch
+    };
+  }
+
+  const existingRows = await listFastImportWalletRowsByAddress(
+    db,
+    preparedRows.map((row) => row.normalizedAddress)
+  );
+  const existingByAddress = new Map(
+    existingRows.map((row) => {
+      const wallet = mapFastImportWalletRow(row);
+      return [wallet.normalizedAddress, wallet] as const;
+    })
+  );
+
+  let createdCount = 0;
+  let updatedCount = 0;
+  const walletRecords = preparedRows.map((prepared) => {
+    const existing = existingByAddress.get(prepared.normalizedAddress);
+    if (existing && !existing.deletedAt) {
+      updatedCount += 1;
+    } else {
+      createdCount += 1;
+    }
+
+    return buildFastImportWalletRecord(existing, prepared.row, {
+      sourceType: input.sourceType,
+      curationStatus: resolveImportCurationStatus(prepared.row),
+      importBatchId: importBatch.id,
+      importedAt: input.importedAt,
+      preserveExistingManualFields: request.preserveExistingManualFields
+    });
+  });
+
+  const walletUpsertStatements = walletRecords.map((wallet) =>
+    db
+      .prepare(
+        `INSERT INTO wallets (
+          id,
+          chain,
+          address,
+          normalized_address,
+          display_name,
+          alias,
+          bio,
+          strategy_focus,
+          team_note,
+          first_seen_at,
+          source_type,
+          curation_status,
+          last_imported_at,
+          import_batch_id,
+          created_at,
+          updated_at,
+          watchlisted
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chain, normalized_address) DO UPDATE SET
+          address = excluded.address,
+          display_name = excluded.display_name,
+          alias = excluded.alias,
+          bio = excluded.bio,
+          strategy_focus = excluded.strategy_focus,
+          team_note = excluded.team_note,
+          source_type = excluded.source_type,
+          curation_status = excluded.curation_status,
+          last_imported_at = excluded.last_imported_at,
+          import_batch_id = excluded.import_batch_id,
+          updated_at = excluded.updated_at,
+          deleted_at = NULL,
+          deleted_by = NULL,
+          delete_reason = NULL`
+      )
+      .bind(
+        wallet.id,
+        wallet.chain,
+        wallet.address,
+        wallet.normalizedAddress,
+        wallet.displayName,
+        wallet.alias ?? null,
+        wallet.bio,
+        wallet.strategyFocus,
+        wallet.teamNote ?? null,
+        wallet.firstSeenAt,
+        wallet.sourceType,
+        wallet.curationStatus,
+        wallet.lastImportedAt ?? null,
+        wallet.importBatchId ?? null,
+        wallet.createdAt,
+        wallet.updatedAt,
+        wallet.watchlisted ? 1 : 0
+      )
+  );
+  await runFastImportStatements(db, walletUpsertStatements);
+
+  const persistedWalletRows = await listFastImportWalletRowsByAddress(
+    db,
+    preparedRows.map((row) => row.normalizedAddress)
+  );
+  const walletsByAddress = new Map(
+    persistedWalletRows.map((row) => {
+      const wallet = mapFastImportWalletRow(row);
+      return [wallet.normalizedAddress, wallet] as const;
+    })
+  );
+  const walletIds = Array.from(walletsByAddress.values()).map((wallet) => wallet.id);
+  const userLabelKeysByWalletId = await listFastImportUserLabelKeysByWalletId(db, walletIds);
+
+  const deleteSystemLabelStatements = chunkFastImportItems(
+    walletIds,
+    FAST_IMPORT_SQL_IN_CHUNK_SIZE
+  ).map((chunk) =>
+    db
+      .prepare(
+        `DELETE FROM wallet_user_labels
+         WHERE source = 'system'
+           AND wallet_id IN (${buildFastImportPlaceholders(chunk)})
+           AND NOT EXISTS (
+             SELECT 1
+             FROM wallet_user_labels official
+             WHERE official.wallet_id = wallet_user_labels.wallet_id
+               AND official.source = 'user'
+               AND official.kind = wallet_user_labels.kind
+               AND lower(trim(official.value)) = lower(trim(wallet_user_labels.value))
+           )`
+      )
+      .bind(...chunk)
+  );
+  await runFastImportStatements(db, deleteSystemLabelStatements);
+
+  const labelInsertStatements: ReturnType<D1Database["prepare"]>[] = [];
+  const noteStatements: ReturnType<D1Database["prepare"]>[] = [];
+  const watchlistStatements: ReturnType<D1Database["prepare"]>[] = [];
+  const finderAiStatements: ReturnType<D1Database["prepare"]>[] = [];
+  const finderProfileStatements: ReturnType<D1Database["prepare"]>[] = [];
+  let finderAiUpsertedCount = 0;
+
+  for (const prepared of preparedRows) {
+    const wallet = walletsByAddress.get(prepared.normalizedAddress);
+    if (!wallet) {
+      failedRows.push({
+        rowNumber: prepared.row.rowNumber,
+        displayName: getWalletImportDisplayName(prepared.row),
+        reason: "wallet lookup after bulk write failed"
+      });
+      continue;
+    }
+
+    const officialLabelKeys = userLabelKeysByWalletId.get(wallet.id) ?? new Set<string>();
+    const insertedLabelKeys = new Set<string>();
+    for (const label of prepared.row.labels) {
+      const labelKind = label.kind ?? "strategy";
+      const labelValue = label.value?.trim() || "";
+      if (!labelValue) {
+        continue;
+      }
+
+      const labelKey = getWalletLabelDisplayKey(labelKind, labelValue);
+      if (insertedLabelKeys.has(labelKey) || officialLabelKeys.has(labelKey)) {
+        continue;
+      }
+
+      insertedLabelKeys.add(labelKey);
+      const timestamp = input.importedAt;
+      labelInsertStatements.push(
+        db
+          .prepare(
+            `INSERT INTO wallet_user_labels (
+              id,
+              wallet_id,
+              name,
+              value,
+              kind,
+              source,
+              evidence,
+              verification_note,
+              source_note,
+              created_at,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, 'system', ?, ?, ?, ?, ?)`
+          )
+          .bind(
+            crypto.randomUUID(),
+            wallet.id,
+            label.name,
+            labelValue,
+            labelKind,
+            label.evidence ||
+              (isWalletAiPreviewRow(prepared.row) ? prepared.row.sourceExcerpt : undefined) ||
+              null,
+            label.verificationNote ?? null,
+            label.sourceNote ?? null,
+            timestamp,
+            timestamp
+          )
+      );
+    }
+
+    const note = prepared.row.note?.trim();
+    if (note) {
+      noteStatements.push(
+        db
+          .prepare(
+            `INSERT INTO wallet_notes (id, wallet_id, content, actor, created_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .bind(crypto.randomUUID(), wallet.id, note, actor, input.importedAt),
+        db
+          .prepare(`UPDATE wallets SET team_note = ?, updated_at = ? WHERE id = ?`)
+          .bind(note, input.importedAt, wallet.id)
+      );
+    }
+
+    const watchlistNote = prepared.row.watchlistNote?.trim();
+    if (watchlistNote) {
+      watchlistStatements.push(
+        db
+          .prepare(
+            `INSERT INTO wallet_watchlist (id, wallet_id, note, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(wallet_id) DO UPDATE SET
+               note = excluded.note,
+               updated_at = excluded.updated_at`
+          )
+          .bind(crypto.randomUUID(), wallet.id, watchlistNote, input.importedAt, input.importedAt),
+        db
+          .prepare(`UPDATE wallets SET watchlisted = 1, updated_at = ? WHERE id = ?`)
+          .bind(input.importedAt, wallet.id)
+      );
+    }
+
+    if (prepared.row.finderAi) {
+      const finderAi = {
+        ...prepared.row.finderAi,
+        sourceName: prepared.row.finderAi.sourceName || request.sourceName || importBatch.sourceName,
+        runId: prepared.row.finderAi.runId || importBatch.sourceName,
+        normalizedAddress: prepared.row.finderAi.normalizedAddress || wallet.normalizedAddress,
+        strategyFocus: prepared.row.finderAi.strategyFocus || prepared.row.wallet.strategyFocus,
+        importBatchId: importBatch.id
+      } satisfies WalletFinderAiInsight;
+
+      finderAiStatements.push(
+        db
+          .prepare(
+            `INSERT INTO wallet_finder_ai_insights (
+              wallet_id,
+              source_name,
+              run_id,
+              normalized_address,
+              strategy_focus,
+              ai_brief_short,
+              ai_brief_note,
+              ai_deep_note,
+              source_excerpt,
+              evidence_level,
+              has_conflict,
+              needs_review,
+              labels_json,
+              primary_signals_json,
+              key_metrics_json,
+              weather_signals_json,
+              provider_meta_json,
+              raw_json,
+              searchable_text,
+              import_batch_id,
+              created_at,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_id) DO UPDATE SET
+              source_name = excluded.source_name,
+              run_id = excluded.run_id,
+              normalized_address = excluded.normalized_address,
+              strategy_focus = excluded.strategy_focus,
+              ai_brief_short = excluded.ai_brief_short,
+              ai_brief_note = excluded.ai_brief_note,
+              ai_deep_note = excluded.ai_deep_note,
+              source_excerpt = excluded.source_excerpt,
+              evidence_level = excluded.evidence_level,
+              has_conflict = excluded.has_conflict,
+              needs_review = excluded.needs_review,
+              labels_json = excluded.labels_json,
+              primary_signals_json = excluded.primary_signals_json,
+              key_metrics_json = excluded.key_metrics_json,
+              weather_signals_json = excluded.weather_signals_json,
+              provider_meta_json = excluded.provider_meta_json,
+              raw_json = excluded.raw_json,
+              searchable_text = excluded.searchable_text,
+              import_batch_id = excluded.import_batch_id,
+              updated_at = excluded.updated_at`
+          )
+          .bind(
+            wallet.id,
+            nullableFastImportText(finderAi.sourceName),
+            nullableFastImportText(finderAi.runId),
+            nullableFastImportText(finderAi.normalizedAddress) || wallet.normalizedAddress,
+            nullableFastImportText(finderAi.strategyFocus),
+            nullableFastImportText(finderAi.aiBriefShort),
+            nullableFastImportText(finderAi.aiBriefNote),
+            nullableFastImportText(finderAi.aiDeepNote),
+            nullableFastImportText(finderAi.sourceExcerpt),
+            nullableFastImportText(finderAi.evidenceLevel),
+            finderAi.hasConflict ? 1 : 0,
+            finderAi.needsReview ? 1 : 0,
+            stringifyFastImportJsonField(finderAi.labels ?? []),
+            stringifyFastImportJsonField(finderAi.primarySignals ?? []),
+            stringifyFastImportJsonField(finderAi.keyMetrics ?? []),
+            stringifyFastImportJsonField(finderAi.weatherSignals),
+            stringifyFastImportJsonField(finderAi.providerMeta),
+            stringifyFastImportJsonField(finderAi.raw),
+            buildFastImportFinderAiSearchableText(finderAi),
+            importBatch.id,
+            input.importedAt,
+            input.importedAt
+          )
+      );
+      finderAiUpsertedCount += 1;
+    }
+
+    const finderProfile = prepared.row.finderProfile;
+    if (finderProfile) {
+      finderProfileStatements.push(
+        db
+          .prepare(
+            `INSERT INTO wallet_finder_profiles (
+              wallet_id,
+              source_name,
+              run_id,
+              normalized_address,
+              snapshot_as_of,
+              analysis_source,
+              metrics_json,
+              portrait_labels_json,
+              cities_json,
+              patterns_json,
+              strategy_metrics_json,
+              overview_json,
+              coverage_json,
+              searchable_text,
+              import_batch_id,
+              created_at,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(wallet_id) DO UPDATE SET
+              source_name = excluded.source_name,
+              run_id = excluded.run_id,
+              normalized_address = excluded.normalized_address,
+              snapshot_as_of = excluded.snapshot_as_of,
+              analysis_source = excluded.analysis_source,
+              metrics_json = excluded.metrics_json,
+              portrait_labels_json = excluded.portrait_labels_json,
+              cities_json = excluded.cities_json,
+              patterns_json = excluded.patterns_json,
+              strategy_metrics_json = excluded.strategy_metrics_json,
+              overview_json = excluded.overview_json,
+              coverage_json = excluded.coverage_json,
+              searchable_text = excluded.searchable_text,
+              import_batch_id = excluded.import_batch_id,
+              updated_at = excluded.updated_at`
+          )
+          .bind(
+            wallet.id,
+            nullableFastImportText(finderProfile.sourceName || request.sourceName || importBatch.sourceName),
+            nullableFastImportText(finderProfile.runId),
+            wallet.normalizedAddress,
+            nullableFastImportText(finderProfile.snapshotAsOf),
+            nullableFastImportText(finderProfile.analysisSource),
+            stringifyFastImportJsonField(finderProfile.metrics ?? []),
+            stringifyFastImportJsonField(finderProfile.portraitLabels ?? []),
+            stringifyFastImportJsonField(finderProfile.cities ?? []),
+            stringifyFastImportJsonField(finderProfile.patterns ?? []),
+            stringifyFastImportJsonField(finderProfile.strategyMetrics ?? {}),
+            stringifyFastImportJsonField(finderProfile.overview ?? {}),
+            stringifyFastImportJsonField(finderProfile.coverage ?? {}),
+            buildFastImportFinderProfileSearchableText(finderProfile),
+            importBatch.id,
+            input.importedAt,
+            input.importedAt
+          )
+      );
+    }
+  }
+
+  await runFastImportStatements(db, labelInsertStatements);
+  await runFastImportStatements(db, noteStatements);
+  await runFastImportStatements(db, watchlistStatements);
+  await runFastImportStatements(db, finderAiStatements);
+  await runFastImportStatements(db, finderProfileStatements);
+
+  if (walletIds.length > 0) {
+    await incrementDatasetVersion(db, "address_labels");
+  }
+  if (finderAiUpsertedCount > 0) {
+    await incrementDatasetVersion(db, "finder_ai");
+  }
+
+  const finalizedBatch =
+    (await updatePersistedWalletImportBatch(db, importBatch.id, {
+      createdCount,
+      updatedCount,
+      failedCount: failedRows.length
+    })) ?? importBatch;
+
+  return {
+    createdCount,
+    updatedCount,
+    failedRows,
+    finderAiUpsertedCount,
+    importBatch: finalizedBatch
+  };
+};
+
 const getWalletImportDisplayName = (row: WalletImportPreviewRow) =>
   row.wallet.alias || row.wallet.displayName || row.wallet.address;
 
@@ -597,6 +1498,7 @@ const buildDemoFacetSummary = (rows: WalletAdminRow[]): WalletFacetSummary => ({
   ).length,
   sourceCounts: {
     manual: rows.filter((row) => !row.wallet.deletedAt && row.wallet.sourceType === "manual").length,
+    finder: rows.filter((row) => !row.wallet.deletedAt && row.wallet.sourceType === "finder").length,
     ai: rows.filter((row) => !row.wallet.deletedAt && row.wallet.sourceType === "ai").length,
     file: rows.filter((row) => !row.wallet.deletedAt && row.wallet.sourceType === "file").length,
     system: rows.filter((row) => !row.wallet.deletedAt && row.wallet.sourceType === "system").length
@@ -612,7 +1514,8 @@ const buildDemoFacetSummary = (rows: WalletAdminRow[]): WalletFacetSummary => ({
   )
     .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-CN"))
     .slice(0, 12)
-    .map(([label, count]) => ({ key: label, label, count }))
+    .map(([label, count]) => ({ key: label, label, count })),
+  versionCounts: []
 });
 
 const applyWalletListQuery = (
@@ -642,6 +1545,10 @@ const applyWalletListQuery = (
       return false;
     }
 
+    if (query?.batch && row.wallet.importBatchId !== query.batch) {
+      return false;
+    }
+
     if (query?.createdAfter && row.wallet.createdAt < query.createdAfter) {
       return false;
     }
@@ -665,19 +1572,31 @@ const applyWalletListQuery = (
       return true;
     }
 
-    return [
+    const searchableText = [
       row.wallet.address,
       row.wallet.normalizedAddress,
       row.wallet.displayName,
       row.wallet.alias,
       row.summaryText,
+      row.finderAi?.strategyFocus,
+      row.finderAi?.aiBriefShort,
+      row.finderAi?.aiBriefNote,
+      row.finderAi?.aiDeepNote,
+      row.finderAi?.sourceExcerpt,
+      ...(row.finderAi?.labels ?? []).map((label) => `${label.kind ?? ""} ${label.value}`),
+      ...(row.finderAi?.primarySignals ?? []).map((signal) => `${signal.label} ${signal.reason ?? ""}`),
       ...row.highlights.map((badge) => badge.text),
       ...row.labels.map((label) => `${label.name} ${label.value}`)
     ]
       .filter(Boolean)
       .join(" ")
-      .toLowerCase()
-      .includes(normalizedQuery);
+      .toLowerCase();
+    const compactQuery = compactSearchText(normalizedQuery);
+
+    return (
+      searchableText.includes(normalizedQuery) ||
+      (compactQuery.length >= 2 && compactSearchText(searchableText).includes(compactQuery))
+    );
   });
 
   const sort = query?.sort ?? "updated_desc";
@@ -699,22 +1618,238 @@ const applyWalletListQuery = (
   return filtered;
 };
 
-export const getDashboardData = async (): Promise<DashboardData> => {
-  const persisted = await buildPersistedContext();
-  if (!persisted) {
-    return getDemoDashboardData();
+const resolveWalletExportQuery = (
+  query?: Partial<WalletListQuery>,
+  includeDeleted = true
+): WalletListQuery => {
+  const normalized = toWalletListDataQuery(resolveWalletListQuery(query));
+  return {
+    ...normalized,
+    cursor: undefined,
+    limit: undefined,
+    includeDeleted
+  };
+};
+
+const normalizeChangedSince = (value?: string) => {
+  const candidate = value?.trim();
+  if (!candidate) {
+    return undefined;
   }
 
+  const timestamp = Date.parse(candidate);
+  if (!Number.isFinite(timestamp)) {
+    throw new Error("changedSince 必须是有效的 ISO 时间");
+  }
+
+  return new Date(timestamp).toISOString();
+};
+
+const sortByIsoDesc = <T,>(items: T[], pick: (item: T) => string | undefined | null) =>
+  [...items].sort((left, right) => {
+    const leftTime = Date.parse(pick(left) ?? "");
+    const rightTime = Date.parse(pick(right) ?? "");
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  });
+
+const buildWalletLibraryExportRecord = (
+  wallet: Wallet,
+  labels: WalletLabel[],
+  notes: WalletExportNoteRecord[],
+  auditLogs: NoteAuditLog[],
+  watchlistEntry: WatchlistEntry | undefined,
+  importBatch: WalletImportBatch | undefined,
+  finderAi: WalletFinderAiInsight | undefined,
+  trades: Trade[],
+  positions: PositionSnapshot[]
+): WalletLibraryExportRecord => {
+  const metrics = computeWalletMetrics(wallet, seedTrades);
+  const adminRow = buildWalletAdminRow(
+    {
+      wallet,
+      metrics,
+      labels,
+      finderAi,
+      activeAlertCount: 0,
+      latestTrade: sortByIsoDesc(trades, (trade) => trade.enteredAt)[0]
+    },
+    importBatch
+  );
+
   return {
-    summary: computeDashboardSummary(
-      persisted.wallets,
-      persisted.alertItems.filter((item) => item.alert.status === "open").length
-    ),
-    markets: computeMarketDigests(persisted.wallets, seedMarkets, seedTrades),
-    walletRows: persisted.walletRows,
-    alerts: persisted.alertItems,
-    spotlightWallets: persisted.walletRows.slice(0, 3)
+    wallet,
+    summaryText: adminRow.summaryText,
+    highlights: adminRow.highlights,
+    statusBadges: adminRow.statusBadges,
+    sourceMeta: adminRow.sourceMeta,
+    lastActivityAt: adminRow.lastActivityAt,
+    finderAi,
+    labels,
+    notes,
+    auditLogs,
+    watchlistEntry,
+    importBatch,
+    metrics,
+    trades: sortByIsoDesc(trades, (trade) => trade.enteredAt),
+    positions: sortByIsoDesc(positions, (position) => position.capturedAt),
+    alerts: []
   };
+};
+
+export const exportWalletLibrary = async (input?: {
+  query?: Partial<WalletListQuery>;
+  includeDeleted?: boolean;
+  changedSince?: string;
+}): Promise<WalletLibraryExportData> => {
+  const includeDeleted = input?.includeDeleted ?? true;
+  const exportQuery = resolveWalletExportQuery(input?.query, includeDeleted);
+  const exportedAt = new Date().toISOString();
+  const changedSince = normalizeChangedSince(input?.changedSince);
+  const changedSinceMs = changedSince ? Date.parse(changedSince) : undefined;
+  const exportMode = changedSince ? "delta" : "full";
+  const tradesByWalletId = groupByWalletId(seedTrades);
+  const positionsByWalletId = groupByWalletId(seedPositions);
+  const mergeHints = {
+    primaryKey: "wallet.normalizedAddress",
+    deletedFlagField: "wallet.deletedAt",
+    walletUpdatedAtField: "wallet.updatedAt",
+    labelIdentityFields: ["kind", "value", "source"],
+    noteIdentityField: "id",
+    auditLogIdentityField: "id"
+  } as const;
+
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    const filteredRows = applyWalletListQuery(mapWalletRowsToAdminRows(listDemoWalletRows()), exportQuery).filter(
+      (row) =>
+        changedSinceMs === undefined || Date.parse(row.wallet.updatedAt) >= changedSinceMs
+    );
+    const records = filteredRows.map((row) => {
+      const detail = getDemoWalletDetail(row.wallet.id);
+      const auditLogs = detail?.notes ?? [];
+      const notes = auditLogs
+        .filter((log) => log.action === "create_note")
+        .map((log) => ({
+          id: log.id,
+          content: log.content,
+          actor: log.actor,
+          createdAt: log.createdAt
+        }));
+
+      return buildWalletLibraryExportRecord(
+        row.wallet,
+        row.labels,
+        notes,
+        auditLogs,
+        detail?.watchlistEntry,
+        undefined,
+        detail?.finderAi,
+        detail?.trades ?? [],
+        detail?.positions ?? []
+      );
+    });
+
+    return {
+      schemaVersion: "wallet-library-export/v1",
+      source: "smart-money-admin",
+      exportMode,
+      exportedAt,
+      changedSince,
+      totalWallets: records.length,
+      includeDeleted,
+      query: exportQuery,
+      mergeHints,
+      wallets: records
+    };
+  }
+
+  const wallets = (await listPersistedWallets(bindings.SMART_MONEY_DB, exportQuery)).filter(
+    (wallet) => changedSinceMs === undefined || Date.parse(wallet.updatedAt) >= changedSinceMs
+  );
+  const walletIds = wallets.map((wallet) => wallet.id);
+  const [
+    userLabelsByWalletId,
+    notesByWalletId,
+    auditLogsByWalletId,
+    watchlistByWalletId,
+    importBatchesById,
+    finderAiByWalletId
+  ] =
+    await Promise.all([
+      listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWalletNotesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWalletAuditLogsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      listWatchlistEntriesByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+      getImportBatchMapForWallets(bindings.SMART_MONEY_DB, wallets),
+      listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
+    ]);
+
+  const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
+  const allLabels = deriveSystemLabels(wallets, allUserLabels, seedTrades);
+  const labelsByWalletId = groupByWalletId(allLabels);
+  const records = wallets.map((wallet) =>
+    buildWalletLibraryExportRecord(
+      wallet,
+      labelsByWalletId.get(wallet.id) ?? [],
+      notesByWalletId.get(wallet.id) ?? [],
+      auditLogsByWalletId.get(wallet.id) ?? [],
+      watchlistByWalletId.get(wallet.id),
+      wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined,
+      finderAiByWalletId.get(wallet.id),
+      tradesByWalletId.get(wallet.id) ?? [],
+      positionsByWalletId.get(wallet.id) ?? []
+    )
+  );
+
+  return {
+    schemaVersion: "wallet-library-export/v1",
+    source: "smart-money-admin",
+    exportMode,
+    exportedAt,
+    changedSince,
+    totalWallets: records.length,
+    includeDeleted,
+    query: exportQuery,
+    mergeHints,
+    wallets: records
+  };
+};
+
+const EMPTY_DIGEST: DashboardLibraryDigest = {
+  totals: { wallets: 0, weekNewWallets: 0, watchlisted: 0, labelAssignments: 0, labelValues: 0 },
+  metrics: {
+    totalPnlUsd: 0,
+    totalVolumeUsd: 0,
+    totalTrades: 0,
+    totalResolvedPositions: 0,
+    weightedWinRate: 0,
+    avgWinRate: 0,
+    profitableWallets: 0,
+    losingWallets: 0,
+    bestMultiple: 0,
+    peakBurstUsd: 0,
+    avgWeatherShare: 0,
+    profiledWallets: 0,
+    insightWallets: 0,
+    reviewWallets: 0
+  },
+  labelFacets: [],
+  cityStats: [],
+  topByPnl: [],
+  topByWinRate: [],
+  topByVolume: [],
+  topLosers: [],
+  watchlist: [],
+  recentBatches: [],
+  snapshotAsOf: null
+};
+
+export const getDashboardData = async (): Promise<DashboardLibraryDigest> => {
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    return EMPTY_DIGEST;
+  }
+  return getDashboardLibraryDigest(bindings.SMART_MONEY_DB);
 };
 
 export const listWalletRows = async (): Promise<WalletTableRow[]> => {
@@ -730,7 +1865,12 @@ export const listWalletAdminRows = async (
     return mapWalletRowsToAdminRows(listDemoWalletRows());
   }
 
-  return mapWalletRowsToAdminRows(persisted.walletRows);
+  const bindings = await ensurePersistedBindings();
+  const importBatchesById = bindings?.SMART_MONEY_DB
+    ? await getImportBatchMapForWallets(bindings.SMART_MONEY_DB, persisted.wallets)
+    : undefined;
+
+  return mapWalletRowsToAdminRows(persisted.walletRows, importBatchesById);
 };
 
 export const listWalletAdminRowsPage = async (
@@ -770,25 +1910,38 @@ export const listWalletAdminRowsPage = async (
     createdAfter: mergedQuery.createdAfter,
     createdBefore: mergedQuery.createdBefore,
     labels: mergedQuery.labels,
+    version: mergedQuery.version,
     source: mergedQuery.source,
+    batch: mergedQuery.batch,
     status: mergedQuery.status,
     sort: mergedQuery.sort,
     limit: mergedQuery.limit,
     cursor: mergedQuery.cursor
   });
   const walletIds = page.wallets.map((wallet) => wallet.id);
-  const userLabelsByWalletId = await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds);
-  const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
-  const allLabels = deriveSystemLabels(page.wallets, allUserLabels, seedTrades);
-  const labelsByWalletId = groupByWalletId(allLabels);
-  const rows = page.wallets.map((wallet) =>
-    buildWalletAdminRow({
-      wallet,
-      metrics: computeWalletMetrics(wallet, seedTrades),
-      labels: labelsByWalletId.get(wallet.id) ?? [],
-      activeAlertCount: 0
-    })
-  );
+    const [userLabelsByWalletId, importBatchesById, finderAiByWalletId, finderMetricRows] =
+      await Promise.all([
+        listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+        getImportBatchMapForWallets(bindings.SMART_MONEY_DB, page.wallets),
+        listWalletFinderAiInsightsByWalletIds(bindings.SMART_MONEY_DB, walletIds),
+        listWalletFinderProfileMetricsByWalletIds(bindings.SMART_MONEY_DB, walletIds)
+      ]);
+    const allUserLabels = Array.from(userLabelsByWalletId.values()).flat();
+    const allLabels = deriveSystemLabels(page.wallets, allUserLabels, seedTrades);
+    const labelsByWalletId = groupByWalletId(allLabels);
+    const rows = page.wallets.map((wallet) =>
+      buildWalletAdminRow(
+        {
+          wallet,
+          metrics: computeWalletMetrics(wallet, seedTrades),
+          labels: labelsByWalletId.get(wallet.id) ?? [],
+          finderAi: finderAiByWalletId.get(wallet.id),
+          activeAlertCount: 0
+        },
+        wallet.importBatchId ? importBatchesById.get(wallet.importBatchId) : undefined,
+        buildFinderDigest(wallet.id, finderMetricRows.get(wallet.id))
+      )
+    );
 
   return {
     items: rows,
@@ -800,7 +1953,9 @@ export const listWalletAdminRowsPage = async (
       createdAfter: mergedQuery.createdAfter,
       createdBefore: mergedQuery.createdBefore,
       labels: mergedQuery.labels,
+      version: mergedQuery.version,
       source: mergedQuery.source,
+      batch: mergedQuery.batch,
       status: mergedQuery.status
     }),
     savedView,
@@ -822,7 +1977,9 @@ export const getWalletFacetSummary = async (query?: WalletListQuery): Promise<Wa
     createdAfter: normalizedQuery.createdAfter,
     createdBefore: normalizedQuery.createdBefore,
     labels: normalizedQuery.labels,
+    version: normalizedQuery.version,
     source: normalizedQuery.source,
+    batch: normalizedQuery.batch,
     status: normalizedQuery.status
   });
 };
@@ -834,6 +1991,168 @@ export const listWalletSavedViews = async (): Promise<WalletSavedView[]> => {
   }
 
   return listPersistedWalletSavedViews(bindings.SMART_MONEY_DB);
+};
+
+const buildWalletImportBatchSummaries = async (
+  db: NonNullable<SmartMoneyBindings["SMART_MONEY_DB"]>,
+  batches: WalletImportBatch[]
+): Promise<WalletImportBatchSummary[]> => {
+  const batchIds = batches.map((batch) => batch.id);
+  const wallets = await listWalletsByImportBatchIds(db, batchIds);
+  const walletsByBatchId = wallets.reduce((map, wallet) => {
+    if (!wallet.importBatchId) {
+      return map;
+    }
+
+    const current = map.get(wallet.importBatchId) ?? [];
+    current.push(wallet);
+    map.set(wallet.importBatchId, current);
+    return map;
+  }, new Map<string, Wallet[]>());
+  const walletIds = wallets.map((wallet) => wallet.id);
+  const labelsByWalletId = await listWalletLabelsByWalletIds(db, walletIds);
+
+  return batches.map((batch) => {
+    const batchWallets = walletsByBatchId.get(batch.id) ?? [];
+    const labelCounts = new Map<string, number>();
+    let officialLabelCount = 0;
+    let aiLabelCount = 0;
+
+    batchWallets.forEach((wallet) => {
+      const labels = labelsByWalletId.get(wallet.id) ?? [];
+      labels.forEach((label) => {
+        if (label.source === "user") {
+          officialLabelCount += 1;
+          const labelValue = label.value || label.name;
+          labelCounts.set(labelValue, (labelCounts.get(labelValue) ?? 0) + 1);
+        } else {
+          aiLabelCount += 1;
+        }
+      });
+    });
+
+    const activeCount = batchWallets.filter((wallet) => wallet.curationStatus === "active" && !wallet.deletedAt)
+      .length;
+    const deletedCount = batchWallets.filter((wallet) => Boolean(wallet.deletedAt)).length;
+    const watchlistedCount = batchWallets.filter((wallet) => wallet.watchlisted && !wallet.deletedAt).length;
+    const successCount = Math.max(0, batch.rowCount - batch.failedCount);
+    const existingOverlapCount = batch.updatedCount;
+
+    return {
+      batch,
+      sourceLabel: getImportBatchSourceLabel(batch),
+      walletCount: batchWallets.length,
+      successCount,
+      existingOverlapCount,
+      activeCount,
+      deletedCount,
+      watchlistedCount,
+      officialLabelCount,
+      aiLabelCount,
+      promotedLabels: Array.from(labelCounts.entries())
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0], "zh-CN"))
+        .slice(0, 6)
+        .map(([label]) => label)
+    } satisfies WalletImportBatchSummary;
+  });
+};
+
+const buildWalletImportBatchDetail = async (
+  db: NonNullable<SmartMoneyBindings["SMART_MONEY_DB"]>,
+  summary: WalletImportBatchSummary
+): Promise<WalletImportBatchDetail> => {
+  const wallets = await listWalletsByImportBatchIds(db, [summary.batch.id]);
+  const auditLogsByWalletId = await listWalletAuditLogsByWalletIds(
+    db,
+    wallets.map((wallet) => wallet.id)
+  );
+  const operationLogs = Array.from(auditLogsByWalletId.values())
+    .flat()
+    .filter((log) =>
+      ["create_user_tag", "update_wallet", "create_note", "toggle_watchlist"].includes(log.action)
+    )
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+
+  return {
+    ...summary,
+    latestOperationAt: operationLogs[0]?.createdAt,
+    operationActors: Array.from(new Set(operationLogs.map((log) => log.actor).filter(Boolean))).slice(0, 8)
+  };
+};
+
+export const getWalletImportsPageData = async (
+  selectedBatchId?: string
+): Promise<WalletImportsPageData> => {
+  const bindings = await ensurePersistedBindings();
+  if (!bindings?.SMART_MONEY_DB) {
+    return {
+      overview: {
+        totalBatches: 0,
+        finderBatches: 0,
+        importedWallets: 0,
+        importedRows7d: 0,
+        failedRows7d: 0,
+        promotedLabels7d: 0
+      },
+      batches: [],
+      selectedBatch: null,
+      selectedBatchRows: []
+    };
+  }
+
+  const requestedBatchId = selectedBatchId?.trim();
+  const [recentBatches, selectedBatchRecord] = await Promise.all([
+    listPersistedWalletImportBatches(bindings.SMART_MONEY_DB, { limit: 18 }),
+    requestedBatchId
+      ? getPersistedWalletImportBatchById(bindings.SMART_MONEY_DB, requestedBatchId)
+      : Promise.resolve(null)
+  ]);
+  const batchList = [...recentBatches];
+  if (selectedBatchRecord && !batchList.some((batch) => batch.id === selectedBatchRecord.id)) {
+    batchList.unshift(selectedBatchRecord);
+  }
+
+  const summaries = await buildWalletImportBatchSummaries(bindings.SMART_MONEY_DB, batchList);
+  const selectedSummary =
+    requestedBatchId
+      ? summaries.find((summary) => summary.batch.id === selectedBatchRecord?.id) ?? null
+      : summaries.find((summary) => isFinderImportBatch(summary.batch)) ?? summaries[0] ?? null;
+  const selectedBatch = selectedSummary
+    ? await buildWalletImportBatchDetail(bindings.SMART_MONEY_DB, selectedSummary)
+    : null;
+  const selectedBatchPage = selectedBatch
+    ? await listWalletAdminRowsPage({
+        batch: selectedBatch.batch.id,
+        limit: 12,
+        sort: "updated_desc",
+        includeDeleted: true
+      })
+    : null;
+
+  const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1_000;
+  const recentWindowSummaries = summaries.filter(
+    (summary) => Date.parse(summary.batch.createdAt) >= sevenDaysAgo
+  );
+
+  return {
+    overview: {
+      totalBatches: summaries.length,
+      finderBatches: summaries.filter((summary) => isFinderImportBatch(summary.batch)).length,
+      importedWallets: summaries.reduce((total, summary) => total + summary.walletCount, 0),
+      importedRows7d: recentWindowSummaries.reduce((total, summary) => total + summary.batch.rowCount, 0),
+      failedRows7d: recentWindowSummaries.reduce(
+        (total, summary) => total + summary.batch.failedCount,
+        0
+      ),
+      promotedLabels7d: recentWindowSummaries.reduce(
+        (total, summary) => total + summary.officialLabelCount,
+        0
+      )
+    },
+    batches: summaries,
+    selectedBatch,
+    selectedBatchRows: selectedBatchPage?.items ?? []
+  };
 };
 
 export const createWalletSavedView = async (input: {
@@ -918,21 +2237,30 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
     return undefined;
   }
 
-  const [userLabelsByWalletId, auditLogsByWalletId, watchlistByWalletId] = await Promise.all([
+  const [
+    userLabelsByWalletId,
+    auditLogsByWalletId,
+    watchlistByWalletId,
+    finderAiByWalletId,
+    finderProfilesByWalletId
+  ] = await Promise.all([
     listWalletLabelsByWalletIds(db, [walletId]),
     listWalletAuditLogsByWalletIds(db, [walletId]),
-    listWatchlistEntriesByWalletIds(db, [walletId])
+    listWatchlistEntriesByWalletIds(db, [walletId]),
+    listWalletFinderAiInsightsByWalletIds(db, [walletId]),
+    listPersistedWalletFinderProfilesByWalletIds(db, [walletId])
   ]);
 
   const labels = deriveSystemLabels([wallet], userLabelsByWalletId.get(walletId) ?? [], seedTrades);
   const notes = auditLogsByWalletId.get(walletId) ?? [];
   const watchlistEntry = watchlistByWalletId.get(walletId);
-  const alertItems = buildPersistedAlertItems([wallet]).filter((item) => item.wallet.id === walletId);
 
   return {
     wallet,
     metrics: computeWalletMetrics(wallet, seedTrades),
     labels,
+    finderAi: finderAiByWalletId.get(walletId),
+    finderProfile: finderProfilesByWalletId.get(walletId),
     trades: seedTrades
       .filter((trade) => trade.walletId === walletId)
       .sort(
@@ -944,33 +2272,20 @@ export const getWalletDetail = async (walletId: string): Promise<WalletDetailDat
       .sort(
         (left, right) =>
           new Date(right.capturedAt).getTime() - new Date(left.capturedAt).getTime()
-      ),
+    ),
     notes,
-    alerts: alertItems,
+    alerts: [],
     watchlistEntry
   };
 };
 
-export const getAlertItems = async (
-  status: "open" | "resolved" | "all" = "all"
-): Promise<AlertListItem[]> => {
+export const getWalletList = async () => {
   const persisted = await buildPersistedContext();
   if (!persisted) {
-    return listDemoAlerts(status);
+    return listWalletRows();
   }
 
-  return persisted.alertItems.filter((item) => (status === "all" ? true : item.alert.status === status));
-};
-
-export const getAlerts = async () => (await getAlertItems("all")).map((item) => item.alert);
-
-export const getWalletList = async () => {
-  const alertItems = await getAlertItems("all");
-
-  return (await listWalletRows()).map((row) => ({
-    ...row,
-    alerts: alertItems.filter((item) => item.wallet.id === row.wallet.id).map((item) => item.alert)
-  }));
+  return persisted.walletRows;
 };
 
 export const createWallet = async (payload: WalletInput, actor?: string) => {
@@ -1086,148 +2401,6 @@ export const deleteUserTag = async (walletId: string, tagId: string, actor?: str
   return deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, tagId, actor);
 };
 
-export type WalletReviewAction =
-  | "promote_ai_to_official"
-  | "edit_and_promote_ai_label"
-  | "dismiss_ai_label"
-  | "complete_wallet_review";
-
-export interface WalletReviewActionInput {
-  action: WalletReviewAction;
-  labelId?: string;
-  name?: string;
-  value?: string;
-  kind?: WalletLabel["kind"];
-  evidence?: string;
-  verificationNote?: string;
-  sourceNote?: string;
-}
-
-const normalizeReviewField = (value: string | undefined) => {
-  if (value === undefined) {
-    return undefined;
-  }
-
-  const trimmed = compactImportText(value);
-  return trimmed || undefined;
-};
-
-export const applyWalletReviewAction = async (
-  walletId: string,
-  input: WalletReviewActionInput,
-  actor = "Team Alpha"
-) => {
-  const bindings = await ensurePersistedBindings();
-  if (!bindings?.SMART_MONEY_DB) {
-    throw new Error("review actions require persisted database");
-  }
-
-  const wallet = await getPersistedWalletById(bindings.SMART_MONEY_DB, walletId, {
-    includeDeleted: true
-  });
-  if (!wallet) {
-    return undefined;
-  }
-
-  const storedLabels = (await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, [walletId])).get(walletId) ?? [];
-
-  if (input.action === "complete_wallet_review") {
-    await updatePersistedWallet(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      { curationStatus: "active" },
-      actor
-    );
-    return getWalletDetail(walletId);
-  }
-
-  if (!input.labelId) {
-    throw new Error("labelId is required");
-  }
-
-  const targetLabel = storedLabels.find((label) => label.id === input.labelId);
-  if (!targetLabel) {
-    throw new Error("tag not found");
-  }
-
-  if (targetLabel.source === "user") {
-    throw new Error("only AI/system labels can enter review actions");
-  }
-
-  const nextName = normalizeReviewField(input.name) ?? targetLabel.name;
-  const nextValue = normalizeReviewField(input.value) ?? targetLabel.value;
-  const nextKind = input.kind ?? targetLabel.kind;
-  const nextEvidence = normalizeReviewField(input.evidence) ?? targetLabel.evidence;
-  const nextVerificationNote =
-    normalizeReviewField(input.verificationNote) ?? targetLabel.verificationNote;
-  const nextSourceNote = normalizeReviewField(input.sourceNote) ?? targetLabel.sourceNote;
-  const dedupeKey = getWalletLabelDisplayKey(nextKind, nextValue);
-
-  if (input.action === "dismiss_ai_label") {
-    const duplicates = storedLabels.filter(
-      (label) =>
-        label.source !== "user" &&
-        getWalletLabelDisplayKey(label.kind, label.value || label.name) ===
-          getWalletLabelDisplayKey(targetLabel.kind, targetLabel.value || targetLabel.name)
-    );
-    for (const label of duplicates) {
-      await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
-    }
-    return getWalletDetail(walletId);
-  }
-
-  const existingOfficial = storedLabels.find(
-    (label) =>
-      label.source === "user" &&
-      getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey
-  );
-
-  if (existingOfficial) {
-    await updatePersistedWalletLabel(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      existingOfficial.id,
-      {
-        name: nextName,
-        value: nextValue,
-        kind: nextKind,
-        source: "user",
-        evidence: nextEvidence,
-        verificationNote: nextVerificationNote,
-        sourceNote: nextSourceNote
-      },
-      actor
-    );
-  } else {
-    await createPersistedWalletLabel(
-      bindings.SMART_MONEY_DB,
-      walletId,
-      {
-        name: nextName,
-        value: nextValue,
-        kind: nextKind,
-        source: "user",
-        evidence: nextEvidence,
-        verificationNote: nextVerificationNote,
-        sourceNote: nextSourceNote
-      },
-      actor
-    );
-  }
-
-  const duplicateAiLabels = storedLabels.filter(
-    (label) =>
-      label.source !== "user" &&
-      (label.id === targetLabel.id ||
-        getWalletLabelDisplayKey(label.kind, label.value || label.name) === dedupeKey)
-  );
-  for (const label of duplicateAiLabels) {
-    await deletePersistedWalletLabel(bindings.SMART_MONEY_DB, walletId, label.id, actor);
-  }
-
-  return getWalletDetail(walletId);
-};
-
 export const upsertWatchlistEntry = async (walletId: string, note?: string, actor?: string) => {
   const bindings = await ensurePersistedBindings();
   if (!bindings?.SMART_MONEY_DB) {
@@ -1266,16 +2439,25 @@ export const commitWalletImport = async (
   actor = "Team Alpha"
 ): Promise<WalletImportCommitResult> => {
   const importedAt = new Date().toISOString();
+  const isManagedSystemImport = request.mode === "ai" || request.mode === "finder";
   const providerMeta =
-    request.mode === "ai"
+    isManagedSystemImport
       ? request.rows
           .map((row) => ("providerMeta" in row ? row.providerMeta : undefined))
           .find((meta): meta is NonNullable<WalletAiExtractPreviewRow["providerMeta"]> => Boolean(meta))
       : undefined;
   const sourceType: WalletSourceType =
-    request.mode === "ai" && providerMeta?.provider !== "none" ? "ai" : "file";
+    request.sourceType ?? (request.mode === "ai" ? "ai" : request.mode === "finder" ? "finder" : "file");
 
   const bindings = await ensurePersistedBindings();
+  if (request.mode === "finder" && bindings?.SMART_MONEY_DB) {
+    return commitFinderWalletImportFast(request, actor, bindings.SMART_MONEY_DB, {
+      importedAt,
+      sourceType,
+      providerMeta
+    });
+  }
+
   const importBatch = bindings?.SMART_MONEY_DB
     ? await createPersistedWalletImportBatch(bindings.SMART_MONEY_DB, {
         sourceType,
@@ -1318,6 +2500,7 @@ export const commitWalletImport = async (
 
   let createdCount = 0;
   let updatedCount = 0;
+  let finderAiUpsertedCount = 0;
   const failedRows: Array<{ rowNumber: number; displayName: string; reason: string }> = [];
 
   for (const row of request.rows) {
@@ -1340,19 +2523,26 @@ export const commitWalletImport = async (
         existing && !existing.deletedAt
           ? await updateWallet(
               existing.id,
-              {
-                address: commitRow.wallet.address,
-                displayName: commitRow.wallet.displayName,
-                alias: commitRow.wallet.alias,
-                bio: commitRow.wallet.bio,
-                strategyFocus: commitRow.wallet.strategyFocus,
-                teamNote: commitRow.wallet.teamNote,
-                firstSeenAt: commitRow.wallet.firstSeenAt,
-                sourceType,
-                curationStatus,
-                lastImportedAt: importedAt,
-                importBatchId: importBatch.id
-              },
+              request.preserveExistingManualFields
+                ? createPreservedImportWalletUpdate(existing, commitRow, {
+                    sourceType,
+                    curationStatus,
+                    importBatchId: importBatch.id,
+                    importedAt
+                  })
+                : {
+                    address: commitRow.wallet.address,
+                    displayName: commitRow.wallet.displayName,
+                    alias: commitRow.wallet.alias,
+                    bio: commitRow.wallet.bio,
+                    strategyFocus: commitRow.wallet.strategyFocus,
+                    teamNote: commitRow.wallet.teamNote,
+                    firstSeenAt: commitRow.wallet.firstSeenAt,
+                    sourceType,
+                    curationStatus,
+                    lastImportedAt: importedAt,
+                    importBatchId: importBatch.id
+                  },
               actor
             )
           : await createWallet(
@@ -1379,7 +2569,7 @@ export const commitWalletImport = async (
         ? (existingLabelsByAddress.get(normalizedAddress) ?? [])
         : [];
 
-      if (request.mode === "ai" && bindings?.SMART_MONEY_DB) {
+      if (isManagedSystemImport && bindings?.SMART_MONEY_DB) {
         await replacePersistedSystemLabelsForWallet(bindings.SMART_MONEY_DB, wallet.id);
         preservedLabels =
           (await listWalletLabelsByWalletIds(bindings.SMART_MONEY_DB, [wallet.id])).get(wallet.id) ?? [];
@@ -1411,7 +2601,7 @@ export const commitWalletImport = async (
             name: label.name,
             value: labelValue,
             kind: labelKind,
-            source: request.mode === "ai" ? "system" : (label.source ?? "user"),
+            source: isManagedSystemImport ? "system" : (label.source ?? "user"),
             evidence:
               label.evidence ||
               (isWalletAiPreviewRow(commitRow) ? commitRow.sourceExcerpt : undefined),
@@ -1424,7 +2614,7 @@ export const commitWalletImport = async (
           id: `${wallet.id}-import-${writtenImportLabels.length}`,
           walletId: wallet.id,
           kind: labelKind,
-          source: request.mode === "ai" ? "system" : (label.source ?? "user"),
+          source: isManagedSystemImport ? "system" : (label.source ?? "user"),
           name: label.name,
           value: labelValue,
           evidence:
@@ -1443,6 +2633,28 @@ export const commitWalletImport = async (
 
       if (commitRow.watchlistNote?.trim()) {
         await upsertWatchlistEntry(wallet.id, commitRow.watchlistNote.trim(), actor);
+      }
+
+      if (commitRow.finderAi && bindings?.SMART_MONEY_DB) {
+        await upsertPersistedWalletFinderAiInsight(bindings.SMART_MONEY_DB, wallet.id, {
+          ...commitRow.finderAi,
+          sourceName: commitRow.finderAi.sourceName || request.sourceName || importBatch.sourceName,
+          runId: commitRow.finderAi.runId || importBatch.sourceName,
+          normalizedAddress: commitRow.finderAi.normalizedAddress || wallet.normalizedAddress,
+          strategyFocus: commitRow.finderAi.strategyFocus || commitRow.wallet.strategyFocus,
+          importBatchId: importBatch.id
+        });
+        finderAiUpsertedCount += 1;
+      }
+
+      if (commitRow.finderProfile && bindings?.SMART_MONEY_DB) {
+        await upsertPersistedWalletFinderProfile(bindings.SMART_MONEY_DB, wallet.id, {
+          ...commitRow.finderProfile,
+          sourceName:
+            commitRow.finderProfile.sourceName || request.sourceName || importBatch.sourceName,
+          runId: commitRow.finderProfile.runId || importBatch.sourceName,
+          importBatchId: importBatch.id
+        });
       }
 
       existingByAddress.set(wallet.normalizedAddress, wallet);
@@ -1477,6 +2689,7 @@ export const commitWalletImport = async (
     createdCount,
     updatedCount,
     failedRows,
+    finderAiUpsertedCount,
     importBatch: finalizedBatch ?? importBatch
   };
 };

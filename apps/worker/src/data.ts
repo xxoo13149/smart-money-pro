@@ -12,6 +12,10 @@ import {
 } from "@weather-smart-money/data";
 
 import type { Env } from "./env";
+import {
+  enrichAddressSummariesWithAiHoverNotes,
+  type WorkerWaitUntilContext
+} from "./hover-note-ai";
 import { hashValue, isoNow } from "./utils";
 
 const SCHEMA_READY = new Map<string, Promise<void>>();
@@ -371,7 +375,8 @@ const buildHolderSurfaceHints = (holders: AnnotatedHolder[]): HolderSurfaceHint[
 
 export const buildMarketAnnotationPayload = async (
   env: Env,
-  slug: string
+  slug: string,
+  ctx?: WorkerWaitUntilContext
 ): Promise<MarketAnnotationResponse> => {
   const dataBaseUrl = env.POLYMARKET_DATA_URL?.trim() || "https://data-api.polymarket.com";
   const metadata = await resolveMarketMetadata(env, slug);
@@ -380,11 +385,18 @@ export const buildMarketAnnotationPayload = async (
   );
 
   const aggregatedHolders = aggregatePolymarketHolders(holders as Parameters<typeof aggregatePolymarketHolders>[0]);
-  const summaries = await listAddressSummaries(env.SMART_MONEY_DB, {
-    chain: "polygon",
-    normalizedAddresses: aggregatedHolders.map((holder) => holder.normalizedAddress),
-    adminBaseUrl: env.ADMIN_BASE_URL
-  });
+  const summaries = await enrichAddressSummariesWithAiHoverNotes(
+    env,
+    await listAddressSummaries(env.SMART_MONEY_DB, {
+      chain: "polygon",
+      normalizedAddresses: aggregatedHolders.map((holder) => holder.normalizedAddress),
+      adminBaseUrl: env.ADMIN_BASE_URL
+    }),
+    {
+      executionContext: ctx,
+      backgroundOnMiss: true
+    }
+  );
   const summaryByAddress = new Map(
     summaries.map((summary) => [summary.normalizedAddress, summary] as const)
   );
@@ -416,13 +428,21 @@ export const buildMarketAnnotationPayload = async (
 export const refreshMarketAnnotationPayloadSummaries = async (
   env: Env,
   payload: MarketAnnotationResponse,
-  overrides?: Partial<Pick<MarketAnnotationResponse, "labelsVersion" | "refreshedAt" | "sourceStatus">>
+  overrides?: Partial<Pick<MarketAnnotationResponse, "labelsVersion" | "refreshedAt" | "sourceStatus">>,
+  ctx?: WorkerWaitUntilContext
 ): Promise<MarketAnnotationResponse> => {
-  const summaries = await listAddressSummaries(env.SMART_MONEY_DB, {
-    chain: "polygon",
-    normalizedAddresses: payload.holders.map((holder) => holder.normalizedAddress),
-    adminBaseUrl: env.ADMIN_BASE_URL
-  });
+  const summaries = await enrichAddressSummariesWithAiHoverNotes(
+    env,
+    await listAddressSummaries(env.SMART_MONEY_DB, {
+      chain: "polygon",
+      normalizedAddresses: payload.holders.map((holder) => holder.normalizedAddress),
+      adminBaseUrl: env.ADMIN_BASE_URL
+    }),
+    {
+      executionContext: ctx,
+      backgroundOnMiss: true
+    }
+  );
   const summaryByAddress = new Map(
     summaries.map((summary) => [summary.normalizedAddress, summary] as const)
   );

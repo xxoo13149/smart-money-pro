@@ -1,7 +1,7 @@
 {
   "name": "@weather-smart-money/worker",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
@@ -11,8 +11,8 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@weather-smart-money/core": "0.1.0",
-    "@weather-smart-money/data": "0.1.0"
+    "@weather-smart-money/core": "0.2.0",
+    "@weather-smart-money/data": "0.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

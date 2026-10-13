@@ -1,0 +1,41 @@
+name: Quality Gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - codex/**
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build shared packages
+        run: npm run build -w packages/core && npm run build -w packages/data
+
+      - name: Core tests
+        run: npm run test -w packages/core
+
+      - name: Typecheck workspaces
+        run: |
+          npx tsc -p packages/core/tsconfig.json --noEmit --incremental false
+          npx tsc -p packages/data/tsconfig.json --noEmit --incremental false
+          npx tsc -p apps/worker/tsconfig.json --noEmit --incremental false
+          npx tsc -p apps/extension/tsconfig.json --noEmit --incremental false
+          npx tsc -p apps/web/tsconfig.json --noEmit --incremental false
+
+      - name: Project audit
+        run: node scripts/audit-project.mjs

@@ -1,6 +1,8 @@
 ﻿import type { D1Database } from "@cloudflare/workers-types";
 import {
+  HIDDEN_LABEL_KINDS,
   getLabelKindPriority,
+  getLabelKindTone,
   getWalletLabelDisplayKey,
   isPrimarySignalLabelKind,
   sortAddressBadges,
@@ -21,6 +23,13 @@ import {
   type WalletCurationStatus,
   type WalletFacetCount,
   type WalletFacetSummary,
+  type DashboardLibraryDigest,
+  type DashboardLabelFacet,
+  type DashboardRankRow,
+  type DashboardCityStat,
+  type WalletFinderAiInsight,
+  type WalletFinderProfile,
+  type WalletFinderProfileMetric,
   type WalletImportBatch,
   type WalletLabel,
   type WalletLabelKind,
@@ -40,6 +49,7 @@ import type {
   ExtensionSessionRecord,
   WalletDeleteInput,
   WalletImportBatchRecord,
+  WalletFinderAiInsightInput,
   WalletInput,
   WalletListFilters,
   WalletLabelInput,
@@ -63,6 +73,8 @@ const REQUIRED_SCHEMA_TABLES = [
   "wallet_audit_logs",
   "wallet_saved_views",
   "wallet_import_batches",
+  "wallet_finder_ai_insights",
+  "wallet_finder_profiles",
   "extension_invites",
   "extension_users",
   "extension_sessions",
@@ -164,6 +176,53 @@ const mapWalletLabelRow = (row: Record<string, unknown>): WalletLabel => ({
   sourceNote: row.source_note ? repairPossiblyMojibake(String(row.source_note)) : undefined,
   createdAt: String(row.created_at),
   updatedAt: row.updated_at ? String(row.updated_at) : String(row.created_at)
+});
+
+const parseJsonField = <T,>(value: unknown, fallback: T): T => {
+  if (typeof value !== "string" || !value.trim()) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    return fallback;
+  }
+};
+
+const parseSavedViewQuery = (value: string): WalletSavedView["query"] => {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object"
+      ? (parsed as WalletSavedView["query"])
+      : {};
+  } catch {
+    return {};
+  }
+};
+
+const mapWalletFinderAiRow = (row: Record<string, unknown>): WalletFinderAiInsight => ({
+  walletId: String(row.wallet_id),
+  sourceName: row.source_name ? repairPossiblyMojibake(String(row.source_name)) : undefined,
+  runId: row.run_id ? String(row.run_id) : undefined,
+  normalizedAddress: row.normalized_address ? String(row.normalized_address) : undefined,
+  strategyFocus: row.strategy_focus ? repairPossiblyMojibake(String(row.strategy_focus)) : undefined,
+  aiBriefShort: row.ai_brief_short ? repairPossiblyMojibake(String(row.ai_brief_short)) : undefined,
+  aiBriefNote: row.ai_brief_note ? repairPossiblyMojibake(String(row.ai_brief_note)) : undefined,
+  aiDeepNote: row.ai_deep_note ? repairPossiblyMojibake(String(row.ai_deep_note)) : undefined,
+  sourceExcerpt: row.source_excerpt ? repairPossiblyMojibake(String(row.source_excerpt)) : undefined,
+  evidenceLevel: row.evidence_level ? String(row.evidence_level) : undefined,
+  hasConflict: Number(row.has_conflict ?? 0) === 1,
+  needsReview: Number(row.needs_review ?? 0) === 1,
+  labels: parseJsonField(row.labels_json, []),
+  primarySignals: parseJsonField(row.primary_signals_json, []),
+  keyMetrics: parseJsonField(row.key_metrics_json, []),
+  weatherSignals: parseJsonField(row.weather_signals_json, undefined),
+  providerMeta: parseJsonField(row.provider_meta_json, undefined),
+  raw: parseJsonField(row.raw_json, undefined),
+  importBatchId: row.import_batch_id ? String(row.import_batch_id) : undefined,
+  createdAt: String(row.created_at),
+  updatedAt: String(row.updated_at)
 });
 
 const mapAuditLogRow = (row: Record<string, unknown>): NoteAuditLog => ({
@@ -401,6 +460,18 @@ const ensureNormalizedAddress = (value: string) => {
 
 const escapeLikeInput = (value: string) => value.replace(/[%_]/g, (match) => `\\${match}`);
 
+const compactSearchInput = (value: string) =>
+  [" ", "\t", "\n", "\r", "_", "-", ".", ":", "/"].reduce(
+    (current, token) => current.split(token).join(""),
+    value.toLowerCase()
+  );
+
+const compactSqlExpression = (expression: string) =>
+  ["' '", "char(9)", "char(10)", "char(13)", "'_'", "'-'", "'.'", "':'", "'/'"].reduce(
+    (current, token) => `replace(${current}, ${token}, '')`,
+    expression
+  );
+
 const buildWalletFilterClauses = (input?: WalletListFilters) => {
   const filters = input ?? {};
   const clauses: string[] = [];
@@ -429,6 +500,11 @@ const buildWalletFilterClauses = (input?: WalletListFilters) => {
     values.push(filters.source);
   }
 
+  if (filters.batch?.trim()) {
+    clauses.push("import_batch_id = ?");
+    values.push(filters.batch.trim());
+  }
+
   if (filters.createdAfter) {
     clauses.push("created_at >= ?");
     values.push(filters.createdAfter);
@@ -442,27 +518,113 @@ const buildWalletFilterClauses = (input?: WalletListFilters) => {
   const query = filters.q?.trim().toLowerCase();
   if (query) {
     const like = `%${escapeLikeInput(query)}%`;
-    clauses.push(
-      `(
-        lower(normalized_address) LIKE ? ESCAPE '\\'
-        OR lower(address) LIKE ? ESCAPE '\\'
-        OR lower(display_name) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'
-        OR lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'
-        OR EXISTS (
+    const compactQuery = compactSearchInput(query);
+    const compactLike = `%${escapeLikeInput(compactQuery)}%`;
+    const searchClauses = [
+      "lower(address) LIKE ? ESCAPE '\\'",
+      "lower(normalized_address) LIKE ? ESCAPE '\\'",
+      "lower(display_name) LIKE ? ESCAPE '\\'",
+      "lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'",
+      "lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'",
+      "lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'",
+      "lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'",
+      `EXISTS (
+        SELECT 1
+        FROM wallet_finder_ai_insights
+        WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+          AND lower(wallet_finder_ai_insights.searchable_text) LIKE ? ESCAPE '\\'
+      )`,
+      `EXISTS (
+        SELECT 1
+        FROM wallet_finder_profiles
+        WHERE wallet_finder_profiles.wallet_id = wallets.id
+          AND lower(wallet_finder_profiles.searchable_text) LIKE ? ESCAPE '\\'
+      )`,
+      `EXISTS (
+        SELECT 1
+        FROM wallet_user_labels
+        WHERE wallet_user_labels.wallet_id = wallets.id
+          AND (
+            lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
+            OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.kind, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.evidence, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.verification_note, '')) LIKE ? ESCAPE '\\'
+            OR lower(coalesce(wallet_user_labels.source_note, '')) LIKE ? ESCAPE '\\'
+          )
+      )`
+    ];
+    const searchValues: unknown[] = [
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like,
+      like
+    ];
+
+    if (compactQuery.length >= 2) {
+      searchClauses.push(
+        `${compactSqlExpression("lower(normalized_address)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(address)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(display_name)")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(alias, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(strategy_focus, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(bio, ''))")} LIKE ? ESCAPE '\\'`,
+        `${compactSqlExpression("lower(coalesce(team_note, ''))")} LIKE ? ESCAPE '\\'`,
+        `EXISTS (
+          SELECT 1
+          FROM wallet_finder_ai_insights
+          WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+            AND ${compactSqlExpression("lower(wallet_finder_ai_insights.searchable_text)")} LIKE ? ESCAPE '\\'
+        )`,
+        `EXISTS (
           SELECT 1
           FROM wallet_user_labels
           WHERE wallet_user_labels.wallet_id = wallets.id
             AND (
-              lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
-              OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+              ${compactSqlExpression("lower(wallet_user_labels.name)")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(wallet_user_labels.value)")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.kind, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.evidence, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.verification_note, ''))")} LIKE ? ESCAPE '\\'
+              OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.source_note, ''))")} LIKE ? ESCAPE '\\'
             )
-        )
+        )`
+      );
+      searchValues.push(
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike,
+        compactLike
+      );
+    }
+
+    clauses.push(
+      `(
+        ${searchClauses.join("\n        OR ")}
       )`
     );
-    values.push(like, like, like, like, like, like, like, like, like);
+    values.push(...searchValues);
   }
 
   const labels = Array.from(
@@ -474,11 +636,41 @@ const buildWalletFilterClauses = (input?: WalletListFilters) => {
         SELECT 1
         FROM wallet_user_labels
         WHERE wallet_user_labels.wallet_id = wallets.id
-          AND lower(wallet_user_labels.value) = ?
+          AND (
+            lower(wallet_user_labels.value) = ?
+            OR lower(wallet_user_labels.name) = ?
+            OR lower(coalesce(wallet_user_labels.kind, '')) = ?
+            OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+            OR lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
+          )
       )`
     );
-    values.push(label);
+    const like = `%${escapeLikeInput(label)}%`;
+    values.push(label, label, label, like, like);
   });
+
+  const version = filters.version?.trim();
+  if (version) {
+    const separator = version.indexOf(":");
+    const dimension = separator > 0 ? version.slice(0, separator) : "prompt";
+    const versionValue = separator > 0 ? version.slice(separator + 1) : version;
+    const conditionByDimension: Record<string, string> = {
+      prompt: `json_extract(wallet_finder_ai_insights.provider_meta_json, '$.promptVersion') = ?`,
+      model: `json_extract(wallet_finder_ai_insights.provider_meta_json, '$.model') = ?`,
+      run: `wallet_finder_ai_insights.run_id = ?`,
+      source: `wallet_finder_ai_insights.source_name = ?`
+    };
+    const condition = conditionByDimension[dimension] ?? conditionByDimension.prompt;
+    clauses.push(
+      `EXISTS (
+        SELECT 1
+        FROM wallet_finder_ai_insights
+        WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+          AND ${condition}
+      )`
+    );
+    values.push(versionValue);
+  }
 
   return {
     where: clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "",
@@ -683,7 +875,7 @@ const toWalletSavedView = (record: WalletSavedViewRecord): WalletSavedView => ({
   id: record.id,
   name: record.name,
   scope: "team",
-  query: JSON.parse(record.queryJson) as WalletSavedView["query"],
+  query: parseSavedViewQuery(record.queryJson),
   createdAt: record.createdAt,
   updatedAt: record.updatedAt
 });
@@ -823,6 +1015,13 @@ const getLabelMetricText = (label: WalletLabel) => {
   return metric ? clampLabelText(metric, LABEL_METRIC_MAX) : undefined;
 };
 
+const getActivityLevelLabel = (labels: WalletLabel[]) =>
+  labels
+    .filter((label) => label.kind === "activity_level")
+    .sort((left, right) => toTimestamp(right.updatedAt ?? right.createdAt) - toTimestamp(left.updatedAt ?? left.createdAt))
+    .map((label) => compactLabelText(label.value) || compactLabelText(label.name))
+    .find(Boolean);
+
 const getLabelTone = (label: WalletLabel): AddressLabelBadge["tone"] => {
   if (label.source === "user") {
     return "accent";
@@ -836,7 +1035,7 @@ const getLabelTone = (label: WalletLabel): AddressLabelBadge["tone"] => {
     return "ai-review";
   }
 
-  return "neutral";
+  return getLabelKindTone(label.kind);
 };
 
 const getLabelSortPriority = (label: WalletLabel) =>
@@ -844,8 +1043,7 @@ const getLabelSortPriority = (label: WalletLabel) =>
   (label.source === "user" ? 2000 : 0) +
   ((label.verificationNote || label.sourceNote) && label.source === "user" ? 120 : 0);
 
-const shouldIncludeSummaryLabel = (kind: WalletLabelKind) =>
-  kind !== "signal_quality" && kind !== "market_scope" && kind !== "confidence";
+const shouldIncludeSummaryLabel = (kind: WalletLabelKind) => !HIDDEN_LABEL_KINDS.has(kind);
 
 const toLabelBadge = (label: WalletLabel): AddressLabelBadge => {
   const displayText = getLabelDisplayText(label);
@@ -923,13 +1121,19 @@ const buildAiMetricNote = (entry: DisplayLabelEntry) => {
   return metric ? clampLabelText(`${entry.badge.text}: ${metric}`, HOVER_NOTE_MAX) : entry.badge.text;
 };
 
-const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undefined => {
+const createAddressHoverCard = (
+  labels: WalletLabel[],
+  finderAi?: WalletFinderAiInsight
+): AddressHoverCard | undefined => {
   const displayEntries = createDisplayLabelEntries(labels);
   const officialEntries = displayEntries.filter((entry) => entry.label.source === "user");
   const aiEntries = displayEntries.filter((entry) => entry.label.source !== "user");
 
   const officialTags = officialEntries.map((entry) => entry.badge).slice(0, 6);
   const aiTags = aiEntries.map((entry) => entry.badge).slice(0, 6);
+  const aiBriefShortText = compactLabelText(finderAi?.aiBriefShort);
+  const aiNarrativeNoteText = compactLabelText(finderAi?.aiBriefNote);
+  const aiDeepNoteText = compactLabelText(finderAi?.aiDeepNote);
 
   const officialNoteText = joinUniqueLabelTexts(
     officialEntries.flatMap((entry) => [entry.label.verificationNote ?? "", entry.label.sourceNote ?? ""])
@@ -937,7 +1141,15 @@ const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undef
 
   const aiStatsNoteText = joinUniqueLabelTexts(aiEntries.map(buildAiMetricNote));
 
-  if (officialTags.length === 0 && aiTags.length === 0 && !officialNoteText && !aiStatsNoteText) {
+  if (
+    officialTags.length === 0 &&
+    aiTags.length === 0 &&
+    !officialNoteText &&
+    !aiBriefShortText &&
+    !aiStatsNoteText &&
+    !aiNarrativeNoteText &&
+    !aiDeepNoteText
+  ) {
     return undefined;
   }
 
@@ -945,7 +1157,10 @@ const createAddressHoverCard = (labels: WalletLabel[]): AddressHoverCard | undef
     officialTags,
     officialNoteText,
     aiTags,
-    aiStatsNoteText
+    aiBriefShortText: aiBriefShortText || undefined,
+    aiStatsNoteText,
+    aiNarrativeNoteText: aiNarrativeNoteText || undefined,
+    aiDeepNoteText: aiDeepNoteText || undefined
   };
 };
 
@@ -967,13 +1182,6 @@ const createStatusBadges = (wallet: Wallet): AddressLabelBadge[] => {
       text: "已删除",
       tone: "danger",
       priority: 60
-    });
-  } else if (wallet.curationStatus === "review_needed") {
-    badges.push({
-      id: `${wallet.id}-review`,
-      text: "待复核",
-      tone: "ai-review",
-      priority: 35
     });
   }
 
@@ -1025,6 +1233,7 @@ export const getSmartMoneySchemaStatus = async (
 export const bootstrapSmartMoneyDb = async (db: D1Database) => {
   await runMigrations(db);
   await ensureDatasetVersion(db, "address_labels");
+  await ensureDatasetVersion(db, "finder_ai");
   const status = await getSmartMoneySchemaStatus(db);
   if (!status.isReady) {
     const parts = [
@@ -1120,7 +1329,9 @@ export const listWalletPage = async (
     createdAfter: input?.createdAfter,
     createdBefore: input?.createdBefore,
     labels: input?.labels,
+    version: input?.version,
     source: input?.source,
+    batch: input?.batch,
     status: input?.status
   };
   const { where, values } = buildWalletFilterClauses(filters);
@@ -1166,7 +1377,9 @@ export const getWalletFacetSummary = async (
   const baseFilters: WalletListFilters = {
     q: filters?.q,
     source: filters?.source,
+    batch: filters?.batch,
     labels: filters?.labels,
+    version: filters?.version,
     createdAfter: filters?.createdAfter,
     createdBefore: filters?.createdBefore
   };
@@ -1181,6 +1394,7 @@ export const getWalletFacetSummary = async (
 
   const sourceCounts: Record<WalletSourceType, number> = {
     manual: 0,
+    finder: 0,
     ai: 0,
     file: 0,
     system: 0
@@ -1204,13 +1418,16 @@ export const getWalletFacetSummary = async (
 
   const labelRowsResult = await db
     .prepare(
-      `SELECT wallet_user_labels.value as label_value, COUNT(*) as count
+      `SELECT wallet_user_labels.value as label_value,
+              wallet_user_labels.name as label_name,
+              wallet_user_labels.kind as label_kind,
+              COUNT(DISTINCT wallet_user_labels.wallet_id) as count
        FROM wallet_user_labels
        INNER JOIN wallets ON wallets.id = wallet_user_labels.wallet_id
        WHERE wallets.deleted_at IS NULL
-       GROUP BY wallet_user_labels.value
+       GROUP BY wallet_user_labels.value, wallet_user_labels.name, wallet_user_labels.kind
        ORDER BY count DESC, wallet_user_labels.value ASC
-       LIMIT 12`
+       LIMIT 40`
     )
     .all<Record<string, unknown>>();
 
@@ -1218,10 +1435,77 @@ export const getWalletFacetSummary = async (
     (row) =>
       ({
         key: String(row.label_value),
-        label: String(row.label_value),
-        count: Number(row.count ?? 0)
+        label: String(row.label_name) && String(row.label_name) !== String(row.label_value)
+          ? `${String(row.label_name)}：${String(row.label_value)}`
+          : String(row.label_value),
+        count: Number(row.count ?? 0),
+        name: String(row.label_name) || undefined,
+        kind: row.label_kind ? (String(row.label_kind) as WalletLabelKind) : undefined
       }) satisfies WalletFacetCount
   );
+
+  const versionScope = buildWalletFilterClauses({
+    ...baseFilters,
+    labels: undefined,
+    version: undefined
+  });
+  const versionDimensions = [
+    {
+      prefix: "prompt",
+      group: "AI 提示词版本",
+      expression: `json_extract(wallet_finder_ai_insights.provider_meta_json, '$.promptVersion')`
+    },
+    {
+      prefix: "model",
+      group: "AI 模型",
+      expression: `json_extract(wallet_finder_ai_insights.provider_meta_json, '$.model')`
+    },
+    {
+      prefix: "run",
+      group: "Finder run",
+      expression: `wallet_finder_ai_insights.run_id`
+    },
+    {
+      prefix: "source",
+      group: "AI 来源",
+      expression: `wallet_finder_ai_insights.source_name`
+    }
+  ];
+  const versionRows = await Promise.all(
+    versionDimensions.map((dimension) =>
+      db
+        .prepare(
+          `SELECT ${dimension.expression} AS version_value,
+                  COUNT(DISTINCT wallet_finder_ai_insights.wallet_id) AS count
+           FROM wallet_finder_ai_insights
+           WHERE wallet_finder_ai_insights.wallet_id IN (
+             SELECT id FROM wallets ${versionScope.where}
+           )
+             AND ${dimension.expression} IS NOT NULL
+             AND ${dimension.expression} != ''
+           GROUP BY version_value
+           ORDER BY count DESC, version_value ASC
+           LIMIT 20`
+        )
+        .bind(...versionScope.values)
+        .all<Record<string, unknown>>()
+    )
+  );
+  const versionCounts = versionRows.flatMap((result, index) => {
+    const dimension = versionDimensions[index];
+    if (!dimension) {
+      return [];
+    }
+    return (result.results ?? []).map(
+      (row) =>
+        ({
+          key: `${dimension.prefix}:${String(row.version_value)}`,
+          label: String(row.version_value),
+          name: dimension.group,
+          count: Number(row.count ?? 0)
+        }) satisfies WalletFacetCount
+    );
+  });
 
   return {
     totalCount,
@@ -1230,7 +1514,385 @@ export const getWalletFacetSummary = async (
     watchlistedCount,
     reviewNeededCount,
     sourceCounts,
-    labelCounts
+    labelCounts,
+    versionCounts
+  };
+};
+
+export const getLabelLibraryStats = async (db: D1Database) => {
+  const result = await db
+    .prepare(
+      `SELECT COUNT(DISTINCT value) AS distinct_kinds, COUNT(*) AS assignments
+       FROM wallet_user_labels`
+    )
+    .first<Record<string, unknown>>();
+  return {
+    distinctKinds: Number(result?.distinct_kinds ?? 0),
+    assignments: Number(result?.assignments ?? 0)
+  };
+};
+
+const num = (value: unknown): number => {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const str = (value: unknown): string | undefined => {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+};
+
+// 每个钱包一行的真实画像指标：用 json_each 展开 metrics_json 数组后按
+// json_extract(m.value,'$.key') 透视（注意：数组元素的 json_each.key 是下标，不是指标名），
+// 这样聚合和排行榜都能在 SQL 层完成，不必把整份画像拉进 Worker 内存做 JS 归约。
+const DASHBOARD_PROFILE_PIVOT = `
+  SELECT
+    w.id AS wallet_id,
+    w.normalized_address AS normalized_address,
+    w.alias AS alias,
+    w.display_name AS display_name,
+    w.watchlisted AS watchlisted,
+    p.snapshot_as_of AS snapshot_as_of,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'total_pnl_usd'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS pnl_usd,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'volume_usd'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS volume_usd,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'trades'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS trades,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'resolved_positions'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS resolved_positions,
+    MAX(CASE WHEN json_extract(m.value, '$.key') IN ('position_win_rate', 'closed_position_win_rate')
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS win_rate,
+    MAX(CASE WHEN json_extract(m.value, '$.key') IN ('closed_profit_multiple', 'max_closed_position_profit_multiple', 'max_region_daily_profit_multiple')
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS best_multiple,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'highest_burst'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS burst_usd,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'weather_notional_ratio'
+      THEN CAST(json_extract(m.value, '$.value') AS REAL) END) AS weather_share,
+    MAX(CASE WHEN json_extract(m.value, '$.key') = 'dominant_region'
+      THEN json_extract(m.value, '$.value') END) AS top_city
+  FROM wallets w
+  JOIN wallet_finder_profiles p ON p.wallet_id = w.id
+  JOIN json_each(p.metrics_json) m
+  WHERE w.deleted_at IS NULL
+  GROUP BY w.id
+`;
+
+export const DASHBOARD_PROFILE_PIVOT_SQL = DASHBOARD_PROFILE_PIVOT;
+
+export const getDashboardLibraryDigest = async (db: D1Database): Promise<DashboardLibraryDigest> => {
+  const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const [totalsRow, profileRows, labelRows, insightRow, batchRows, portraitRows] = await Promise.all([
+    db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM wallets WHERE deleted_at IS NULL) AS wallets,
+           (SELECT COUNT(*) FROM wallets WHERE deleted_at IS NULL AND created_at >= ?) AS week_new,
+           (SELECT COUNT(*) FROM wallets WHERE deleted_at IS NULL AND watchlisted = 1) AS watchlisted,
+           (SELECT COUNT(*) FROM wallet_user_labels) AS label_assignments,
+           (SELECT COUNT(DISTINCT value) FROM wallet_user_labels) AS label_values`
+      )
+      .bind(new Date(weekAgo).toISOString())
+      .first<Record<string, unknown>>(),
+    db.prepare(`${DASHBOARD_PROFILE_PIVOT}`).all<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT kind, value, COUNT(*) AS count
+         FROM wallet_user_labels
+         GROUP BY kind, value
+         ORDER BY count DESC, value ASC`
+      )
+      .all<{ kind: string; value: string; count: number }>(),
+    db
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM wallet_finder_ai_insights) AS insights,
+           (SELECT COUNT(*) FROM wallet_finder_ai_insights WHERE needs_review = 1) AS needs_review,
+           (SELECT COUNT(*) FROM wallet_finder_ai_insights WHERE has_conflict = 1) AS conflicts`
+      )
+      .first<Record<string, unknown>>(),
+    db
+      .prepare(
+        `SELECT source_name, row_count, created_count, updated_count, created_at
+         FROM wallet_import_batches
+         ORDER BY created_at DESC
+         LIMIT 40`
+      )
+      .all<{
+        source_name: string | null;
+        row_count: number;
+        created_count: number;
+        updated_count: number;
+        created_at: string;
+      }>(),
+    db
+      .prepare(
+        `SELECT json_extract(j.value, '$.name') AS name, COUNT(*) AS count
+         FROM wallet_finder_profiles p, json_each(p.portrait_labels_json) j
+         WHERE json_extract(j.value, '$.name') IS NOT NULL
+         GROUP BY name
+         ORDER BY count DESC, name ASC`
+      )
+      .all<{ name: string; count: number }>()
+  ]);
+
+  const profiles = profileRows.results ?? [];
+  const metricRows = profiles.map((row) => ({
+    walletId: String(row.wallet_id),
+    normalizedAddress: String(row.normalized_address ?? ""),
+    alias: str(row.alias),
+    displayName: str(row.display_name),
+    watchlisted: Number(row.watchlisted ?? 0) === 1,
+    snapshotAsOf: str(row.snapshot_as_of),
+    pnlUsd: num(row.pnl_usd),
+    volumeUsd: num(row.volume_usd),
+    trades: num(row.trades),
+    resolvedPositions: num(row.resolved_positions),
+    winRate: num(row.win_rate),
+    bestMultiple: num(row.best_multiple),
+    burstUsd: num(row.burst_usd),
+    weatherShare: num(row.weather_share),
+    topCity: str(row.top_city)
+  }));
+
+  const insightsByWalletId = new Map<string, { brief?: string; focus?: string }>();
+  const insightRows = await db
+    .prepare(
+      `SELECT wallet_id, ai_brief_short, strategy_focus
+       FROM wallet_finder_ai_insights`
+    )
+    .all<{ wallet_id: string; ai_brief_short: string | null; strategy_focus: string | null }>();
+  for (const row of insightRows.results ?? []) {
+    insightsByWalletId.set(row.wallet_id, {
+      brief: str(row.ai_brief_short),
+      focus: str(row.strategy_focus)
+    });
+  }
+
+  const labelsByWalletId = new Map<string, string[]>();
+  const labelAssignments = labelRows.results ?? [];
+  if (labelAssignments.length > 0) {
+    const labelDetailRows = await db
+      .prepare(
+        `SELECT wallet_id, value
+         FROM wallet_user_labels
+         WHERE kind IN ('portrait_style', 'signal_quality', 'trader_archetype', 'early_entry_signal')
+         ORDER BY wallet_id, value`
+      )
+      .all<{ wallet_id: string; value: string }>();
+    for (const row of labelDetailRows.results ?? []) {
+      const list = labelsByWalletId.get(row.wallet_id) ?? [];
+      if (list.length < 4 && !list.includes(row.value)) {
+        list.push(row.value);
+      }
+      labelsByWalletId.set(row.wallet_id, list);
+    }
+  }
+
+  const toRankRow = (row: (typeof metricRows)[number]): DashboardRankRow => {
+    const insight = insightsByWalletId.get(row.walletId);
+    return {
+      walletId: row.walletId,
+      normalizedAddress: row.normalizedAddress,
+      alias: row.alias,
+      displayName: row.displayName,
+      watchlisted: row.watchlisted,
+      pnlUsd: row.pnlUsd,
+      winRate: row.winRate,
+      volumeUsd: row.volumeUsd,
+      trades: row.trades,
+      bestMultiple: row.bestMultiple,
+      topCity: row.topCity,
+      aiBriefShort: insight?.brief,
+      strategyFocus: insight?.focus,
+      labels: labelsByWalletId.get(row.walletId) ?? []
+    };
+  };
+
+  const resolvedTotal = metricRows.reduce((sum, row) => sum + row.resolvedPositions, 0);
+  const winRateWeighted =
+    resolvedTotal > 0
+      ? metricRows.reduce((sum, row) => sum + row.winRate * row.resolvedPositions, 0) / resolvedTotal
+      : 0;
+  const profiledRows = metricRows.filter((row) => row.resolvedPositions > 0 || row.trades > 0);
+
+  const metrics = {
+    totalPnlUsd: metricRows.reduce((sum, row) => sum + row.pnlUsd, 0),
+    totalVolumeUsd: metricRows.reduce((sum, row) => sum + row.volumeUsd, 0),
+    totalTrades: metricRows.reduce((sum, row) => sum + row.trades, 0),
+    totalResolvedPositions: resolvedTotal,
+    weightedWinRate: winRateWeighted,
+    avgWinRate:
+      profiledRows.length > 0
+        ? profiledRows.reduce((sum, row) => sum + row.winRate, 0) / profiledRows.length
+        : 0,
+    profitableWallets: metricRows.filter((row) => row.pnlUsd > 0).length,
+    losingWallets: metricRows.filter((row) => row.pnlUsd < 0).length,
+    bestMultiple: metricRows.reduce((max, row) => Math.max(max, row.bestMultiple), 0),
+    peakBurstUsd: metricRows.reduce((max, row) => Math.max(max, row.burstUsd), 0),
+    avgWeatherShare:
+      profiledRows.length > 0
+        ? profiledRows.reduce((sum, row) => sum + row.weatherShare, 0) / profiledRows.length
+        : 0,
+    profiledWallets: metricRows.length,
+    insightWallets: num(insightRow?.insights),
+    reviewWallets: num(insightRow?.needs_review) + num(insightRow?.conflicts)
+  };
+
+  const kindTotals = new Map<string, number>();
+  for (const row of labelAssignments) {
+    const kind = HIDDEN_LABEL_KINDS.has(row.kind as WalletLabelKind) ? "其他" : row.kind;
+    kindTotals.set(kind, (kindTotals.get(kind) ?? 0) + Number(row.count ?? 0));
+  }
+  const labelFacets: DashboardLabelFacet[] = [];
+  for (const [kind, total] of kindTotals) {
+    const items = labelAssignments
+      .filter(
+        (row) =>
+          (HIDDEN_LABEL_KINDS.has(row.kind as WalletLabelKind) ? "其他" : row.kind) === kind
+      )
+      .slice(0, 12)
+      .map((row) => ({
+        value: row.value,
+        count: Number(row.count ?? 0),
+        share: total > 0 ? Number(row.count ?? 0) / total : 0,
+        tone: getLabelKindTone(row.kind as WalletLabelKind)
+      }));
+    labelFacets.push({ kind, total, items });
+  }
+  labelFacets.sort((left, right) => right.total - left.total);
+
+  const portraitTotal = (portraitRows.results ?? []).reduce(
+    (sum, row) => sum + Number(row.count ?? 0),
+    0
+  );
+  if (portraitTotal > 0) {
+    // 这个分组来自 Finder 的 portrait_labels_json，和 wallet_user_labels 里的
+    // portrait_style 是两个不同来源（计数不可相加），所以用独立标题区分，
+    // 否则前端会渲染出两个同名「画像风格」分组。
+    labelFacets.push({
+      kind: "finder_portrait",
+      total: portraitTotal,
+      items: (portraitRows.results ?? []).slice(0, 18).map((row) => ({
+        value: row.name,
+        count: Number(row.count ?? 0),
+        share: portraitTotal > 0 ? Number(row.count ?? 0) / portraitTotal : 0,
+        tone: "portrait"
+      }))
+    });
+  }
+
+  const cityBuckets = new Map<
+    string,
+    DashboardCityStat & { winSum: number; topWalletPnl: number }
+  >();
+  for (const row of metricRows) {
+    const city = row.topCity;
+    if (!city || city.toLowerCase() === "climate") {
+      continue;
+    }
+    const bucket = cityBuckets.get(city) ?? {
+      city,
+      wallets: 0,
+      totalPnlUsd: 0,
+      totalVolumeUsd: 0,
+      avgWinRate: 0,
+      winSum: 0,
+      topWalletId: undefined,
+      topWalletPnl: -Infinity
+    };
+    bucket.wallets += 1;
+    bucket.totalPnlUsd += row.pnlUsd;
+    bucket.totalVolumeUsd += row.volumeUsd;
+    bucket.winSum += row.winRate;
+    if (row.pnlUsd > bucket.topWalletPnl) {
+      bucket.topWalletPnl = row.pnlUsd;
+      bucket.topWalletId = row.walletId;
+    }
+    cityBuckets.set(city, bucket);
+  }
+  const cityStats = Array.from(cityBuckets.values())
+    .map((bucket) => ({
+      city: bucket.city,
+      wallets: bucket.wallets,
+      totalPnlUsd: bucket.totalPnlUsd,
+      totalVolumeUsd: bucket.totalVolumeUsd,
+      avgWinRate: bucket.wallets > 0 ? bucket.winSum / bucket.wallets : 0,
+      topWalletId: bucket.topWalletId
+    }))
+    .sort((left, right) => right.wallets - left.wallets || right.totalPnlUsd - left.totalPnlUsd)
+    .slice(0, 16);
+
+  const batchGroups = new Map<string, {
+    sourceName: string | null;
+    rowCount: number;
+    createdCount: number;
+    updatedCount: number;
+    createdAt: string;
+    batchCount: number;
+  }>();
+  for (const row of batchRows.results ?? []) {
+    const createdAt = str(row.created_at) ?? new Date().toISOString();
+    const key = `${createdAt.slice(0, 10)}::${row.source_name ?? ""}`;
+    const group = batchGroups.get(key) ?? {
+      sourceName: row.source_name,
+      rowCount: 0,
+      createdCount: 0,
+      updatedCount: 0,
+      createdAt,
+      batchCount: 0
+    };
+    group.rowCount += Number(row.row_count ?? 0);
+    group.createdCount += Number(row.created_count ?? 0);
+    group.updatedCount += Number(row.updated_count ?? 0);
+    group.batchCount += 1;
+    batchGroups.set(key, group);
+  }
+
+  return {
+    totals: {
+      wallets: num(totalsRow?.wallets),
+      weekNewWallets: num(totalsRow?.week_new),
+      watchlisted: num(totalsRow?.watchlisted),
+      labelAssignments: num(totalsRow?.label_assignments),
+      labelValues: num(totalsRow?.label_values)
+    },
+    metrics,
+    labelFacets,
+    cityStats,
+    topByPnl: [...metricRows]
+      .sort((left, right) => right.pnlUsd - left.pnlUsd)
+      .slice(0, 8)
+      .map(toRankRow),
+    topByWinRate: [...profiledRows]
+      .filter((row) => row.resolvedPositions >= 5)
+      .sort((left, right) => right.winRate - left.winRate)
+      .slice(0, 8)
+      .map(toRankRow),
+    topByVolume: [...metricRows]
+      .sort((left, right) => right.volumeUsd - left.volumeUsd)
+      .slice(0, 8)
+      .map(toRankRow),
+    topLosers: [...metricRows]
+      .sort((left, right) => left.pnlUsd - right.pnlUsd)
+      .slice(0, 6)
+      .map(toRankRow),
+    watchlist: metricRows
+      .filter((row) => row.watchlisted)
+      .sort((left, right) => right.pnlUsd - left.pnlUsd)
+      .slice(0, 8)
+      .map(toRankRow),
+    recentBatches: Array.from(batchGroups.values()).slice(0, 6),
+    snapshotAsOf:
+      metricRows
+        .map((row) => row.snapshotAsOf)
+        .filter((value): value is string => Boolean(value))
+        .sort()
+        .at(-1) ?? null
   };
 };
 
@@ -1803,7 +2465,15 @@ export const replaceSystemLabelsForWallet = async (
     .prepare(
       `DELETE FROM wallet_user_labels
        WHERE wallet_id = ?
-         AND source = 'system'`
+         AND source = 'system'
+         AND NOT EXISTS (
+           SELECT 1
+           FROM wallet_user_labels official
+           WHERE official.wallet_id = wallet_user_labels.wallet_id
+             AND official.source = 'user'
+             AND official.kind = wallet_user_labels.kind
+             AND lower(trim(official.value)) = lower(trim(wallet_user_labels.value))
+         )`
     )
     .bind(walletId)
     .run();
@@ -2169,6 +2839,462 @@ export const updateWalletImportBatch = async (
     .first<Record<string, unknown>>();
 
   return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
+};
+
+export const getWalletImportBatchById = async (db: D1Database, batchId: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM wallet_import_batches WHERE id = ?`)
+    .bind(batchId)
+    .first<Record<string, unknown>>();
+
+  return row ? toWalletImportBatch(mapImportBatchRow(row)) : null;
+};
+
+const stringifyJsonField = (value: unknown) =>
+  value === undefined || value === null ? null : JSON.stringify(value);
+
+const buildFinderAiSearchableText = (input: WalletFinderAiInsightInput) =>
+  [
+    input.strategyFocus,
+    input.aiBriefShort,
+    input.aiBriefNote,
+    input.aiDeepNote,
+    input.sourceExcerpt,
+    input.evidenceLevel,
+    input.providerMeta?.model,
+    input.providerMeta?.promptVersion,
+    ...(input.labels ?? []).flatMap((label) => [label.kind, label.value, label.source, label.evidence]),
+    ...(input.primarySignals ?? []).flatMap((signal) => [signal.key, signal.label, signal.reason]),
+    ...(input.keyMetrics ?? []).flatMap((metric) => [metric.key, metric.label, String(metric.value ?? "")])
+  ]
+    .map((value) => compactLabelText(value))
+    .filter(Boolean)
+    .join(" ");
+
+export const getWalletFinderAiInsight = async (db: D1Database, walletId: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM wallet_finder_ai_insights WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<Record<string, unknown>>();
+
+  return row ? mapWalletFinderAiRow(row) : null;
+};
+
+export const upsertWalletFinderAiInsight = async (
+  db: D1Database,
+  walletId: string,
+  input: WalletFinderAiInsightInput
+) => {
+  const wallet = await getWalletById(db, walletId, { includeDeleted: true });
+  if (!wallet) {
+    return null;
+  }
+
+  const existing = await db
+    .prepare(`SELECT created_at FROM wallet_finder_ai_insights WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<{ created_at?: string }>();
+  const timestamp = nowIso();
+  const createdAt = existing?.created_at ?? timestamp;
+  const searchableText = buildFinderAiSearchableText(input);
+
+  await db
+    .prepare(
+      `INSERT INTO wallet_finder_ai_insights (
+        wallet_id,
+        source_name,
+        run_id,
+        normalized_address,
+        strategy_focus,
+        ai_brief_short,
+        ai_brief_note,
+        ai_deep_note,
+        source_excerpt,
+        evidence_level,
+        has_conflict,
+        needs_review,
+        labels_json,
+        primary_signals_json,
+        key_metrics_json,
+        weather_signals_json,
+        provider_meta_json,
+        raw_json,
+        searchable_text,
+        import_batch_id,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(wallet_id) DO UPDATE SET
+        source_name = excluded.source_name,
+        run_id = excluded.run_id,
+        normalized_address = excluded.normalized_address,
+        strategy_focus = excluded.strategy_focus,
+        ai_brief_short = excluded.ai_brief_short,
+        ai_brief_note = excluded.ai_brief_note,
+        ai_deep_note = excluded.ai_deep_note,
+        source_excerpt = excluded.source_excerpt,
+        evidence_level = excluded.evidence_level,
+        has_conflict = excluded.has_conflict,
+        needs_review = excluded.needs_review,
+        labels_json = excluded.labels_json,
+        primary_signals_json = excluded.primary_signals_json,
+        key_metrics_json = excluded.key_metrics_json,
+        weather_signals_json = excluded.weather_signals_json,
+        provider_meta_json = excluded.provider_meta_json,
+        raw_json = excluded.raw_json,
+        searchable_text = excluded.searchable_text,
+        import_batch_id = excluded.import_batch_id,
+        updated_at = excluded.updated_at`
+    )
+    .bind(
+      walletId,
+      input.sourceName?.trim() || null,
+      input.runId?.trim() || null,
+      input.normalizedAddress?.trim() || wallet.normalizedAddress,
+      input.strategyFocus?.trim() || null,
+      input.aiBriefShort?.trim() || null,
+      input.aiBriefNote?.trim() || null,
+      input.aiDeepNote?.trim() || null,
+      input.sourceExcerpt?.trim() || null,
+      input.evidenceLevel?.trim() || null,
+      input.hasConflict ? 1 : 0,
+      input.needsReview ? 1 : 0,
+      stringifyJsonField(input.labels ?? []),
+      stringifyJsonField(input.primarySignals ?? []),
+      stringifyJsonField(input.keyMetrics ?? []),
+      stringifyJsonField(input.weatherSignals),
+      stringifyJsonField(input.providerMeta),
+      stringifyJsonField(input.raw),
+      searchableText,
+      input.importBatchId?.trim() || null,
+      createdAt,
+      timestamp
+    )
+    .run();
+
+  await touchWallet(db, walletId);
+  await Promise.all([
+    incrementDatasetVersion(db, "address_labels"),
+    incrementDatasetVersion(db, "finder_ai")
+  ]);
+
+  return getWalletFinderAiInsight(db, walletId);
+};
+
+export const listWalletFinderAiInsightsByWalletIds = async (
+  db: D1Database,
+  walletIds: string[]
+) => {
+  if (walletIds.length === 0) {
+    return new Map<string, WalletFinderAiInsight>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(walletIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT * FROM wallet_finder_ai_insights
+             WHERE wallet_id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return new Map(
+    rows.map((row) => {
+      const insight = mapWalletFinderAiRow(row);
+      return [insight.walletId ?? String(row.wallet_id), insight] as const;
+    })
+  );
+};
+
+const mapWalletFinderProfileRow = (row: Record<string, unknown>): WalletFinderProfile => ({
+  runId: row.run_id ? String(row.run_id) : undefined,
+  sourceName: row.source_name ? String(row.source_name) : undefined,
+  snapshotAsOf: row.snapshot_as_of ? String(row.snapshot_as_of) : undefined,
+  analysisSource: row.analysis_source ? String(row.analysis_source) : undefined,
+  metrics: parseJsonField(row.metrics_json, []),
+  portraitLabels: parseJsonField(row.portrait_labels_json, []),
+  cities: parseJsonField(row.cities_json, []),
+  patterns: parseJsonField(row.patterns_json, []),
+  strategyMetrics: parseJsonField(row.strategy_metrics_json, {}),
+  overview: parseJsonField(row.overview_json, {}),
+  coverage: parseJsonField(row.coverage_json, {}),
+  importBatchId: row.import_batch_id ? String(row.import_batch_id) : undefined,
+  createdAt: row.created_at ? String(row.created_at) : undefined,
+  updatedAt: row.updated_at ? String(row.updated_at) : undefined
+});
+
+const buildFinderProfileSearchableText = (input: WalletFinderProfile) =>
+  [
+    input.runId,
+    input.sourceName,
+    input.analysisSource,
+    ...input.metrics.flatMap((metric) => [metric.label, String(metric.value ?? "")]),
+    ...input.portraitLabels.flatMap((label) => [label.name, label.code, label.description]),
+    ...input.cities.map((city) => city.city)
+  ]
+    .map((value) => compactLabelText(typeof value === "string" ? value : ""))
+    .filter(Boolean)
+    .join(" ");
+
+export const upsertWalletFinderProfile = async (
+  db: D1Database,
+  walletId: string,
+  input: WalletFinderProfile
+) => {
+  const wallet = await getWalletById(db, walletId, { includeDeleted: true });
+  if (!wallet) {
+    return null;
+  }
+
+  const existing = await db
+    .prepare(`SELECT created_at FROM wallet_finder_profiles WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<{ created_at?: string }>();
+  const timestamp = nowIso();
+  const createdAt = existing?.created_at ?? timestamp;
+
+  await db
+    .prepare(
+      `INSERT INTO wallet_finder_profiles (
+        wallet_id,
+        source_name,
+        run_id,
+        normalized_address,
+        snapshot_as_of,
+        analysis_source,
+        metrics_json,
+        portrait_labels_json,
+        cities_json,
+        patterns_json,
+        strategy_metrics_json,
+        overview_json,
+        coverage_json,
+        searchable_text,
+        import_batch_id,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(wallet_id) DO UPDATE SET
+        source_name = excluded.source_name,
+        run_id = excluded.run_id,
+        normalized_address = excluded.normalized_address,
+        snapshot_as_of = excluded.snapshot_as_of,
+        analysis_source = excluded.analysis_source,
+        metrics_json = excluded.metrics_json,
+        portrait_labels_json = excluded.portrait_labels_json,
+        cities_json = excluded.cities_json,
+        patterns_json = excluded.patterns_json,
+        strategy_metrics_json = excluded.strategy_metrics_json,
+        overview_json = excluded.overview_json,
+        coverage_json = excluded.coverage_json,
+        searchable_text = excluded.searchable_text,
+        import_batch_id = excluded.import_batch_id,
+        updated_at = excluded.updated_at`
+    )
+    .bind(
+      walletId,
+      input.sourceName?.trim() || null,
+      input.runId?.trim() || null,
+      wallet.normalizedAddress,
+      input.snapshotAsOf?.trim() || null,
+      input.analysisSource?.trim() || null,
+      stringifyJsonField(input.metrics ?? []),
+      stringifyJsonField(input.portraitLabels ?? []),
+      stringifyJsonField(input.cities ?? []),
+      stringifyJsonField(input.patterns ?? []),
+      stringifyJsonField(input.strategyMetrics ?? {}),
+      stringifyJsonField(input.overview ?? {}),
+      stringifyJsonField(input.coverage ?? {}),
+      buildFinderProfileSearchableText(input),
+      input.importBatchId?.trim() || null,
+      createdAt,
+      timestamp
+    )
+    .run();
+
+  await touchWallet(db, walletId);
+  return mapWalletFinderProfileRow({
+    wallet_id: walletId,
+    source_name: input.sourceName,
+    run_id: input.runId,
+    snapshot_as_of: input.snapshotAsOf,
+    analysis_source: input.analysisSource,
+    import_batch_id: input.importBatchId,
+    created_at: createdAt,
+    updated_at: timestamp
+  });
+};
+
+export const getWalletFinderProfile = async (db: D1Database, walletId: string) => {
+  const row = await db
+    .prepare(`SELECT * FROM wallet_finder_profiles WHERE wallet_id = ?`)
+    .bind(walletId)
+    .first<Record<string, unknown>>();
+  return row ? mapWalletFinderProfileRow(row) : null;
+};
+
+export const listWalletFinderProfilesByWalletIds = async (
+  db: D1Database,
+  walletIds: string[]
+) => {
+  if (walletIds.length === 0) {
+    return new Map<string, WalletFinderProfile>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(walletIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT * FROM wallet_finder_profiles
+             WHERE wallet_id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return new Map(
+    rows.map((row) => {
+      const profile = mapWalletFinderProfileRow(row);
+      return [String(row.wallet_id), profile] as const;
+    })
+  );
+};
+
+// 地址库列表的悬浮卡只需要几个关键数字，不值得把整份画像
+// （城市明细 + 行为模式 + 原始 JSON）都读出来，所以这里只取 metrics_json。
+export const listWalletFinderProfileMetricsByWalletIds = async (
+  db: D1Database,
+  walletIds: string[]
+) => {
+  if (walletIds.length === 0) {
+    return new Map<string, { metrics: WalletFinderProfileMetric[]; snapshotAsOf?: string; updatedAt?: string }>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(walletIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT wallet_id, metrics_json, snapshot_as_of, updated_at
+             FROM wallet_finder_profiles
+             WHERE wallet_id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return new Map(
+    rows.map((row) => {
+      let metrics: WalletFinderProfileMetric[] = [];
+      try {
+        const parsed = JSON.parse(String(row.metrics_json ?? "[]"));
+        metrics = Array.isArray(parsed) ? (parsed as WalletFinderProfileMetric[]) : [];
+      } catch {
+        metrics = [];
+      }
+      return [
+        String(row.wallet_id),
+        {
+          metrics,
+          snapshotAsOf: row.snapshot_as_of ? String(row.snapshot_as_of) : undefined,
+          updatedAt: row.updated_at ? String(row.updated_at) : undefined
+        }
+      ] as const;
+    })
+  );
+};
+
+export const listWalletImportBatches = async (
+  db: D1Database,
+  input?: {
+    limit?: number;
+  }
+) => {
+  const limit = Math.max(1, Math.min(100, Math.trunc(input?.limit ?? 20)));
+  const result = await db
+    .prepare(
+      `SELECT *
+       FROM wallet_import_batches
+       ORDER BY created_at DESC
+       LIMIT ?`
+    )
+    .bind(limit)
+    .all<Record<string, unknown>>();
+
+  return (result.results ?? []).map((row) => toWalletImportBatch(mapImportBatchRow(row)));
+};
+
+export const listWalletImportBatchesByIds = async (db: D1Database, batchIds: string[]) => {
+  if (batchIds.length === 0) {
+    return new Map<string, WalletImportBatch>();
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(batchIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT *
+             FROM wallet_import_batches
+             WHERE id IN (${buildPlaceholders(chunk)})`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return rows.reduce((map, row) => {
+    const batch = toWalletImportBatch(mapImportBatchRow(row));
+    map.set(batch.id, batch);
+    return map;
+  }, new Map<string, WalletImportBatch>());
+};
+
+export const listWalletsByImportBatchIds = async (db: D1Database, batchIds: string[]) => {
+  if (batchIds.length === 0) {
+    return [];
+  }
+
+  const rows = (
+    await Promise.all(
+      chunkItems(batchIds, MAX_SQL_IN_ITEMS).map(async (chunk) => {
+        const result = await db
+          .prepare(
+            `SELECT *
+             FROM wallets
+             WHERE import_batch_id IN (${buildPlaceholders(chunk)})
+             ORDER BY updated_at DESC, created_at DESC`
+          )
+          .bind(...chunk)
+          .all<Record<string, unknown>>();
+
+        return result.results ?? [];
+      })
+    )
+  ).flat();
+
+  return rows.map(mapWalletRow);
 };
 
 export const getExtensionUserByNormalizedEmail = async (db: D1Database, normalizedEmail: string) => {
@@ -2673,10 +3799,12 @@ export const listAddressSummaries = async (
   }
 
   const walletIds = wallets.map((wallet) => wallet.id);
-  const [labelsByWalletId, notesByWalletId, version] = await Promise.all([
+  const [labelsByWalletId, notesByWalletId, finderAiByWalletId, labelsVersion, finderAiVersion] = await Promise.all([
     listWalletLabelsByWalletIds(db, walletIds),
     listWalletNotesByWalletIds(db, walletIds),
-    getDatasetVersion(db, "address_labels")
+    listWalletFinderAiInsightsByWalletIds(db, walletIds),
+    getDatasetVersion(db, "address_labels"),
+    getDatasetVersion(db, "finder_ai")
   ]);
 
   const walletRowByAddress = new Map(
@@ -2692,9 +3820,13 @@ export const listAddressSummaries = async (
       }
 
       const labels = labelsByWalletId.get(wallet.id) ?? [];
+      const finderAi = finderAiByWalletId.get(wallet.id);
       const latestNote = notesByWalletId.get(wallet.id)?.[0];
       const walletRow = walletRowByAddress.get(normalizedAddress);
-      const updatedAt = walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt;
+      const updatedAt = [walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt, finderAi?.updatedAt]
+        .filter((value): value is string => Boolean(value))
+        .sort((left, right) => toTimestamp(right) - toTimestamp(left))[0] ?? wallet.updatedAt;
+      const strategyFocus = finderAi?.aiBriefShort || finderAi?.strategyFocus || wallet.strategyFocus || undefined;
 
       return {
         chain: wallet.chain,
@@ -2702,16 +3834,20 @@ export const listAddressSummaries = async (
         normalizedAddress: wallet.normalizedAddress,
         alias: wallet.alias ?? wallet.displayName,
         displayName: wallet.displayName,
-        strategyFocus: wallet.strategyFocus || undefined,
+        strategyFocus,
         badges: createSummaryBadges(labels),
         hoverBadges: createHoverBadges(labels),
         statusBadges: createStatusBadges(wallet),
-        hoverCard: createAddressHoverCard(labels),
-        noteSnippet: latestNote?.content ?? wallet.teamNote,
+        hoverCard: createAddressHoverCard(labels, finderAi),
+        noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+        aiBriefShort: finderAi?.aiBriefShort ?? finderAi?.strategyFocus,
+        aiBriefNote: finderAi?.aiBriefNote,
+        aiDeepNote: finderAi?.aiDeepNote,
+        activityLevel: getActivityLevelLabel(labels),
         watchlisted: wallet.watchlisted,
         detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
         updatedAt,
-        version: `v${version}:${wallet.id}:${updatedAt}`
+        version: `v${labelsVersion}.${finderAiVersion}:${wallet.id}:${updatedAt}`
       } satisfies AddressSummary;
     })
     .filter((item): item is NonNullable<typeof item> => item !== null);
@@ -2733,7 +3869,9 @@ export const searchAddressSummaries = async (
 
   const chain = input.chain ?? DEFAULT_CHAIN;
   const limit = Math.max(1, Math.min(25, input.limit ?? 12));
-  const queryLike = `%${query}%`;
+  const queryLike = `%${escapeLikeInput(query)}%`;
+  const compactQuery = compactSearchInput(query);
+  const compactLike = compactQuery ? `%${escapeLikeInput(compactQuery)}%` : "";
 
   const walletRowsResult = await db
     .prepare(
@@ -2742,21 +3880,62 @@ export const searchAddressSummaries = async (
        WHERE chain = ?
          AND deleted_at IS NULL
          AND (
-           lower(normalized_address) LIKE ?
-           OR lower(address) LIKE ?
-           OR lower(display_name) LIKE ?
-           OR lower(coalesce(alias, '')) LIKE ?
-           OR lower(coalesce(strategy_focus, '')) LIKE ?
-           OR lower(coalesce(bio, '')) LIKE ?
-           OR lower(coalesce(team_note, '')) LIKE ?
+           lower(normalized_address) LIKE ? ESCAPE '\\'
+           OR lower(address) LIKE ? ESCAPE '\\'
+           OR lower(display_name) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(alias, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(strategy_focus, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(bio, '')) LIKE ? ESCAPE '\\'
+           OR lower(coalesce(team_note, '')) LIKE ? ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1
+             FROM wallet_finder_ai_insights
+             WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+               AND lower(wallet_finder_ai_insights.searchable_text) LIKE ? ESCAPE '\\'
+           )
            OR EXISTS (
              SELECT 1
              FROM wallet_user_labels
              WHERE wallet_user_labels.wallet_id = wallets.id
                AND (
-                 lower(wallet_user_labels.name) LIKE ?
-                 OR lower(wallet_user_labels.value) LIKE ?
+                 lower(wallet_user_labels.name) LIKE ? ESCAPE '\\'
+                 OR lower(wallet_user_labels.value) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.kind, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.evidence, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.verification_note, '')) LIKE ? ESCAPE '\\'
+                 OR lower(coalesce(wallet_user_labels.source_note, '')) LIKE ? ESCAPE '\\'
                )
+           )
+           OR (
+             ? <> ''
+             AND (
+               ${compactSqlExpression("lower(normalized_address)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(address)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(display_name)")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(alias, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(strategy_focus, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(bio, ''))")} LIKE ? ESCAPE '\\'
+               OR ${compactSqlExpression("lower(coalesce(team_note, ''))")} LIKE ? ESCAPE '\\'
+               OR EXISTS (
+                 SELECT 1
+                 FROM wallet_finder_ai_insights
+                 WHERE wallet_finder_ai_insights.wallet_id = wallets.id
+                   AND ${compactSqlExpression("lower(wallet_finder_ai_insights.searchable_text)")} LIKE ? ESCAPE '\\'
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM wallet_user_labels
+                 WHERE wallet_user_labels.wallet_id = wallets.id
+                   AND (
+                     ${compactSqlExpression("lower(wallet_user_labels.name)")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(wallet_user_labels.value)")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.kind, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.evidence, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.verification_note, ''))")} LIKE ? ESCAPE '\\'
+                     OR ${compactSqlExpression("lower(coalesce(wallet_user_labels.source_note, ''))")} LIKE ? ESCAPE '\\'
+                   )
+               )
+             )
            )
          )
        ORDER BY watchlisted DESC, updated_at DESC, created_at DESC
@@ -2764,15 +3943,9 @@ export const searchAddressSummaries = async (
     )
     .bind(
       chain,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike,
-      queryLike
+      ...Array<string>(14).fill(queryLike),
+      compactQuery,
+      ...Array<string>(14).fill(compactLike)
     )
     .all<Record<string, unknown>>();
 
@@ -2783,17 +3956,23 @@ export const searchAddressSummaries = async (
   }
 
   const walletIds = wallets.map((wallet) => wallet.id);
-  const [labelsByWalletId, notesByWalletId, version] = await Promise.all([
+  const [labelsByWalletId, notesByWalletId, finderAiByWalletId, labelsVersion, finderAiVersion] = await Promise.all([
     listWalletLabelsByWalletIds(db, walletIds),
     listWalletNotesByWalletIds(db, walletIds),
-    getDatasetVersion(db, "address_labels")
+    listWalletFinderAiInsightsByWalletIds(db, walletIds),
+    getDatasetVersion(db, "address_labels"),
+    getDatasetVersion(db, "finder_ai")
   ]);
 
   return wallets.map((wallet, index) => {
     const labels = labelsByWalletId.get(wallet.id) ?? [];
+    const finderAi = finderAiByWalletId.get(wallet.id);
     const latestNote = notesByWalletId.get(wallet.id)?.[0];
     const walletRow = walletRows[index];
-    const updatedAt = walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt;
+    const updatedAt = [walletRow?.updated_at ? String(walletRow.updated_at) : wallet.updatedAt, finderAi?.updatedAt]
+      .filter((value): value is string => Boolean(value))
+      .sort((left, right) => toTimestamp(right) - toTimestamp(left))[0] ?? wallet.updatedAt;
+    const strategyFocus = finderAi?.aiBriefShort || finderAi?.strategyFocus || wallet.strategyFocus || undefined;
 
     return {
       chain: wallet.chain,
@@ -2801,16 +3980,20 @@ export const searchAddressSummaries = async (
       normalizedAddress: wallet.normalizedAddress,
       displayName: wallet.displayName,
       alias: wallet.alias ?? wallet.displayName,
-      strategyFocus: wallet.strategyFocus || undefined,
+      strategyFocus,
       badges: createSummaryBadges(labels),
       hoverBadges: createHoverBadges(labels),
       statusBadges: createStatusBadges(wallet),
-      hoverCard: createAddressHoverCard(labels),
-      noteSnippet: latestNote?.content ?? wallet.teamNote,
+      hoverCard: createAddressHoverCard(labels, finderAi),
+      noteSnippet: finderAi?.aiBriefNote ?? latestNote?.content ?? wallet.teamNote,
+      aiBriefShort: finderAi?.aiBriefShort ?? finderAi?.strategyFocus,
+      aiBriefNote: finderAi?.aiBriefNote,
+      aiDeepNote: finderAi?.aiDeepNote,
+      activityLevel: getActivityLevelLabel(labels),
       watchlisted: wallet.watchlisted,
       detailUrl: `${input.adminBaseUrl.replace(/\/$/, "")}/wallets/${wallet.id}`,
       updatedAt,
-      version: `v${version}:${wallet.id}:${updatedAt}`,
+      version: `v${labelsVersion}.${finderAiVersion}:${wallet.id}:${updatedAt}`,
       bio: wallet.bio || undefined,
       teamNote: wallet.teamNote || undefined
     } satisfies AddressSearchResult;

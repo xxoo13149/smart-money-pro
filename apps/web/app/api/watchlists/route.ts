@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { requireAdminApiSession } from "../../../lib/admin-auth";
 import { removeWatchlistEntry, upsertWatchlistEntry } from "../../../lib/data";
+import { invalidateWalletCache } from "../../../lib/cache";
 
 export async function POST(request: Request) {
   const auth = await requireAdminApiSession(request);
@@ -19,6 +20,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "wallet not found" }, { status: 404 });
   }
 
+  await invalidateWalletCache();
   return NextResponse.json({ data: entry }, { status: 201 });
 }
 
@@ -38,5 +40,6 @@ export async function DELETE(request: Request) {
     return NextResponse.json({ error: "wallet not found" }, { status: 404 });
   }
 
+  await invalidateWalletCache();
   return NextResponse.json({ data: wallet });
 }

@@ -690,7 +690,7 @@ const buildPreviewRow = (source: Record<string, string>, rowNumber: number): Wal
   }
 
   if (!compactText(canonical.get("sourceExcerpt"))) {
-    warnings.push("缺少原文证据摘录，后续 AI 复核和人工判断会更弱");
+    warnings.push("缺少原文证据摘录，后续 AI 摘要和标签可信度会更弱");
   }
 
   if (Object.keys(unknownFields).length > 0) {

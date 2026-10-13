@@ -2,8 +2,10 @@ import { NextResponse } from "next/server";
 
 import { requireAdminApiSession } from "../../../../lib/admin-auth";
 import { deleteWallet, removeWatchlistEntry, upsertWatchlistEntry } from "../../../../lib/data";
+import { invalidateWalletCache } from "../../../../lib/cache";
 
 type WalletBulkAction = "soft_delete" | "watchlist_add" | "watchlist_remove";
+const MAX_BULK_WALLET_IDS = 200;
 
 interface WalletBulkRequest {
   action?: WalletBulkAction;
@@ -32,10 +34,18 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "walletIds is required" }, { status: 400 });
   }
 
+  if (walletIds.length > MAX_BULK_WALLET_IDS) {
+    return NextResponse.json(
+      { error: `walletIds cannot exceed ${MAX_BULK_WALLET_IDS} per request` },
+      { status: 413 }
+    );
+  }
+
   const results = await Promise.all(
     walletIds.map(async (walletId) => {
       try {
         if (body.action === "soft_delete") {
+        await invalidateWalletCache();
           const wallet = await deleteWallet(walletId, {
             actor,
             reason: body.reason?.trim() || "wallet-workspace-bulk-delete"
@@ -48,6 +58,7 @@ export async function POST(request: Request) {
         }
 
         if (body.action === "watchlist_add") {
+        await invalidateWalletCache();
           const entry = await upsertWatchlistEntry(walletId, body.note?.trim() || undefined, actor);
           if (!entry) {
             throw new Error("wallet not found");
@@ -56,6 +67,7 @@ export async function POST(request: Request) {
           return { ok: true as const, walletId };
         }
 
+        await invalidateWalletCache();
         const wallet = await removeWatchlistEntry(walletId, actor);
         if (!wallet) {
           throw new Error("wallet not found");

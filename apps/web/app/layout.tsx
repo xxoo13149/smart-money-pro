@@ -1,18 +1,18 @@
 import "./globals.css";
-import Link from "next/link";
 
-import { getAdminLayoutState } from "../lib/admin-auth";
-
-export const dynamic = "force-dynamic";
+import { AdminNav } from "../components/AdminNav";
+import { UpdateNotice } from "../components/UpdateNotice";
+import { SessionHeader } from "../components/SessionHeader";
 
 export const metadata = {
   title: "Polymarket Smart Money",
   description: "Polymarket 聪明钱地址库与扩展工作台"
 };
 
-export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  const authState = await getAdminLayoutState();
-
+// layout 保持静态渲染：会话状态交给 SessionHeader 在客户端读取。
+// 页面级登录门禁由各页面/接口的 requireAdmin* 负责，避免每次请求都在
+// Worker 里跑一次 session 解析（Error 1102 的主要来源之一）。
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
       <body>
@@ -20,41 +20,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           <header className="header">
             <div className="header__title">Polymarket Smart Money Workspace</div>
             <div className="header__actions">
-              {authState.session ? (
-                <>
-                  <nav className="nav">
-                    <Link href="/">首页</Link>
-                    <Link href="/wallets">地址库</Link>
-                    <Link href="/alerts">预警</Link>
-                    <Link href="/runtime">运行时</Link>
-                    <Link href="/extension">扩展</Link>
-                  </nav>
-                  <div className="header__session">
-                    <span className="header__session-label">{authState.session.user.email}</span>
-                    <form action="/api/auth/logout" method="post">
-                      <button type="submit" className="secondary-button small-button">
-                        退出
-                      </button>
-                    </form>
-                  </div>
-                </>
-              ) : (
-                <div className="header__session">
-                  <span className="eyebrow">
-                    {authState.accessEmail
-                      ? `Access 已检测：${authState.accessEmail}`
-                      : authState.authReady
-                        ? "后台登录"
-                        : "等待云端鉴权环境"}
-                  </span>
-                  <Link href="/auth/login" className="secondary-button small-button">
-                    登录
-                  </Link>
-                  <Link href="/auth/register" className="primary-button small-button">
-                    注册
-                  </Link>
-                </div>
-              )}
+              <SessionHeader />
+              <AdminNav />
+              <UpdateNotice />
             </div>
           </header>
           <main className="main-shell">{children}</main>

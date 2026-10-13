@@ -1,24 +1,8 @@
-import { WalletsConsole } from "../../components/WalletsConsole";
-import { requireAdminPageSession } from "../../lib/admin-auth";
-import { getWalletsPageData, parseWalletListQueryInput } from "../../lib/data";
+import { WalletsConsoleLoader } from "../../components/WalletsConsoleClient";
 
-export const dynamic = "force-dynamic";
-
-export default async function WalletsPage({
-  searchParams
-}: {
-  searchParams?: Promise<Record<string, string | string[] | undefined>>;
-}) {
-  await requireAdminPageSession("/wallets");
-  const resolved = (await searchParams) ?? {};
-  const pageData = await getWalletsPageData(parseWalletListQueryInput(resolved));
-
-  return (
-    <WalletsConsole
-      initialData={pageData.listPage}
-      savedViews={pageData.savedViews}
-      initialQuery={pageData.query}
-      initialSelectedWalletDetail={pageData.selectedWalletDetail}
-    />
-  );
+// 地址库是重表格页面：整页只输出外壳，列表/分面/保存视图/选中详情全部由
+// WalletsConsoleLoader 在浏览器里请求 /api/wallets/page-data（该接口有 KV 缓存）。
+// 这样服务端不再跑聚合查询 + 序列化 600+ 钱包，规避 Workers Free 10ms CPU 限制。
+export default function WalletsPage() {
+  return <WalletsConsoleLoader />;
 }

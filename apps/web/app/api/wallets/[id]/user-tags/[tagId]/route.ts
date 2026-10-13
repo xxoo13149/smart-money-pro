@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import type { WalletLabelKind, WalletLabelSource } from "@weather-smart-money/core";
+import type { WalletLabelKind } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../../../../lib/admin-auth";
 import { deleteUserTag, updateUserTag } from "../../../../../../lib/data";
+import { invalidateWalletCache } from "../../../../../../lib/cache";
 
 export async function PATCH(
   request: Request,
@@ -19,7 +20,6 @@ export async function PATCH(
       name?: string;
       value?: string;
       kind?: WalletLabelKind;
-      source?: WalletLabelSource;
       evidence?: string;
       verificationNote?: string;
       sourceNote?: string;
@@ -36,7 +36,6 @@ export async function PATCH(
       body.name !== undefined ||
       body.value !== undefined ||
       body.kind !== undefined ||
-      body.source !== undefined ||
       body.evidence !== undefined ||
       body.verificationNote !== undefined ||
       body.sourceNote !== undefined;
@@ -51,7 +50,7 @@ export async function PATCH(
         name: body.name?.trim(),
         value: body.value?.trim(),
         kind: body.kind,
-        source: body.source,
+        source: "user",
         evidence: body.evidence !== undefined ? body.evidence.trim() : undefined,
         verificationNote:
           body.verificationNote !== undefined ? body.verificationNote.trim() : undefined,
@@ -67,6 +66,7 @@ export async function PATCH(
       return NextResponse.json({ error: "tag not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: tag }, { status: 200 });
   } catch (error) {
     console.error("update user tag failed", error);
@@ -94,6 +94,7 @@ export async function DELETE(
       return NextResponse.json({ error: "tag not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: removed }, { status: 200 });
   } catch (error) {
     console.error("delete user tag failed", error);

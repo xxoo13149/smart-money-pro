@@ -1,8 +1,8 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 
+import { AppLink } from "./AppLink";
 import { Metric } from "./Metric";
 import { Section } from "./Section";
 
@@ -291,7 +291,7 @@ const KeyValueRow = ({
 );
 
 const InlineActionLink = ({ href, children }: { href: string; children: React.ReactNode }) => (
-  <Link
+  <AppLink
     href={href}
     className="secondary-button"
     style={{
@@ -301,7 +301,7 @@ const InlineActionLink = ({ href, children }: { href: string; children: React.Re
     }}
   >
     {children}
-  </Link>
+  </AppLink>
 );
 
 export function RuntimeAdminConsole() {
@@ -480,7 +480,7 @@ export function RuntimeAdminConsole() {
             <Metric label="活跃钱包" value={budget?.approximateDataset.wallets.active ?? 0} />
             <Metric label="观察名单" value={budget?.approximateDataset.wallets.watchlisted ?? 0} />
             <Metric label="扩展会话" value={budget?.approximateDataset.extension.sessions ?? 0} />
-            <Metric label="待复核地址" value={budget?.approximateDataset.wallets.reviewNeeded ?? 0} />
+            <Metric label="待补充地址" value={budget?.approximateDataset.wallets.reviewNeeded ?? 0} />
             <Metric label="恢复版本" value={recovery?.datasetVersion ?? 0} />
           </div>
         </div>

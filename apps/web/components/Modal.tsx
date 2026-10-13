@@ -60,6 +60,11 @@ export const Modal = ({
       className="modal"
       aria-labelledby={titleId}
       aria-describedby={description ? descriptionId : undefined}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
+      }}
     >
       <div className="modal__header">
         <div>

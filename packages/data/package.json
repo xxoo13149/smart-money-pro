@@ -1,6 +1,6 @@
 {
   "name": "@weather-smart-money/data",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -8,14 +8,16 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "lint": "tsc -p tsconfig.json --noEmit",
-    "seed": "node --loader ./node_modules/ts-node/esm.mjs scripts/seed.ts"
+    "seed": "node --loader ./node_modules/ts-node/esm.mjs scripts/seed.ts",
+    "test": "vitest run"
   },
   "dependencies": {
-    "@weather-smart-money/core": "0.1.0"
+    "@weather-smart-money/core": "0.2.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.202",
     "ts-node": "^10.9.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
   }
 }

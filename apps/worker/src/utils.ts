@@ -9,6 +9,8 @@ export interface AccessTokenPayload {
   exp: number;
   iat: number;
   iss: string;
+  aud?: string;
+  kid?: string;
 }
 
 const normalizeSecret = (secret: string) => encoder.encode(secret.trim());
@@ -101,10 +103,13 @@ export const signAccessToken = async (
   env: Env,
   payload: Omit<AccessTokenPayload, "iss"> & { iss?: string }
 ) => {
-  const header = { alg: "HS256", typ: "JWT" };
+  const keyId = env.EXTENSION_TOKEN_KEY_ID?.trim() || "default";
+  const header = { alg: "HS256", typ: "JWT", kid: keyId };
   const body: AccessTokenPayload = {
     ...payload,
-    iss: payload.iss ?? env.PUBLIC_EXTENSION_BASE_URL
+    iss: payload.iss ?? env.PUBLIC_EXTENSION_BASE_URL,
+    aud: payload.aud ?? "smart-money-extension",
+    kid: payload.kid ?? keyId
   };
   const encodedHeader = encodeBase64Url(JSON.stringify(header));
   const encodedPayload = encodeBase64Url(JSON.stringify(body));
@@ -136,11 +141,15 @@ export const verifyAccessToken = async (env: Env, token: string) => {
 
   try {
     const payload = JSON.parse(decodeBase64Url(encodedPayload)) as Partial<AccessTokenPayload>;
+    const expectedIssuer = env.PUBLIC_EXTENSION_BASE_URL;
+    const expectedAudience = "smart-money-extension";
     if (
       typeof payload.sid !== "string" ||
       typeof payload.memberLabel !== "string" ||
       typeof payload.exp !== "number" ||
-      typeof payload.iat !== "number"
+      typeof payload.iat !== "number" ||
+      (typeof payload.iss === "string" && payload.iss !== expectedIssuer) ||
+      (typeof payload.aud === "string" && payload.aud !== expectedAudience)
     ) {
       return null;
     }
@@ -150,7 +159,9 @@ export const verifyAccessToken = async (env: Env, token: string) => {
       memberLabel: payload.memberLabel,
       exp: payload.exp,
       iat: payload.iat,
-      iss: typeof payload.iss === "string" ? payload.iss : env.PUBLIC_EXTENSION_BASE_URL
+      iss: typeof payload.iss === "string" ? payload.iss : expectedIssuer,
+      aud: typeof payload.aud === "string" ? payload.aud : expectedAudience,
+      kid: typeof payload.kid === "string" ? payload.kid : undefined
     } satisfies AccessTokenPayload;
   } catch {
     return null;

@@ -12,6 +12,9 @@ export async function GET(request: NextRequest) {
   if (!slug) {
     return NextResponse.json({ error: "slug is required" }, { status: 400 });
   }
+  if (slug.length > 160) {
+    return NextResponse.json({ error: "slug is too long" }, { status: 400 });
+  }
 
   const result = await getMarketAnnotationsResponse(slug, {
     chain: "polygon",

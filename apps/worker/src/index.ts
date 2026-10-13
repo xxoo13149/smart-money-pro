@@ -11,9 +11,10 @@ import {
   handleLabelsLookup,
   handleMarketAnnotations
 } from "./routes";
+import type { WorkerWaitUntilContext } from "./hover-note-ai";
 import { withCors } from "./utils";
 
-const ROUTES: Record<string, (request: Request, env: Env) => Promise<Response>> = {
+const ROUTES: Record<string, (request: Request, env: Env, ctx: WorkerWaitUntilContext) => Promise<Response>> = {
   "/api/internal/admin/send-approval-email": handleAdminApprovalEmail,
   "/api/extension/auth/exchange": handleAuthExchange,
   "/api/extension/auth/login": handleAuthLogin,
@@ -37,7 +38,7 @@ const handleOptions = () =>
   });
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, ctx: WorkerWaitUntilContext) {
     if (request.method === "OPTIONS") {
       return handleOptions();
     }
@@ -49,7 +50,7 @@ export default {
     }
 
     try {
-      const response = await handler(request, env);
+      const response = await handler(request, env, ctx);
       return withCors(response);
     } catch (error) {
       return withCors(

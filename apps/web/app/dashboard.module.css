@@ -1,0 +1,510 @@
+/* 首页：Sentry 式暗色数据密集布局。深紫黑底 + 青/琥珀/品红语义色，
+   只服务于「一眼判断」：数字对齐、条长可比、色块按语义分。 */
+
+.hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+
+.hero h1 {
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.2px;
+}
+
+.hero p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-soft);
+}
+
+.kpiGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.kpiLabel {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: rgba(219, 231, 244, 0.55);
+}
+
+.kpiValue {
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.kpiSub {
+  font-size: 11.5px;
+  color: var(--text-soft);
+}
+
+.up {
+  color: #4ade9b;
+}
+
+.down {
+  color: var(--danger);
+}
+
+.panel {
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.panelHead h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.panelHead a {
+  font-size: 12.5px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.panelHead a:hover {
+  text-decoration: underline;
+}
+
+.panelNote {
+  font-size: 11.5px;
+  color: rgba(219, 231, 244, 0.5);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.columns .panel {
+  margin-bottom: 16px;
+}
+
+/* ---------- 标签分布 ---------- */
+
+.facetBlock + .facetBlock {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.facetGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.facetGrid .facetBlock + .facetBlock {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.facetHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.facetHead h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(219, 231, 244, 0.8);
+}
+
+.facetHead span {
+  font-size: 11px;
+  color: rgba(219, 231, 244, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.tagCloud {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag {
+  position: relative;
+  display: inline-grid;
+  grid-template-columns: 54px minmax(0, auto) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 9px 4px 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--text-soft);
+  text-decoration: none;
+}
+
+.tag:hover {
+  border-color: rgba(118, 128, 255, 0.55);
+  color: #eef4ff;
+}
+
+/* 固定宽度的轨道：所有标签共用同一标尺，条长才能横向比较。 */
+.tagTrack {
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+
+.tagFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7680ff, rgba(118, 128, 255, 0.45));
+}
+
+.tagName {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 130px;
+}
+
+.tagCount {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(118, 128, 255, 0.2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  color: #cfd6ff;
+}
+
+/* ---------- 城市战绩 ---------- */
+
+.cityList {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.cityRow {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.cityName {
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cityTrack {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  overflow: hidden;
+}
+
+.cityFill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #52d1c8, rgba(82, 209, 200, 0.35));
+}
+
+.cityMeta {
+  font-size: 11.5px;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ---------- 导入批次 ---------- */
+
+.batchList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.batchRow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.batchRow:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.batchTime {
+  flex: 0 0 62px;
+  color: rgba(219, 231, 244, 0.45);
+  font-variant-numeric: tabular-nums;
+}
+
+.batchName {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #eef4ff;
+}
+
+.batchMeta {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 排行榜 ---------- */
+
+.tabs {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tab {
+  padding: 5px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: #eef4ff;
+}
+
+.tabActive {
+  background: rgba(118, 128, 255, 0.22);
+  color: #eef4ff;
+  font-weight: 600;
+}
+
+.rankList {
+  display: flex;
+  flex-direction: column;
+}
+
+.rankRow {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  padding: 11px 6px;
+  border-bottom: 1px solid var(--line);
+  text-decoration: none;
+  color: inherit;
+  border-radius: 8px;
+}
+
+.rankRow:hover {
+  background: rgba(118, 128, 255, 0.07);
+}
+
+.rankRow:last-child {
+  border-bottom: none;
+}
+
+.rankBadge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-soft);
+}
+
+.rankName {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  font-weight: 600;
+  flex-wrap: wrap;
+}
+
+.watchBadge,
+.cityBadge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+}
+
+.watchBadge {
+  background: rgba(194, 239, 78, 0.16);
+  color: #c2ef4e;
+}
+
+.cityBadge {
+  background: rgba(82, 209, 200, 0.14);
+  color: #7fdcd4;
+}
+
+.rankBrief {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-soft);
+}
+
+.rankLabels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.miniTag {
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: 11px;
+  color: rgba(219, 231, 244, 0.65);
+}
+
+.rankStats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(74px, auto));
+  gap: 2px 14px;
+  font-size: 11.5px;
+  color: var(--text-soft);
+  text-align: right;
+}
+
+.rankStats strong {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* ---------- 空态 ---------- */
+
+.emptyPanel {
+  padding: 32px 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  text-align: center;
+}
+
+.emptyTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.emptyText {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-soft);
+}
+
+.emptyActions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+@media (max-width: 1180px) {
+  .kpiGrid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 900px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .rankRow {
+    grid-template-columns: 26px minmax(0, 1fr);
+  }
+
+  .rankStats {
+    grid-column: 2;
+    text-align: left;
+    grid-template-columns: repeat(4, minmax(0, auto));
+    margin-top: 4px;
+  }
+
+  .cityRow {
+    grid-template-columns: 80px minmax(0, 1fr);
+  }
+
+  .cityMeta {
+    grid-column: 2;
+  }
+}
+
+@media (max-width: 640px) {
+  .kpiGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rankStats {
+    grid-template-columns: repeat(2, minmax(0, auto));
+  }
+}

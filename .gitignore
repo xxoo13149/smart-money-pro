@@ -5,6 +5,10 @@ coverage/
 .turbo/
 .DS_Store
 .env
+.env.local
+.env.*.local
+.local/
+docs/private/
 *.log
 apps/extension/.edge-profile/
 apps/web/.open-next/

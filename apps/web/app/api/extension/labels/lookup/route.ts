@@ -3,6 +3,8 @@ import { NextResponse } from "next/server";
 import { isExtensionReadOnlyRequestAuthorized } from "@/lib/extension-auth";
 import { lookupAddressSummariesPayload } from "@/lib/extension-data";
 
+const MAX_LOOKUP_ADDRESSES = 500;
+
 export async function POST(request: Request) {
   if (!isExtensionReadOnlyRequestAuthorized(request)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
@@ -15,6 +17,13 @@ export async function POST(request: Request) {
 
   if (!Array.isArray(body.addresses) || body.addresses.length === 0) {
     return NextResponse.json({ error: "addresses is required" }, { status: 400 });
+  }
+
+  if (body.addresses.length > MAX_LOOKUP_ADDRESSES) {
+    return NextResponse.json(
+      { error: `addresses cannot exceed ${MAX_LOOKUP_ADDRESSES} per request` },
+      { status: 413 }
+    );
   }
 
   const payload = await lookupAddressSummariesPayload(body.addresses, {

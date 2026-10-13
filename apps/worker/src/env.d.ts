@@ -11,8 +11,12 @@ export interface Env {
   ADMIN_APPROVAL_SENDER_NAME?: string;
   ADMIN_APPROVAL_SHARED_SECRET: string;
   EXTENSION_TOKEN_SECRET: string;
+  EXTENSION_TOKEN_KEY_ID?: string;
   ADMIN_BASE_URL: string;
   PUBLIC_EXTENSION_BASE_URL: string;
   POLYMARKET_GAMMA_URL?: string;
   POLYMARKET_DATA_URL?: string;
+  DEEPSEEK_API_KEY?: string;
+  DEEPSEEK_BASE_URL?: string;
+  DEEPSEEK_MODEL?: string;
 }

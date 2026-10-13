@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import type { WalletLabelKind, WalletLabelSource } from "@weather-smart-money/core";
+import type { WalletLabelKind } from "@weather-smart-money/core";
 
 import { requireAdminApiSession } from "../../../../../lib/admin-auth";
 import { createUserTag } from "../../../../../lib/data";
+import { invalidateWalletCache } from "../../../../../lib/cache";
 
 export async function POST(
   request: Request,
@@ -19,7 +20,6 @@ export async function POST(
       name?: string;
       value?: string;
       kind?: WalletLabelKind;
-      source?: WalletLabelSource;
       evidence?: string;
       verificationNote?: string;
       sourceNote?: string;
@@ -35,7 +35,7 @@ export async function POST(
         name: body.name.trim(),
         value: body.value.trim(),
         kind: body.kind,
-        source: body.source,
+        source: "user",
         evidence: body.evidence?.trim(),
         verificationNote: body.verificationNote?.trim(),
         sourceNote: body.sourceNote?.trim()
@@ -47,6 +47,7 @@ export async function POST(
       return NextResponse.json({ error: "wallet not found" }, { status: 404 });
     }
 
+    await invalidateWalletCache();
     return NextResponse.json({ data: tag }, { status: 201 });
   } catch (error) {
     console.error("create user tag failed", error);

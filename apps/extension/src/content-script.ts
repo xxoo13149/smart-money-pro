@@ -22,7 +22,10 @@ interface AddressHoverCard {
   officialTags: AddressLabelBadge[];
   officialNoteText?: string;
   aiTags: AddressLabelBadge[];
+  aiBriefShortText?: string;
   aiStatsNoteText?: string;
+  aiNarrativeNoteText?: string;
+  aiDeepNoteText?: string;
 }
 
 interface AddressSummary {
@@ -34,6 +37,10 @@ interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
+  aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -149,6 +156,7 @@ interface ResolvedInlineAnnotation {
   hoverCard?: AddressHoverCard;
   summaryText?: string;
   noteSnippet?: string;
+  activityLevel?: string;
   detailUrl: string;
   summaryVersion: string;
   proxyWallet: string;
@@ -230,9 +238,13 @@ type ContentRuntimeMessage =
   const HOLDER_MAIN_CLASS = "wsm-holder-main-target";
   const HOLDER_META_CLASS = "wsm-holder-meta-target";
   const FALLBACK_CLASS = "wsm-fallback-shell";
+  const PLACEHOLDER_CLASS = "wsm-annotation-placeholder";
   const PARSER_VERSION = "surface-adapter-v1";
   const REFRESH_TTL_MS = 90_000;
   const DIRECT_LOOKUP_TTL_MS = 60_000;
+  const RENDER_DEBOUNCE_MS = 80;
+  const ROUTE_REFRESH_DEBOUNCE_MS = 140;
+  const TRANSIENT_CLEAR_GRACE_MS = 900;
   const CONTENT_INSTANCE_ID = `wsm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   const DEFAULT_CONFIG: ExtensionConfig = {
     enabled: true,
@@ -244,6 +256,7 @@ type ContentRuntimeMessage =
   };
   const FEED_TOP_HOLDERS_TITLES = ["Top Holders", "顶级持仓者"];
   const FEED_COMMENTS_TITLES = ["Comments", "评论"];
+  const FEED_POSITIONS_TITLES = ["Positions", "持仓"];
   const FEED_ACTIVITY_TITLES = ["Activity", "活动"];
   const MAIN_YES_TITLES = ["Yes holders", "Yes Holders", "Yes 持仓者"];
   const MAIN_NO_TITLES = ["No holders", "No Holders", "No 持仓者"];
@@ -260,6 +273,7 @@ type ContentRuntimeMessage =
   const TITLE_SELECTOR = "button,div,span,p,h2,h3,h4";
   const FEED_TOP_HOLDERS_LABELS = ["Top Holders", "顶级持仓者"];
   const FEED_COMMENTS_LABELS = ["Comments", "评论"];
+  const FEED_POSITIONS_LABELS = ["Positions", "持仓"];
   const FEED_ACTIVITY_LABELS = ["Activity", "活动"];
   const MAIN_YES_LABELS = ["Yes holders", "Yes Holders", "Yes 持仓者"];
   const MAIN_NO_LABELS = ["No holders", "No Holders", "No 持仓者"];
@@ -279,6 +293,8 @@ type ContentRuntimeMessage =
   let currentPayload: ContentMarketAnnotationResponse | null = null;
   let refreshTimer: number | null = null;
   let renderTimer: number | null = null;
+  let routeRefreshTimer: number | null = null;
+  let transientClearTimer: number | null = null;
   let renderGeneration = 0;
   let refreshGeneration = 0;
   let lastRenderAt = 0;
@@ -311,8 +327,18 @@ type ContentRuntimeMessage =
       mainContainer?: HTMLElement | null;
     }
   >();
+  const mountedPlaceholderSlots = new Map<
+    string,
+    {
+      node: HTMLElement;
+      row: HTMLElement;
+      mountTarget: HTMLElement;
+      mainContainer?: HTMLElement | null;
+    }
+  >();
   const fallbackHoverAnnotations = new Map<string, ResolvedInlineAnnotation>();
   let hoverOverlayManager: HoverOverlayManager | null = null;
+  let drawerOverlayManager: DrawerOverlayManager | null = null;
   let interactionAbortController: AbortController | null = null;
   let mountedFallbackNode: HTMLElement | null = null;
 
@@ -364,6 +390,44 @@ type ContentRuntimeMessage =
   const compactText = (value: string | null | undefined) => (value ?? "").replace(/\s+/g, " ").trim();
 
   const normalizeBadgeText = (value: string | null | undefined) => compactText(value).toLowerCase();
+
+  const normalizeActivityText = (value: string | null | undefined) => compactText(value).toLowerCase();
+
+  const isActivityLevelText = (value: string | null | undefined) => {
+    const normalized = normalizeActivityText(value);
+    return normalized === "正常" || normalized === "低活跃" || normalized === "活跃";
+  };
+
+  const isSystemOnlyBadge = (badge: AddressLabelBadge) => {
+    const text = compactText(badge.text);
+    const normalized = normalizeBadgeText(text);
+    return (
+      compactText(badge.kind).toLowerCase() === "activity_level" ||
+      badge.tone === "ai-review" ||
+      normalized === "待复核" ||
+      normalized === "ai 待确认" ||
+      normalized === "ai待确认" ||
+      isActivityLevelText(text)
+    );
+  };
+
+  const getActivityLevelFromSummary = (summary: AddressSummary) =>
+    summary.activityLevel ||
+    [...(summary.hoverBadges ?? []), ...(summary.badges ?? [])].find((badge) => {
+      const kind = compactText(badge.kind).toLowerCase();
+      return kind === "activity_level" || isActivityLevelText(badge.text);
+    })?.text;
+
+  const getAliasActivityTone = (activityLevel?: string) => {
+    const normalized = normalizeActivityText(activityLevel);
+    if (normalized === "正常" || normalized === "活跃") {
+      return "active";
+    }
+    if (normalized === "低活跃") {
+      return "quiet";
+    }
+    return undefined;
+  };
 
   const INLINE_BADGE_KIND_PRIORITY: Record<string, number> = {
     payout_region: 900,
@@ -417,9 +481,36 @@ type ContentRuntimeMessage =
     return badge;
   };
 
+  const inferBadgeDedupeKind = (badge: AddressLabelBadge) => {
+    const text = compactText(badge.text).replace(/高爆击/gu, "高暴击");
+    const normalized = normalizeBadgeText(text);
+    if (normalized === "正常" || normalized === "低活跃") {
+      return "activity_level";
+    }
+    if (normalized === "提前埋伏") {
+      return "early_entry_signal";
+    }
+    if (normalized === "新钱包" || normalized === "隐藏高手新钱包") {
+      return "new_wallet_signal";
+    }
+    if (/^高频/u.test(text)) {
+      return "frequency_region";
+    }
+    if (/^高暴击/u.test(text)) {
+      return "payout_region";
+    }
+    if (/^高胜率/u.test(text)) {
+      return "winrate_region";
+    }
+    if (/彩票型|拆分型|流动型/u.test(text)) {
+      return "trader_archetype";
+    }
+    return compactText(badge.kind).toLowerCase() || "unknown";
+  };
+
   const makeBadgeKey = (badge: AddressLabelBadge) => {
-    const kind = compactText(badge.kind).toLowerCase() || "unknown";
-    return `${kind}:${normalizeBadgeText(badge.text)}`;
+    const kind = inferBadgeDedupeKind(badge);
+    return `${kind}:${normalizeBadgeText(badge.text).replace(/高爆击/gu, "高暴击")}`;
   };
 
   const getInlineBadgePriority = (badge: AddressLabelBadge) => {
@@ -442,7 +533,7 @@ type ContentRuntimeMessage =
     const unique: T[] = [];
     badges.forEach((badge) => {
       const normalized = normalizeBadgeText(badge.text);
-      if (!normalized) {
+      if (!normalized || isSystemOnlyBadge(badge)) {
         return;
       }
       const key = makeBadgeKey(badge);
@@ -466,15 +557,44 @@ type ContentRuntimeMessage =
     );
   };
 
+  const getStableKeyPart = (value: string | null | undefined) =>
+    compactText(value).toLowerCase().slice(0, 96);
+
   const getRowMountKey = (row: HolderRowSnapshot) =>
     [
       row.surfaceKind,
       row.side,
       row.normalizedAddress ?? "",
-      getElementIdentity(row.mount.row),
-      getElementIdentity(row.mount.mountTarget),
-      getElementIdentity(row.mount.nameLine ?? null)
+      getStableKeyPart(row.profileHref ?? row.rawAddress),
+      getStableKeyPart(row.amountText),
+      getStableKeyPart(row.displayNameText),
+      row.normalizedAddress
+        ? ""
+        : [
+            getElementIdentity(row.mount.row),
+            getElementIdentity(row.mount.mountTarget),
+            getElementIdentity(row.mount.nameLine ?? null)
+          ].join(".")
     ].join(":");
+
+  const getAnnotationRenderSignature = (annotation: ResolvedInlineAnnotation) =>
+    [
+      annotation.aliasText,
+      annotation.activityLevel ?? "",
+      annotation.noteSnippet ?? "",
+      annotation.summaryText ?? "",
+      annotation.detailUrl,
+      annotation.hoverCard?.officialNoteText ?? "",
+      annotation.hoverCard?.aiBriefShortText ?? "",
+      annotation.hoverCard?.aiStatsNoteText ?? "",
+      annotation.hoverCard?.aiNarrativeNoteText ?? "",
+      annotation.hoverCard?.aiDeepNoteText ?? "",
+      annotation.primaryBadge ? makeBadgeKey(annotation.primaryBadge) : "",
+      ...annotation.secondaryBadges.map((badge) => makeBadgeKey(badge)),
+      ...annotation.statusBadges.map((badge) => makeBadgeKey(badge)),
+      ...(annotation.hoverCard?.officialTags ?? []).map((badge) => makeBadgeKey(badge)),
+      ...(annotation.hoverCard?.aiTags ?? []).map((badge) => makeBadgeKey(badge))
+    ].join("|");
 
   const dedupeHolderRowsByMount = (rows: HolderRowSnapshot[]) => {
     const bestByKey = new Map<string, HolderRowSnapshot>();
@@ -488,6 +608,18 @@ type ContentRuntimeMessage =
     });
 
     return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
+  };
+
+  const getTextWithoutInjectedAnnotations = (element: HTMLElement) => {
+    const clone = element.cloneNode(true);
+    if (!(clone instanceof HTMLElement)) {
+      return compactText(element.textContent);
+    }
+
+    clone
+      .querySelectorAll(`.${ROOT_CLASS}, [data-wsmx-hover-trigger='1']`)
+      .forEach((node) => node.remove());
+    return compactText(clone.textContent);
   };
 
   const truncateText = (value: string | null | undefined, maxLength: number) => {
@@ -530,23 +662,29 @@ type ContentRuntimeMessage =
       const style = document.createElement("style");
       style.textContent = `
 .wsmx-layer{position:fixed;inset:0;pointer-events:none;z-index:2147483647}
-.wsmx-card{position:absolute;width:264px;padding:10px 11px;border-radius:10px;border:1px solid rgba(147,163,184,.24);background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.98));box-shadow:0 18px 36px rgba(0,0,0,.42),0 0 0 1px rgba(15,23,42,.22);color:#e8f0fb;pointer-events:auto;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.42;transform:translateY(0);animation:wsmxFadeIn .14s ease}
-.wsmx-header{display:grid;gap:2px;margin-bottom:8px}
+.wsmx-card{position:absolute;width:min(376px,calc(100vw - 16px));max-height:min(460px,calc(100vh - 16px));padding:10px 11px;border-radius:10px;border:1px solid rgba(147,163,184,.24);background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.98));box-shadow:0 18px 36px rgba(0,0,0,.42),0 0 0 1px rgba(15,23,42,.22);color:#e8f0fb;pointer-events:auto;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;line-height:1.42;display:flex;flex-direction:column;overflow:hidden;transform:translateY(0);animation:wsmxFadeIn .14s ease}
+.wsmx-header{display:grid;gap:2px;margin-bottom:8px;flex:0 0 auto}
 .wsmx-title{font-size:12px;font-weight:700;color:#f8fbff}
 .wsmx-subtitle{font-size:10px;color:rgba(209,220,234,.7)}
-.wsmx-summary{font-size:11px;color:rgba(231,239,247,.86);margin-bottom:9px}
+.wsmx-summary{font-size:11px;color:rgba(231,239,247,.88);margin-bottom:9px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.wsmx-body{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto;padding-right:2px}
+.wsmx-footer{display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid rgba(148,163,184,.15);flex:0 0 auto}
 .wsmx-section{display:grid;gap:6px;padding-top:7px;margin-top:7px;border-top:1px solid rgba(148,163,184,.15)}
 .wsmx-section:first-of-type{border-top:none;padding-top:0;margin-top:0}
 .wsmx-section-title{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:rgba(204,216,230,.7)}
 .wsmx-tag-list{display:flex;flex-wrap:wrap;gap:6px}
 .wsmx-tag{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:999px;font-size:10px;border:1px solid transparent;max-width:236px}
 .wsmx-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-tag--core{color:#d3c4ff;background:rgba(148,120,255,.16);border-color:rgba(148,120,255,.3)}
+.wsmx-tag--portrait{color:#a5e8d2;background:rgba(72,207,170,.14);border-color:rgba(72,207,170,.26)}
+.wsmx-tag--external{color:#e0bcff;background:rgba(190,120,255,.13);border-color:rgba(190,120,255,.24)}
 .wsmx-tag--neutral,.wsmx-tag--ai-review{color:rgba(231,239,247,.9);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
 .wsmx-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.2)}
 .wsmx-tag--alert,.wsmx-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
 .wsmx-note{font-size:11px;color:rgba(215,227,239,.78);word-break:break-word}
-.wsmx-link{font-size:10px;font-weight:600;color:#92bcff;text-decoration:none}
-.wsmx-link:hover{color:#bfd7ff}
+.wsmx-note--hint{color:#c7d8ff}
+.wsmx-action{appearance:none;border:1px solid rgba(130,245,206,.28);border-radius:999px;background:rgba(130,245,206,.1);color:#bfffe9;font-size:10px;font-weight:700;padding:5px 9px;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
+.wsmx-action:hover,.wsmx-action:focus-visible{background:rgba(130,245,206,.16);border-color:rgba(130,245,206,.42);outline:none;transform:translateY(-1px)}
 @keyframes wsmxFadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
       `;
       shadow.append(style);
@@ -587,6 +725,9 @@ type ContentRuntimeMessage =
         case "alert":
         case "danger":
         case "ai-review":
+        case "core":
+        case "portrait":
+        case "external":
           return tone;
         default:
           return "neutral";
@@ -601,7 +742,7 @@ type ContentRuntimeMessage =
     }
 
     private appendTagsSection(
-      card: HTMLDivElement,
+      container: HTMLElement,
       titleText: string,
       tags: AddressLabelBadge[],
       fallbackTagText: string
@@ -626,14 +767,15 @@ type ContentRuntimeMessage =
       }
       section.append(tagList);
 
-      card.append(section);
+      container.append(section);
     }
 
     private appendNoteSection(
-      card: HTMLDivElement,
+      container: HTMLElement,
       titleText: string,
       noteText: string,
-      fallbackNoteText: string
+      fallbackNoteText: string,
+      maxLength = 160
     ) {
       const section = document.createElement("section");
       section.className = "wsmx-section";
@@ -645,10 +787,10 @@ type ContentRuntimeMessage =
 
       const note = document.createElement("div");
       note.className = "wsmx-note";
-      note.textContent = noteText || fallbackNoteText;
+      note.textContent = truncateText(noteText || fallbackNoteText, maxLength);
       section.append(note);
 
-      card.append(section);
+      container.append(section);
     }
 
     private buildCard(annotation: ResolvedInlineAnnotation) {
@@ -675,40 +817,74 @@ type ContentRuntimeMessage =
       if (annotation.summaryText) {
         const summary = document.createElement("div");
         summary.className = "wsmx-summary";
-        summary.textContent = truncateText(annotation.summaryText, 120);
+        summary.textContent = truncateText(annotation.summaryText, 110);
         card.append(summary);
       }
 
-      const officialTags = dedupeBadges(annotation.hoverCard?.officialTags ?? []);
+      const body = document.createElement("div");
+      body.className = "wsmx-body";
+
+      const officialFallback = annotation.secondaryBadges.filter(
+        (badge) => badge.tone === "accent" || badge.kind === "official"
+      );
+      const officialTags = dedupeBadges(
+        annotation.hoverCard?.officialTags?.length ? annotation.hoverCard.officialTags : officialFallback
+      );
       const officialKeys = new Set(officialTags.map((badge) => makeBadgeKey(badge)));
-      const aiSource =
-        annotation.hoverCard?.aiTags ??
-        annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
-      const aiTags = dedupeBadges(aiSource).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
+      const aiSource = annotation.hoverCard?.aiTags?.length
+        ? annotation.hoverCard.aiTags
+        : annotation.secondaryBadges.filter((badge) => badge.tone !== "watch" && badge.tone !== "danger");
+      const aiTags = dedupeBadges(aiSource)
+        .filter((badge) => !officialKeys.has(makeBadgeKey(badge)))
+        .slice(0, 4);
       const officialNoteText = annotation.hoverCard?.officialNoteText ?? "";
+      const aiBriefShortText = annotation.hoverCard?.aiBriefShortText ?? "";
+      const aiNarrativeNoteText = annotation.hoverCard?.aiNarrativeNoteText ?? "";
       const aiStatsNoteText = annotation.hoverCard?.aiStatsNoteText ?? "";
+      const aiDeepNoteText = annotation.hoverCard?.aiDeepNoteText ?? "";
 
-      this.appendTagsSection(
-        card,
-        "官方标签",
-        officialTags,
-        "暂无官方标签"
-      );
-      this.appendNoteSection(card, "官方标签备注说明", officialNoteText, "暂无官方标签备注说明");
-      this.appendTagsSection(
-        card,
-        "AI 标签",
-        aiTags,
-        "暂无 AI 标签"
-      );
-      this.appendNoteSection(card, "AI 标签统计备注说明", aiStatsNoteText, "暂无 AI 标签统计备注说明");
+      if (officialTags.length > 0) {
+        this.appendTagsSection(body, "官方标签", officialTags.slice(0, 4), "暂无官方标签");
+      }
+      if (officialNoteText) {
+        this.appendNoteSection(body, "官方标签备注说明", officialNoteText, "暂无官方标签备注说明", 120);
+      }
+      if (aiTags.length > 0) {
+        this.appendTagsSection(body, "AI 标签", aiTags, "暂无 AI 标签");
+      }
+      if (aiBriefShortText) {
+        this.appendNoteSection(body, "AI 结论", aiBriefShortText, "暂无结论", 96);
+      }
+      if (aiNarrativeNoteText || aiStatsNoteText) {
+        this.appendNoteSection(
+          body,
+          "摘要说明",
+          truncateText(aiNarrativeNoteText || aiStatsNoteText, 240),
+          "暂无摘要说明",
+          220
+        );
+      }
+      if (aiDeepNoteText) {
+        this.appendNoteSection(body, "深度解读", "已同步，可展开阅读完整内容。", "暂无深度解读", 88);
+      }
+      card.append(body);
 
-      const footer = document.createElement("a");
-      footer.className = "wsmx-link";
-      footer.href = annotation.detailUrl;
-      footer.target = "_blank";
-      footer.rel = "noreferrer";
-      footer.textContent = "打开完整详情";
+      const deepHint = document.createElement("span");
+      deepHint.className = "wsmx-note wsmx-note--hint";
+      deepHint.textContent = aiDeepNoteText ? "有深度解读" : "快速判断";
+      const footer = document.createElement("div");
+      footer.className = "wsmx-footer";
+      footer.append(deepHint);
+      const detailButton = document.createElement("button");
+      detailButton.type = "button";
+      detailButton.className = "wsmx-action";
+      detailButton.textContent = "展开阅读";
+      detailButton.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAnnotationReader(annotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+      });
+      footer.append(detailButton);
       card.append(footer);
 
       return card;
@@ -880,6 +1056,221 @@ type ContentRuntimeMessage =
     }
   }
 
+  class DrawerOverlayManager {
+    private host: HTMLDivElement | null = null;
+    private shadowRoot: ShadowRoot | null = null;
+    private returnFocus: HTMLElement | null = null;
+
+    private ensureHost() {
+      if (this.host && this.shadowRoot) {
+        return;
+      }
+
+      this.host = document.createElement("div");
+      this.host.className = "wsmx-drawer-host";
+      this.host.style.position = "fixed";
+      this.host.style.inset = "0";
+      this.host.style.zIndex = "2147483647";
+      this.host.style.pointerEvents = "none";
+
+      const shadow = this.host.attachShadow({ mode: "open" });
+      const style = document.createElement("style");
+      style.textContent = `
+.wsmx-reader-layer{position:fixed;inset:0;pointer-events:none;font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;z-index:2147483647}
+.wsmx-reader-backdrop{position:absolute;inset:0;background:rgba(3,7,18,.32);pointer-events:auto;animation:wsmxReaderFade .12s ease}
+.wsmx-reader{position:absolute;top:12px;right:12px;bottom:12px;width:min(430px,calc(100vw - 24px));display:flex;flex-direction:column;border:1px solid rgba(148,163,184,.24);border-radius:12px;background:linear-gradient(180deg,rgba(12,18,27,.98),rgba(7,11,18,.99));box-shadow:0 24px 60px rgba(0,0,0,.48);color:#e8f0fb;pointer-events:auto;overflow:hidden;animation:wsmxReaderIn .16s ease}
+.wsmx-reader-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 14px 10px;border-bottom:1px solid rgba(148,163,184,.14)}
+.wsmx-reader-title{font-size:13px;font-weight:750;line-height:1.3;color:#f8fbff}
+.wsmx-reader-address{margin-top:4px;font-size:10px;color:rgba(209,220,234,.66);word-break:break-all}
+.wsmx-reader-close{width:28px;height:28px;border-radius:999px;border:1px solid rgba(231,239,247,.12);background:rgba(231,239,247,.06);color:#e8f0fb;font-size:18px;line-height:1;cursor:pointer}
+.wsmx-reader-body{display:grid;gap:12px;padding:12px 14px 16px;overflow:auto;min-height:0}
+.wsmx-reader-brief{border-left:3px solid rgba(130,245,206,.75);border-radius:9px;background:rgba(130,245,206,.08);padding:9px 10px;font-size:12px;line-height:1.65;color:#f4fffb}
+.wsmx-reader-section{display:grid;gap:7px}
+.wsmx-reader-section-title{font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase;color:rgba(204,216,230,.68)}
+.wsmx-reader-tags{display:flex;flex-wrap:wrap;gap:6px}
+.wsmx-reader-tag{display:inline-flex;align-items:center;max-width:100%;padding:4px 8px;border-radius:999px;border:1px solid transparent;font-size:10px;line-height:1.2}
+.wsmx-reader-tag--accent{color:#bed1ff;background:rgba(112,159,255,.15);border-color:rgba(112,159,255,.28)}
+.wsmx-reader-tag--core{color:#d3c4ff;background:rgba(148,120,255,.16);border-color:rgba(148,120,255,.3)}
+.wsmx-reader-tag--portrait{color:#a5e8d2;background:rgba(72,207,170,.14);border-color:rgba(72,207,170,.26)}
+.wsmx-reader-tag--external{color:#e0bcff;background:rgba(190,120,255,.13);border-color:rgba(190,120,255,.24)}
+.wsmx-reader-tag--neutral{color:rgba(231,239,247,.86);background:rgba(231,239,247,.08);border-color:rgba(231,239,247,.13)}
+.wsmx-reader-tag--ai-review{color:#d7ddff;background:rgba(129,140,248,.13);border-color:rgba(129,140,248,.22)}
+.wsmx-reader-tag--watch{color:#f3d781;background:rgba(243,215,129,.14);border-color:rgba(243,215,129,.22)}
+.wsmx-reader-tag--alert,.wsmx-reader-tag--danger{color:#ffcab9;background:rgba(243,125,107,.13);border-color:rgba(243,125,107,.24)}
+.wsmx-reader-text{font-size:12px;line-height:1.7;color:rgba(224,235,247,.86);white-space:pre-wrap;word-break:break-word}
+.wsmx-reader-details{border:1px solid rgba(148,163,184,.14);border-radius:10px;background:rgba(231,239,247,.035);overflow:hidden}
+.wsmx-reader-details summary{padding:10px 11px;cursor:pointer;font-size:12px;font-weight:750;color:#edf5ff}
+.wsmx-reader-details-text{padding:0 11px 12px}
+@media (max-width:560px){.wsmx-reader{top:8px;right:8px;bottom:8px;width:calc(100vw - 16px)}}
+@keyframes wsmxReaderFade{from{opacity:0}to{opacity:1}}
+@keyframes wsmxReaderIn{from{opacity:0;transform:translateX(18px)}to{opacity:1;transform:translateX(0)}}
+      `;
+      shadow.append(style);
+
+      const layer = document.createElement("div");
+      layer.className = "wsmx-reader-layer";
+      shadow.append(layer);
+
+      document.body.append(this.host);
+      this.shadowRoot = shadow;
+    }
+
+    private getLayer() {
+      return this.shadowRoot?.querySelector<HTMLDivElement>(".wsmx-reader-layer") ?? null;
+    }
+
+    private toneClass(tone?: string) {
+      switch (tone) {
+        case "accent":
+        case "watch":
+        case "alert":
+        case "danger":
+        case "ai-review":
+        case "core":
+        case "portrait":
+        case "external":
+          return tone;
+        default:
+          return "neutral";
+      }
+    }
+
+    private createTagNode(badge: AddressLabelBadge) {
+      const tag = document.createElement("span");
+      tag.className = `wsmx-reader-tag wsmx-reader-tag--${this.toneClass(badge.tone)}`;
+      tag.textContent = truncateText(badge.text, 30);
+      tag.title = badge.detailText || badge.metricText || badge.text;
+      return tag;
+    }
+
+    private appendTagSection(container: HTMLElement, titleText: string, badges: AddressLabelBadge[]) {
+      if (badges.length === 0) {
+        return;
+      }
+      const section = document.createElement("section");
+      section.className = "wsmx-reader-section";
+      const title = document.createElement("div");
+      title.className = "wsmx-reader-section-title";
+      title.textContent = titleText;
+      const tags = document.createElement("div");
+      tags.className = "wsmx-reader-tags";
+      dedupeBadges(badges).forEach((badge) => tags.append(this.createTagNode(badge)));
+      section.append(title, tags);
+      container.append(section);
+    }
+
+    private appendTextSection(container: HTMLElement, titleText: string, textValue: string) {
+      if (!compactText(textValue)) {
+        return;
+      }
+      const details = document.createElement("details");
+      details.className = "wsmx-reader-details";
+      const summary = document.createElement("summary");
+      summary.textContent = titleText;
+      const textNode = document.createElement("div");
+      textNode.className = "wsmx-reader-text wsmx-reader-details-text";
+      textNode.textContent = textValue;
+      details.append(summary, textNode);
+      container.append(details);
+    }
+
+    open(annotation: ResolvedInlineAnnotation, returnFocus?: HTMLElement | null) {
+      this.ensureHost();
+      this.returnFocus =
+        returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+      const layer = this.getLayer();
+      if (!layer) {
+        return;
+      }
+      layer.textContent = "";
+
+      const backdrop = document.createElement("button");
+      backdrop.type = "button";
+      backdrop.className = "wsmx-reader-backdrop";
+      backdrop.setAttribute("aria-label", "关闭 AI 解读");
+      backdrop.addEventListener("click", () => this.close());
+
+      const drawer = document.createElement("aside");
+      drawer.className = "wsmx-reader";
+      drawer.setAttribute("role", "dialog");
+      drawer.setAttribute("aria-label", `${annotation.aliasText} AI 解读`);
+
+      const head = document.createElement("div");
+      head.className = "wsmx-reader-head";
+      const titleWrap = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "wsmx-reader-title";
+      title.textContent = annotation.aliasText;
+      const address = document.createElement("div");
+      address.className = "wsmx-reader-address";
+      address.textContent = annotation.normalizedAddress || annotation.proxyWallet;
+      titleWrap.append(title, address);
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "wsmx-reader-close";
+      closeButton.setAttribute("aria-label", "关闭 AI 解读");
+      closeButton.textContent = "×";
+      closeButton.addEventListener("click", () => this.close());
+      head.append(titleWrap, closeButton);
+
+      const body = document.createElement("div");
+      body.className = "wsmx-reader-body";
+      const brief = document.createElement("div");
+      brief.className = "wsmx-reader-brief";
+      brief.textContent =
+        annotation.hoverCard?.aiBriefShortText || annotation.summaryText || annotation.noteSnippet || "暂无 AI 结论。";
+      body.append(brief);
+
+      const officialTags = dedupeBadges([
+        ...(annotation.hoverCard?.officialTags ?? []),
+        ...getVisibleAnnotationBadges(annotation).filter((badge) => badge.tone === "accent")
+      ]);
+      const officialKeys = new Set(officialTags.map((badge) => makeBadgeKey(badge)));
+      const aiTags = dedupeBadges([
+        ...(annotation.hoverCard?.aiTags ?? []),
+        ...getVisibleAnnotationBadges(annotation).filter((badge) => badge.tone !== "accent")
+      ]).filter((badge) => !officialKeys.has(makeBadgeKey(badge)));
+      this.appendTagSection(body, "结构化标签", officialTags.length ? officialTags : getVisibleAnnotationBadges(annotation));
+      this.appendTagSection(body, "AI 标签", aiTags);
+
+      this.appendTextSection(
+        body,
+        "摘要说明",
+        annotation.hoverCard?.aiNarrativeNoteText || annotation.hoverCard?.aiStatsNoteText || annotation.noteSnippet || ""
+      );
+      this.appendTextSection(body, "深度解读", annotation.hoverCard?.aiDeepNoteText || "");
+
+      drawer.append(head, body);
+      drawer.addEventListener("keydown", (event) => {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          this.close();
+        }
+      });
+      layer.append(backdrop, drawer);
+      closeButton.focus();
+    }
+
+    close() {
+      const layer = this.getLayer();
+      if (layer) {
+        layer.textContent = "";
+      }
+      const focusTarget = this.returnFocus;
+      this.returnFocus = null;
+      if (focusTarget?.isConnected) {
+        focusTarget.focus();
+      }
+    }
+
+    destroy() {
+      this.close();
+      this.host?.remove();
+      this.host = null;
+      this.shadowRoot = null;
+    }
+  }
+
   const normalizeAddress = (value: string) => {
     const match = value.match(ADDRESS_PATTERN)?.[0];
     return match ? match.toLowerCase() : null;
@@ -1013,9 +1404,21 @@ type ContentRuntimeMessage =
       (anchor) => !anchor.closest(`.${ROOT_CLASS}`) && isVisible(anchor)
     );
 
+  const collectProfileAnchors = (root: ParentNode) =>
+    Array.from(root.querySelectorAll<HTMLAnchorElement>('a[href*="/profile/"]')).filter(
+      (anchor) => !anchor.closest(`.${ROOT_CLASS}`)
+    );
+
   const countUniqueProfileAddresses = (element: ParentNode) =>
     new Set(
       collectVisibleProfileAnchors(element)
+        .map((anchor) => resolveProfileAddress(anchor))
+        .filter((address): address is string => Boolean(address))
+    ).size;
+
+  const countAllProfileAddresses = (element: ParentNode) =>
+    new Set(
+      collectProfileAnchors(element)
         .map((anchor) => resolveProfileAddress(anchor))
         .filter((address): address is string => Boolean(address))
     ).size;
@@ -1118,6 +1521,16 @@ type ContentRuntimeMessage =
       type: "wsm:lookupAddresses",
       addresses
     });
+
+  const openAnnotationReader = (annotation: ResolvedInlineAnnotation, returnFocus?: HTMLElement | null) => {
+    const address = annotation.normalizedAddress || annotation.proxyWallet;
+    if (!address) {
+      return;
+    }
+
+    hoverOverlayManager?.close();
+    drawerOverlayManager?.open(annotation, returnFocus);
+  };
 
   const publishPageState = async (state: PageRuntimeState) => {
     const serialized = JSON.stringify(state);
@@ -1233,20 +1646,32 @@ type ContentRuntimeMessage =
     return texts.some((label) => text === label || text.includes(label));
   };
 
+  const getFeedStripButtons = (element: HTMLElement) => {
+    const directButtons = Array.from(element.querySelectorAll<HTMLButtonElement>(":scope > button")).filter((button) =>
+      isVisible(button)
+    );
+    if (directButtons.length >= 3) {
+      return directButtons;
+    }
+
+    return Array.from(element.querySelectorAll<HTMLButtonElement>(":scope > * > button")).filter((button) =>
+      isVisible(button)
+    );
+  };
+
   const findFeedTabStrip = () =>
     Array.from(document.querySelectorAll<HTMLElement>("div")).find((element) => {
       if (!isVisible(element)) {
         return false;
       }
-      const buttons = Array.from(element.querySelectorAll<HTMLButtonElement>("button")).filter((button) =>
-        isVisible(button)
-      );
-      return (
-        buttons.length >= 3 &&
-        buttons.some((button) => hasTabText(button, FEED_COMMENTS_LABELS)) &&
-        buttons.some((button) => hasTabText(button, FEED_TOP_HOLDERS_LABELS)) &&
+      const buttons = getFeedStripButtons(element);
+      const matchedCount = [
+        buttons.some((button) => hasTabText(button, FEED_COMMENTS_LABELS)),
+        buttons.some((button) => hasTabText(button, FEED_TOP_HOLDERS_LABELS)),
+        buttons.some((button) => hasTabText(button, FEED_POSITIONS_LABELS)),
         buttons.some((button) => hasTabText(button, FEED_ACTIVITY_LABELS))
-      );
+      ].filter(Boolean).length;
+      return buttons.length >= 3 && buttons.length <= 6 && matchedCount >= 3;
     }) ?? null;
 
   const findTopHoldersTabButton = () => {
@@ -1255,7 +1680,7 @@ type ContentRuntimeMessage =
       return null;
     }
     return (
-      Array.from(strip.querySelectorAll<HTMLButtonElement>("button")).find((button) =>
+      getFeedStripButtons(strip).find((button) =>
         isVisible(button) && hasTabText(button, FEED_TOP_HOLDERS_LABELS)
       ) ?? null
     );
@@ -1291,7 +1716,8 @@ type ContentRuntimeMessage =
 
     const text = compactText(element.textContent);
     const profileCount = countUniqueProfileAddresses(element);
-    if (!text || profileCount < 2 || text.length > 3200) {
+    const allProfileCount = countAllProfileAddresses(element);
+    if (!text || Math.max(profileCount, allProfileCount) < 2 || text.length > 4200) {
       return false;
     }
 
@@ -1343,6 +1769,87 @@ type ContentRuntimeMessage =
     }
 
     return scoredCandidates.sort((left, right) => right.score - left.score)[0]?.element ?? null;
+  };
+
+  const collectFeedPanelCandidates = (strip: HTMLElement | null) => {
+    if (!strip) {
+      return [];
+    }
+
+    const stripRect = strip.getBoundingClientRect();
+    const stripTop = stripRect.top + window.scrollY;
+    const stripBottom = stripRect.bottom + window.scrollY;
+    const candidateElements = new Set<HTMLElement>();
+
+    const pushVisibleSiblings = (element: HTMLElement | null) => {
+      let current = element?.nextElementSibling;
+      while (current instanceof HTMLElement) {
+        if (isVisible(current)) {
+          candidateElements.add(current);
+        }
+        current = current.nextElementSibling;
+      }
+    };
+
+    pushVisibleSiblings(strip);
+    pushVisibleSiblings(strip.parentElement instanceof HTMLElement ? strip.parentElement : null);
+    pushVisibleSiblings(strip.parentElement?.parentElement instanceof HTMLElement ? strip.parentElement.parentElement : null);
+    pushVisibleSiblings(
+      strip.parentElement?.parentElement?.parentElement instanceof HTMLElement
+        ? strip.parentElement.parentElement.parentElement
+        : null
+    );
+
+    [...candidateElements].forEach((element) => {
+      Array.from(element.querySelectorAll<HTMLElement>("div, section, article"))
+        .filter((child) => child !== element && isVisible(child))
+        .forEach((child) => candidateElements.add(child));
+    });
+
+    Array.from(document.querySelectorAll<HTMLElement>("div, section, article"))
+      .filter((element) => isVisible(element))
+      .forEach((element) => {
+        if (element.contains(strip) || strip.contains(element)) {
+          return;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const top = rect.top + window.scrollY;
+        if (top < stripTop - 40 || top > stripBottom + 1600) {
+          return;
+        }
+
+        if (element.querySelector('a[href*="/profile/"]')) {
+          candidateElements.add(element);
+        }
+      });
+
+    return [...candidateElements]
+      .map((element) => {
+        const profileCount = countUniqueProfileAddresses(element);
+        const allProfileCount = countAllProfileAddresses(element);
+        const rowCount = extractHolderRows(element, "feed-top-holders").length;
+        const commentArticleCount = element.querySelectorAll("article.comment").length;
+        const className = getElementClassName(element);
+        const text = compactText(element.textContent);
+        let score = rowCount * 40 + profileCount * 16 + allProfileCount * 6;
+        score -= commentArticleCount * 300;
+        score -= element.querySelectorAll("button").length * 4;
+        score -= Math.max(0, Math.round(element.getBoundingClientRect().height) - 900) / 8;
+        if (
+          hasAnyTitle(text, FEED_COMMENTS_LABELS) ||
+          hasAnyTitle(text, FEED_POSITIONS_LABELS) ||
+          hasAnyTitle(text, FEED_ACTIVITY_LABELS)
+        ) {
+          score -= 80;
+        }
+        if (className.includes("overflow-x-auto")) {
+          score -= 40;
+        }
+        return { element, score, rowCount, profileCount, allProfileCount };
+      })
+      .filter((candidate) => Math.max(candidate.profileCount, candidate.allProfileCount) >= 2 || candidate.rowCount >= 2)
+      .sort((left, right) => right.score - left.score);
   };
 
   const resolveColumnHeader = (
@@ -1618,7 +2125,7 @@ type ContentRuntimeMessage =
 
   const findNameLineContainer = (anchor: HTMLAnchorElement, row: HTMLElement) =>
     findAncestor(anchor.parentElement, row, (element) => {
-      const text = compactText(element.textContent);
+      const text = getTextWithoutInjectedAnnotations(element);
       const className = getElementClassName(element);
       return (
         text.length > 0 &&
@@ -1811,12 +2318,14 @@ type ContentRuntimeMessage =
 
   const detectFeedTopHoldersSurface = (): HolderPanelSnapshot | null => {
     const button = findTopHoldersTabButton();
-    if (!button) {
+    const strip = findFeedTabStrip();
+    const panelCandidates = collectFeedPanelCandidates(strip);
+    const candidatePanel = panelCandidates[0]?.element ?? null;
+    if (!button && !strip && !candidatePanel) {
       return null;
     }
 
-    const strip = findFeedTabStrip();
-    const commentsSection = button.closest<HTMLElement>("#comments");
+    const commentsSection = button?.closest<HTMLElement>("#comments") ?? strip?.closest<HTMLElement>("#comments") ?? null;
     const panel = findFeedTopHoldersPanel(button);
     const fallbackScope = uniqueElements([
       commentsSection?.nextElementSibling instanceof HTMLElement ? commentsSection.nextElementSibling : null,
@@ -1830,25 +2339,34 @@ type ContentRuntimeMessage =
     ])[0] ?? null;
     const structured =
       (panel ? buildStructuredSurfaceCandidate(panel, "feed-top-holders") : null) ??
+      (candidatePanel ? buildStructuredSurfaceCandidate(candidatePanel, "feed-top-holders") : null) ??
       (fallbackScope ? buildStructuredSurfaceCandidate(fallbackScope, "feed-top-holders") : null);
-    const active = Boolean(panel || structured) || isTopHoldersTabActive(button);
+    const active = Boolean(panel || candidatePanel || structured) || isTopHoldersTabActive(button);
     const root =
       structured?.root ??
       panel ??
-      button.closest<HTMLElement>("section") ??
-      button.parentElement?.parentElement ??
-      button.parentElement ??
+      candidatePanel ??
+      button?.closest<HTMLElement>("section") ??
+      button?.parentElement?.parentElement ??
+      button?.parentElement ??
+      strip ??
       button;
+
+    if (!root) {
+      return null;
+    }
 
     return {
       panelKey: `feed:${buildDomPath(root, document.body)}`,
-      titleText: compactText(button.textContent) || "Top Holders",
+      titleText: compactText(button?.textContent) || "Top Holders",
       active,
       surfaceKind: "feed-top-holders",
-      confidence: structured ? structured.confidence : active && panel ? 0.86 : 0.52,
+      confidence: structured ? structured.confidence : active && (panel || candidatePanel) ? 0.86 : 0.52,
       root,
-      rows: structured?.rows ?? (panel ? extractHolderRows(panel, "feed-top-holders") : []),
-      fallbackAnchor: structured?.fallbackAnchor ?? panel ?? root
+      rows:
+        structured?.rows ??
+        (panel ? extractHolderRows(panel, "feed-top-holders") : candidatePanel ? extractHolderRows(candidatePanel, "feed-top-holders") : []),
+      fallbackAnchor: structured?.fallbackAnchor ?? panel ?? candidatePanel ?? root
     };
   };
 
@@ -1873,8 +2391,11 @@ type ContentRuntimeMessage =
     return lookupCache;
   };
 
+  const getInlineBadgeSource = (summary: AddressSummary) =>
+    dedupeBadges(summary.badges?.length ? summary.badges : (summary.hoverBadges ?? []));
+
   const selectPrimaryBadge = (summary: AddressSummary, aliasText: string, holderDisplayName: string) =>
-    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+    getInlineBadgeSource(summary)
       .filter((badge) => !isAliasDuplicateBadge(badge, aliasText, holderDisplayName))
       .sort(compareInlineBadges)[0];
 
@@ -1884,21 +2405,24 @@ type ContentRuntimeMessage =
     aliasText?: string,
     holderDisplayName?: string
   ) =>
-    dedupeBadges(summary.hoverBadges?.length ? summary.hoverBadges : summary.badges)
+    getInlineBadgeSource(summary)
       .filter((badge) => badge.id !== primaryBadge?.id)
       .filter((badge) =>
         aliasText && holderDisplayName ? !isAliasDuplicateBadge(badge, aliasText, holderDisplayName) : true
       )
       .sort(compareInlineBadges)
-      .slice(0, 5);
+      .slice(0, 2);
 
   const hasHoverPayload = (annotation: ResolvedInlineAnnotation) =>
     Boolean(annotation.summaryText) ||
     annotation.secondaryBadges.length > 0 ||
     annotation.statusBadges.length > 0 ||
-    Boolean(annotation.hoverCard?.officialTags.length) ||
-    Boolean(annotation.hoverCard?.aiTags.length) ||
+    Boolean(annotation.hoverCard?.officialTags?.length) ||
+    Boolean(annotation.hoverCard?.aiTags?.length) ||
     Boolean(annotation.hoverCard?.officialNoteText) ||
+    Boolean(annotation.hoverCard?.aiBriefShortText) ||
+    Boolean(annotation.hoverCard?.aiNarrativeNoteText) ||
+    Boolean(annotation.hoverCard?.aiDeepNoteText) ||
     Boolean(annotation.hoverCard?.aiStatsNoteText);
 
   const buildResolvedAnnotation = (
@@ -1909,10 +2433,11 @@ type ContentRuntimeMessage =
   ): ResolvedInlineAnnotation => {
     const aliasText = summary.alias?.trim() || row.displayNameText || holder.displayName || shortenAddress(holder.proxyWallet);
     const primaryBadge = selectPrimaryBadge(summary, aliasText, holder.displayName);
+    const mountKey = getRowMountKey(row);
     return {
-      key: `${row.rowKey}:${row.normalizedAddress}`,
+      key: mountKey,
       rowKey: row.rowKey,
-      mountKey: getRowMountKey(row),
+      mountKey,
       normalizedAddress: row.normalizedAddress ?? "",
       surfaceKind: row.surfaceKind,
       source,
@@ -1921,8 +2446,9 @@ type ContentRuntimeMessage =
       secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
-      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
+      summaryText: truncateText(summary.aiBriefShort ?? summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
       noteSnippet: truncateText(summary.noteSnippet, 48),
+      activityLevel: getActivityLevelFromSummary(summary),
       detailUrl: summary.detailUrl,
       summaryVersion: summary.version,
       proxyWallet: holder.proxyWallet,
@@ -1950,8 +2476,9 @@ type ContentRuntimeMessage =
       secondaryBadges: selectSecondaryBadges(summary, primaryBadge, aliasText, holder.displayName),
       statusBadges: summary.statusBadges ?? [],
       hoverCard: summary.hoverCard,
-      summaryText: truncateText(summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
+      summaryText: truncateText(summary.aiBriefShort ?? summary.strategyFocus ?? summary.noteSnippet, 96) || undefined,
       noteSnippet: truncateText(summary.noteSnippet, 48),
+      activityLevel: getActivityLevelFromSummary(summary),
       detailUrl: summary.detailUrl,
       summaryVersion: summary.version,
       proxyWallet: holder.proxyWallet,
@@ -2065,10 +2592,19 @@ type ContentRuntimeMessage =
   const findMountedAnnotationKeyByNode = (node: HTMLElement) =>
     [...mountedAnnotations.entries()].find(([, entry]) => entry.node === node)?.[0];
 
+  const findMountedPlaceholderKeyByNode = (node: HTMLElement) =>
+    [...mountedPlaceholderSlots.entries()].find(([, entry]) => entry.node === node)?.[0];
+
   const removeAnnotationDomNode = (node: HTMLElement) => {
     const mountedKey = findMountedAnnotationKeyByNode(node);
     if (mountedKey) {
       removeMountedAnnotation(mountedKey);
+      return;
+    }
+
+    const placeholderKey = findMountedPlaceholderKeyByNode(node);
+    if (placeholderKey) {
+      removePlaceholderSlot(placeholderKey);
       return;
     }
 
@@ -2077,6 +2613,53 @@ type ContentRuntimeMessage =
       hoverOverlayManager.close();
     }
     node.remove();
+  };
+
+  const isOwnedAnnotationNode = (node: HTMLElement) => {
+    const owner = node.dataset.wsmOwner?.trim();
+    return !owner || owner === CONTENT_INSTANCE_ID;
+  };
+
+  const getOwnedAnnotationNodes = () =>
+    Array.from(document.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)).filter(isOwnedAnnotationNode);
+
+  const hasMountedAnnotationDom = () =>
+    mountedAnnotations.size > 0 || mountedPlaceholderSlots.size > 0 || Boolean(mountedFallbackNode);
+
+  const markAnnotationsStale = () => {
+    getOwnedAnnotationNodes().forEach((node) => {
+      node.dataset.wsmState = "stale";
+    });
+  };
+
+  const markAnnotationsFresh = () => {
+    getOwnedAnnotationNodes().forEach((node) => {
+      delete node.dataset.wsmState;
+    });
+  };
+
+  const cancelTransientClear = () => {
+    if (!transientClearTimer) {
+      return;
+    }
+    window.clearTimeout(transientClearTimer);
+    transientClearTimer = null;
+  };
+
+  const scheduleTransientClear = () => {
+    if (!hasMountedAnnotationDom()) {
+      return;
+    }
+
+    markAnnotationsStale();
+    if (transientClearTimer) {
+      return;
+    }
+
+    transientClearTimer = window.setTimeout(() => {
+      transientClearTimer = null;
+      clearAnnotations();
+    }, TRANSIENT_CLEAR_GRACE_MS);
   };
 
   const pruneConflictingAnnotationDomNodes = (
@@ -2093,9 +2676,7 @@ type ContentRuntimeMessage =
     );
     const nodes = Array.from(
       new Set(scopes.flatMap((scope) => Array.from(scope.querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`))))
-    ).filter(
-      (node) => !node.classList.contains(FALLBACK_CLASS)
-    );
+    ).filter((node) => isOwnedAnnotationNode(node) && !node.classList.contains(FALLBACK_CLASS));
 
     nodes.forEach((node) => {
       if (node === keepNode) {
@@ -2113,9 +2694,7 @@ type ContentRuntimeMessage =
   };
 
   const removeAllAnnotationDomNodes = () => {
-    document
-      .querySelectorAll<HTMLElement>(`.${ROOT_CLASS}`)
-      .forEach((node) => removeAnnotationDomNode(node));
+    getOwnedAnnotationNodes().forEach((node) => removeAnnotationDomNode(node));
   };
 
   const removeMountedAnnotation = (key: string) => {
@@ -2136,12 +2715,88 @@ type ContentRuntimeMessage =
     mountedFallbackNode = null;
   };
 
+  const removePlaceholderSlot = (key: string) => {
+    const entry = mountedPlaceholderSlots.get(key);
+    if (!entry) {
+      return;
+    }
+    entry.node.remove();
+    mountedPlaceholderSlots.delete(key);
+    cleanupMountClasses(entry);
+  };
+
+  const clearPlaceholderSlots = () => {
+    [...mountedPlaceholderSlots.keys()].forEach((key) => removePlaceholderSlot(key));
+  };
+
   const clearAnnotations = () => {
+    cancelTransientClear();
     [...mountedAnnotations.keys()].forEach((key) => removeMountedAnnotation(key));
+    clearPlaceholderSlots();
     fallbackHoverAnnotations.clear();
     clearMountedFallback();
     removeAllAnnotationDomNodes();
     setDebugState("Rendered", "0");
+  };
+
+  const buildPlaceholderSlot = (row: HolderRowSnapshot) => {
+    const node = document.createElement("div");
+    node.className = `${ROOT_CLASS} ${ROW_CLASS} ${PLACEHOLDER_CLASS}`;
+    node.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+    node.dataset.placeholderKey = getRowMountKey(row);
+    node.dataset.address = row.normalizedAddress ?? "";
+    node.dataset.surfaceKind = row.surfaceKind;
+    node.dataset.wsmState = "pending";
+    return node;
+  };
+
+  const reserveAnnotationSlots = (panel: HolderPanelSnapshot) => {
+    const nextKeys = new Set(panel.rows.map((row) => getRowMountKey(row)));
+
+    [...mountedPlaceholderSlots.entries()].forEach(([key, entry]) => {
+      if (!nextKeys.has(key) || !entry.node.isConnected || !entry.row.isConnected || !entry.mountTarget.isConnected) {
+        removePlaceholderSlot(key);
+      }
+    });
+
+    panel.rows.forEach((row) => {
+      const key = getRowMountKey(row);
+      if (mountedAnnotations.has(key)) {
+        return;
+      }
+
+      const existing = mountedPlaceholderSlots.get(key);
+      if (
+        existing &&
+        existing.row === row.mount.row &&
+        existing.mountTarget === row.mount.mountTarget &&
+        existing.node.isConnected
+      ) {
+        return;
+      }
+
+      if (existing) {
+        removePlaceholderSlot(key);
+      }
+
+      ensureMountClasses(row.mount);
+      row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
+      row.mount.row.dataset.wsmRowSide = row.side;
+      row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
+      const node = buildPlaceholderSlot(row);
+      if (row.mount.nameLine) {
+        row.mount.nameLine.insertAdjacentElement("afterend", node);
+      } else {
+        row.mount.mountTarget.append(node);
+      }
+
+      mountedPlaceholderSlots.set(key, {
+        node,
+        row: row.mount.row,
+        mountTarget: row.mount.mountTarget,
+        mainContainer: row.mount.mainContainer
+      });
+    });
   };
 
   const invalidatePendingRender = () => {
@@ -2152,11 +2807,41 @@ type ContentRuntimeMessage =
     }
   };
 
-  const createChipNode = (badge: AddressSummary["badges"][number]) => {
-    const span = document.createElement("span");
-    span.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
-    span.textContent = truncateText(badge.text, 18);
-    return span;
+  const getVisibleAnnotationBadges = (annotation: ResolvedInlineAnnotation) =>
+    dedupeBadges([
+      ...(annotation.primaryBadge ? [annotation.primaryBadge] : []),
+      ...annotation.secondaryBadges,
+      ...annotation.statusBadges.filter((badge) => !isSystemOnlyBadge(badge))
+    ]);
+
+  const prepareHoverTrigger = (element: HTMLElement, annotation: ResolvedInlineAnnotation) => {
+    element.setAttribute("aria-haspopup", "dialog");
+    element.setAttribute("aria-expanded", "false");
+    element.dataset.wsmxHoverTrigger = "1";
+    element.dataset.wsmxHoverKey = annotation.key;
+  };
+
+  const createChipNode = (
+    badge: AddressSummary["badges"][number],
+    annotation: ResolvedInlineAnnotation
+  ): HTMLButtonElement => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `wsm-chip wsm-chip--${badge.tone || "neutral"}`;
+    button.textContent = truncateText(badge.text, 18);
+    button.title = badge.detailText || badge.metricText || badge.text;
+    prepareHoverTrigger(button, annotation);
+    return button;
+  };
+
+  const createMoreChipNode = (hiddenCount: number, annotation: ResolvedInlineAnnotation) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "wsm-chip wsm-chip--more";
+    button.textContent = `+${hiddenCount}`;
+    button.title = "查看更多标签";
+    prepareHoverTrigger(button, annotation);
+    return button;
   };
 
   const buildAnnotationNode = (annotation: ResolvedInlineAnnotation) => {
@@ -2168,27 +2853,45 @@ type ContentRuntimeMessage =
     row.dataset.surfaceKind = annotation.surfaceKind;
     row.dataset.source = annotation.source;
     row.dataset.version = annotation.summaryVersion;
+    row.dataset.renderSignature = getAnnotationRenderSignature(annotation);
 
-    const aliasLink = document.createElement("a");
-    aliasLink.className = "wsm-alias";
-    aliasLink.href = annotation.detailUrl;
-    aliasLink.target = "_blank";
-    aliasLink.rel = "noreferrer";
-    aliasLink.textContent = annotation.aliasText;
-    row.append(aliasLink);
+    const aliasButton = document.createElement("button");
+    aliasButton.type = "button";
+    aliasButton.className = "wsm-alias";
+    const aliasTone = getAliasActivityTone(annotation.activityLevel);
+    if (aliasTone) {
+      aliasButton.classList.add(`wsm-alias--${aliasTone}`);
+    }
+    aliasButton.textContent = annotation.aliasText;
+    aliasButton.title = annotation.activityLevel ? `查看钱包解读 · ${annotation.activityLevel}` : "查看钱包解读";
+    prepareHoverTrigger(aliasButton, annotation);
+    aliasButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openAnnotationReader(annotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+    });
+    row.append(aliasButton);
 
-    let trigger: HTMLButtonElement | undefined;
-    if (annotation.primaryBadge || hasHoverPayload(annotation)) {
-      trigger = document.createElement("button");
-      trigger.type = "button";
-      trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${annotation.primaryBadge?.tone || "neutral"}`;
-      trigger.textContent = truncateText(annotation.primaryBadge?.text || "More", 18);
-      trigger.setAttribute("aria-haspopup", "dialog");
-      trigger.setAttribute("aria-expanded", "false");
-      trigger.dataset.wsmxHoverTrigger = "1";
-      trigger.dataset.wsmxHoverKey = annotation.key;
-      row.append(trigger);
-    } else if (annotation.noteSnippet) {
+    let trigger: HTMLButtonElement | undefined = aliasButton;
+    const visibleBadges = getVisibleAnnotationBadges(annotation);
+    if (visibleBadges.length > 0) {
+      const chipList = document.createElement("div");
+      chipList.className = "wsm-chip-list";
+      const maxInlineBadges = 3;
+      visibleBadges.slice(0, maxInlineBadges).forEach((badge, index) => {
+        const chip = createChipNode(badge, annotation);
+        if (index === 0) {
+          trigger = chip;
+        }
+        chipList.append(chip);
+      });
+      if (visibleBadges.length > maxInlineBadges) {
+        chipList.append(createMoreChipNode(visibleBadges.length - maxInlineBadges, annotation));
+      }
+      row.append(chipList);
+    }
+
+    if (annotation.noteSnippet && visibleBadges.length === 0 && !hasHoverPayload(annotation)) {
       const note = document.createElement("span");
       note.className = "wsm-note";
       note.textContent = truncateText(annotation.noteSnippet, 24);
@@ -2201,13 +2904,40 @@ type ContentRuntimeMessage =
   const upsertMountedAnnotation = (row: HolderRowSnapshot, annotation: ResolvedInlineAnnotation) => {
     const existing = mountedAnnotations.get(annotation.key);
     pruneConflictingAnnotationDomNodes(row, annotation, existing?.node);
-    if (
+    const sameMount =
       existing &&
       existing.row === row.mount.row &&
       existing.mountTarget === row.mount.mountTarget &&
-      existing.node.isConnected &&
-      existing.node.dataset.version === annotation.summaryVersion
+      existing.node.isConnected;
+    if (
+      sameMount &&
+      existing.node.dataset.renderSignature === getAnnotationRenderSignature(annotation)
     ) {
+      existing.node.dataset.version = annotation.summaryVersion;
+      existing.node.dataset.source = annotation.source;
+      existing.annotation = annotation;
+      delete existing.node.dataset.wsmState;
+      return;
+    }
+
+    if (sameMount) {
+      ensureMountClasses(row.mount);
+      row.mount.row.dataset.wsmRowAddress = row.normalizedAddress ?? "";
+      row.mount.row.dataset.wsmRowSide = row.side;
+      row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
+      const built = buildAnnotationNode(annotation);
+      if (hoverOverlayManager?.getActiveKey() === annotation.key) {
+        hoverOverlayManager.close();
+      }
+      existing.node.replaceWith(built.node);
+      mountedAnnotations.set(annotation.key, {
+        node: built.node,
+        trigger: built.trigger,
+        annotation,
+        row: row.mount.row,
+        mountTarget: row.mount.mountTarget,
+        mainContainer: row.mount.mainContainer
+      });
       return;
     }
 
@@ -2276,30 +3006,34 @@ type ContentRuntimeMessage =
         return;
       }
 
-      const item = document.createElement("a");
+      const item = document.createElement("div");
       item.className = "wsm-fallback-item";
-      item.href = holder.summary.detailUrl;
-      item.target = "_blank";
-      item.rel = "noreferrer";
-
-      const alias = document.createElement("span");
-      alias.className = "wsm-fallback-alias";
-      alias.textContent = holder.summary.alias?.trim() || holder.displayName || shortenAddress(holder.proxyWallet);
-      item.append(alias);
 
       const fallbackAnnotation = buildFallbackAnnotation(panel, holder, holder.summary);
       fallbackHoverAnnotations.set(fallbackAnnotation.key, fallbackAnnotation);
 
-      if (fallbackAnnotation.primaryBadge || hasHoverPayload(fallbackAnnotation)) {
-        const trigger = document.createElement("button");
-        trigger.type = "button";
-        trigger.className = `wsmx-chip-trigger wsmx-chip-trigger--${fallbackAnnotation.primaryBadge?.tone || "neutral"}`;
-        trigger.textContent = truncateText(fallbackAnnotation.primaryBadge?.text || "More", 18);
-        trigger.setAttribute("aria-haspopup", "dialog");
-        trigger.setAttribute("aria-expanded", "false");
-        trigger.dataset.wsmxHoverTrigger = "1";
-        trigger.dataset.wsmxHoverKey = fallbackAnnotation.key;
-        item.append(trigger);
+      const alias = document.createElement("button");
+      alias.type = "button";
+      alias.className = "wsm-fallback-alias";
+      alias.textContent = holder.summary.alias?.trim() || holder.displayName || shortenAddress(holder.proxyWallet);
+      alias.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openAnnotationReader(fallbackAnnotation, event.currentTarget instanceof HTMLElement ? event.currentTarget : null);
+      });
+      item.append(alias);
+
+      const visibleBadges = getVisibleAnnotationBadges(fallbackAnnotation);
+      if (visibleBadges.length > 0) {
+        const chipList = document.createElement("div");
+        chipList.className = "wsm-chip-list";
+        visibleBadges.slice(0, 4).forEach((badge) => {
+          chipList.append(createChipNode(badge, fallbackAnnotation));
+        });
+        if (visibleBadges.length > 4) {
+          chipList.append(createMoreChipNode(visibleBadges.length - 4, fallbackAnnotation));
+        }
+        item.append(chipList);
       }
 
       list.append(item);
@@ -2317,6 +3051,7 @@ type ContentRuntimeMessage =
     annotations: ResolvedInlineAnnotation[],
     visibleAddressCount: number
   ) => {
+    cancelTransientClear();
     const rowsByKey = new Map(panel.rows.map((row) => [row.rowKey, row] as const));
     const nextKeys = new Set(annotations.map((annotation) => annotation.key));
 
@@ -2333,9 +3068,14 @@ type ContentRuntimeMessage =
         upsertMountedAnnotation(row, annotation);
       }
     });
+    clearPlaceholderSlots();
 
     const shouldRenderFallback =
-      Boolean(payload.matchedSummaryCount) && annotations.length === 0 && visibleAddressCount === 0;
+      panel.surfaceKind === "feed-top-holders" &&
+      panel.rows.length > 0 &&
+      Boolean(payload.matchedSummaryCount) &&
+      annotations.length === 0 &&
+      visibleAddressCount === 0;
     if (shouldRenderFallback) {
       renderFallbackList(panel, payload, annotations);
     } else {
@@ -2344,6 +3084,7 @@ type ContentRuntimeMessage =
 
     setDebugState("Rendered", String(annotations.length));
     setDebugState("VisibleHits", String(new Set(annotations.map((annotation) => annotation.normalizedAddress)).size));
+    markAnnotationsFresh();
     return shouldRenderFallback;
   };
 
@@ -2354,7 +3095,7 @@ type ContentRuntimeMessage =
     invalidatePendingRender();
     renderTimer = window.setTimeout(() => {
       void renderAnnotations();
-    }, 80);
+    }, RENDER_DEBOUNCE_MS);
   };
 
   const getClosestAnnotationRoot = (node: Node) => {
@@ -2456,7 +3197,7 @@ type ContentRuntimeMessage =
     syncSurfaceObserver(panel?.root ?? null);
 
     if (!panel) {
-      clearAnnotations();
+      scheduleTransientClear();
       setDebugState("Panel", "missing");
       setDebugState("PanelKind", "none");
       markRuntimeStatus("wake", "Waiting for the holders surface to appear.");
@@ -2488,7 +3229,7 @@ type ContentRuntimeMessage =
     }
 
     if (!panel.active) {
-      clearAnnotations();
+      scheduleTransientClear();
       setDebugState("Panel", "inactive");
       setDebugState("PanelKind", panel.surfaceKind);
       markRuntimeStatus("wake", "Open the holders panel to start annotations.");
@@ -2522,7 +3263,18 @@ type ContentRuntimeMessage =
 
     const payload = currentPayload;
     if (!payload) {
-      clearAnnotations();
+      reserveAnnotationSlots(panel);
+      scheduleTransientClear();
+      return;
+    }
+
+    const pageSlug = resolveCurrentMarketSlug();
+    if (pageSlug && payload.market.slug !== pageSlug) {
+      reserveAnnotationSlots(panel);
+      scheduleTransientClear();
+      setDebugState("Panel", "pending");
+      setDebugState("PanelKind", panel.surfaceKind);
+      markRuntimeStatus("wake", "Refreshing page runtime.");
       return;
     }
 
@@ -2603,6 +3355,10 @@ type ContentRuntimeMessage =
     forceVisibleLookup?: boolean;
     forceRevalidate?: boolean;
   }) => {
+    if (routeRefreshTimer) {
+      window.clearTimeout(routeRefreshTimer);
+      routeRefreshTimer = null;
+    }
     invalidatePendingRender();
     const refreshId = ++refreshGeneration;
     currentConfig = await getConfig();
@@ -2624,7 +3380,7 @@ type ContentRuntimeMessage =
     setDebugState("Slug", slug ?? "missing");
 
     if (!slug) {
-      clearAnnotations();
+      scheduleTransientClear();
       markRuntimeStatus("wake", "Open a market page to start annotations.");
       await publishPageState(buildPageState({
         surfaceFound: false,
@@ -2710,14 +3466,29 @@ type ContentRuntimeMessage =
     }
   };
 
+  const scheduleRouteRefresh = () => {
+    invalidatePendingRender();
+    if (hasMountedAnnotationDom()) {
+      scheduleTransientClear();
+    } else {
+      markAnnotationsStale();
+    }
+    if (routeRefreshTimer) {
+      window.clearTimeout(routeRefreshTimer);
+    }
+    routeRefreshTimer = window.setTimeout(() => {
+      routeRefreshTimer = null;
+      void refreshAnnotations({ lifecycle: "bootstrap" });
+    }, ROUTE_REFRESH_DEBOUNCE_MS);
+  };
+
   const handleLifecycleRefresh = (event?: PageTransitionEvent | { persisted?: boolean }) => {
     if (document.visibilityState !== "visible" && !(event?.persisted ?? false)) {
       return;
     }
     const nextSlug = resolveCurrentMarketSlug();
     if (nextSlug && nextSlug !== currentSlug) {
-      clearAnnotations();
-      void refreshAnnotations({ lifecycle: "bootstrap" });
+      scheduleRouteRefresh();
       return;
     }
     if (!currentPayload && nextSlug) {
@@ -2957,10 +3728,17 @@ type ContentRuntimeMessage =
         if ((event as PageTransitionEvent).persisted) {
           return;
         }
+        if (routeRefreshTimer) {
+          window.clearTimeout(routeRefreshTimer);
+          routeRefreshTimer = null;
+        }
+        cancelTransientClear();
         interactionAbortController?.abort();
         interactionAbortController = null;
         hoverOverlayManager?.destroy();
         hoverOverlayManager = null;
+        drawerOverlayManager?.destroy();
+        drawerOverlayManager = null;
         surfaceObserver?.disconnect();
         surfaceObserver = null;
         discoveryObserver?.disconnect();
@@ -3005,6 +3783,7 @@ type ContentRuntimeMessage =
     hoverOverlayManager = new HoverOverlayManager(
       (key) => mountedAnnotations.get(key)?.annotation ?? fallbackHoverAnnotations.get(key)
     );
+    drawerOverlayManager = new DrawerOverlayManager();
     installHoverInteractionHandlers();
 
     chrome.storage.onChanged.addListener(handleStorageChange);
@@ -3038,9 +3817,7 @@ type ContentRuntimeMessage =
     ensureDiscoveryObserver();
     ensureResizeObserver();
     window.addEventListener("wsm-locationchange", () => {
-      invalidatePendingRender();
-      clearAnnotations();
-      void refreshAnnotations({ lifecycle: "bootstrap" });
+      scheduleRouteRefresh();
     });
 
     await refreshAnnotations({ lifecycle: "bootstrap" });

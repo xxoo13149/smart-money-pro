@@ -39,7 +39,10 @@ export type WalletLabelKind =
   | "timing_window"
   | "edge_style"
   | "weather_driver"
-  | "signal_quality";
+  | "signal_quality"
+  | "portrait_style"
+  | "husky_profile"
+  | "data_status";
 
 export type WalletPrimarySignalKind =
   | "geo_specialty"
@@ -117,7 +120,7 @@ export interface WalletWeatherSignalDraft {
   evidenceQuality: "explicit_numeric" | "source_named" | "qualitative_only" | "insufficient";
 }
 
-export type WalletSourceType = "manual" | "ai" | "file" | "system";
+export type WalletSourceType = "manual" | "finder" | "ai" | "file" | "system";
 export type WalletCurationStatus = "active" | "review_needed" | "deleted";
 export type WalletListSort = "updated_desc" | "created_desc" | "name_asc";
 export type WalletListStatus = "all" | "active" | "watchlist" | "review_needed" | "deleted";
@@ -281,6 +284,7 @@ export interface WalletTableRow {
   wallet: Wallet;
   metrics: WalletMetrics;
   labels: WalletLabel[];
+  finderAi?: WalletFinderAiInsight;
   activeAlertCount: number;
   latestTrade?: Trade;
 }
@@ -288,7 +292,7 @@ export interface WalletTableRow {
 export interface AddressLabelBadge {
   id: string;
   text: string;
-  tone: "accent" | "neutral" | "watch" | "alert" | "danger" | "ai-review";
+  tone: "accent" | "neutral" | "watch" | "alert" | "danger" | "ai-review" | "core" | "portrait" | "external";
   kind?: WalletLabelKind;
   priority?: number;
   detailText?: string;
@@ -300,7 +304,10 @@ export interface AddressHoverCard {
   officialTags: AddressLabelBadge[];
   officialNoteText?: string;
   aiTags: AddressLabelBadge[];
+  aiBriefShortText?: string;
   aiStatsNoteText?: string;
+  aiNarrativeNoteText?: string;
+  aiDeepNoteText?: string;
 }
 
 export interface AddressSummary {
@@ -315,6 +322,10 @@ export interface AddressSummary {
   statusBadges?: AddressLabelBadge[];
   hoverCard?: AddressHoverCard;
   noteSnippet?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
+  aiDeepNote?: string;
+  activityLevel?: string;
   watchlisted: boolean;
   detailUrl: string;
   updatedAt: string;
@@ -354,6 +365,8 @@ export interface WalletImportPreviewRow {
   rowNumber: number;
   wallet: WalletImportWalletDraft;
   labels: WalletImportLabelDraft[];
+  finderAi?: WalletFinderAiInsight;
+  finderProfile?: WalletFinderProfile;
   note?: string;
   watchlistNote?: string;
   sourceExcerpt?: string;
@@ -364,10 +377,229 @@ export interface WalletImportPreviewRow {
 export type WalletAiConfidence = "high" | "medium" | "low" | "unknown";
 
 export interface WalletAiProviderMeta {
-  provider: "gemini" | "groq" | "none";
+  provider: "gemini" | "groq" | "deepseek" | "finder" | "none";
   model: string;
   fallbackUsed: boolean;
   succeededAt?: string;
+  promptVersion?: string;
+  generatedAt?: string;
+  inputHash?: string;
+  generationScope?: string;
+  outputSchemaVersion?: string;
+  cacheKey?: string;
+}
+
+export interface WalletFinderAiMetric {
+  key?: string;
+  label: string;
+  value?: string | number | boolean;
+}
+
+export interface WalletFinderAiLabel {
+  kind?: string;
+  value: string;
+  source?: string;
+  evidence?: string;
+}
+
+export interface WalletFinderAiPrimarySignal {
+  key?: string;
+  label: string;
+  matched?: boolean;
+  reason?: string;
+}
+
+export interface WalletFinderAiInsight {
+  walletId?: string;
+  sourceName?: string;
+  runId?: string;
+  normalizedAddress?: string;
+  strategyFocus?: string;
+  aiBriefShort?: string;
+  aiBriefNote?: string;
+  aiDeepNote?: string;
+  sourceExcerpt?: string;
+  evidenceLevel?: string;
+  hasConflict?: boolean;
+  needsReview?: boolean;
+  labels?: WalletFinderAiLabel[];
+  primarySignals?: WalletFinderAiPrimarySignal[];
+  keyMetrics?: WalletFinderAiMetric[];
+  weatherSignals?: Record<string, unknown>;
+  providerMeta?: WalletAiProviderMeta;
+  raw?: Record<string, unknown>;
+  importBatchId?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface WalletFinderProfileMetric {
+  key: string;
+  label: string;
+  value: number | string | boolean | null;
+  unit?: "usd" | "percent" | "ratio" | "count" | "multiple" | "text";
+  source?: string;
+}
+
+// 地址库列表行的精简画像：悬浮卡只展示这几个关键数字，
+// 避免把整份画像（城市明细 + 行为模式）塞进每一行。
+export interface WalletFinderMetricsDigest {
+  totalPnlUsd?: number;
+  volumeUsd?: number;
+  trades?: number;
+  resolvedPositions?: number;
+  winRate?: number;
+  roi?: number;
+  avgStakeUsd?: number;
+  weatherShare?: number;
+  topCity?: string;
+  cityCount?: number;
+  peakBurstUsd?: number;
+  bestMultiple?: number;
+  snapshotAsOf?: string;
+}
+
+// 首页聚合口径：全部从 D1 的 wallet_finder_profiles / wallet_finder_ai_insights
+// 直算，不依赖 demo seed 数据。旧的 seed 版会把真实地址和假市场/假成交做 join，
+// 结果恒为 0，所以首页那些面板过去全是空数字。
+export interface DashboardLibraryMetrics {
+  totalPnlUsd: number;
+  totalVolumeUsd: number;
+  totalTrades: number;
+  totalResolvedPositions: number;
+  weightedWinRate: number;
+  avgWinRate: number;
+  profitableWallets: number;
+  losingWallets: number;
+  bestMultiple: number;
+  peakBurstUsd: number;
+  avgWeatherShare: number;
+  profiledWallets: number;
+  insightWallets: number;
+  reviewWallets: number;
+}
+
+export interface DashboardLabelStat {
+  value: string;
+  count: number;
+  share: number;
+  tone: string;
+}
+
+export interface DashboardLabelFacet {
+  kind: string;
+  total: number;
+  items: DashboardLabelStat[];
+}
+
+export interface DashboardCityStat {
+  city: string;
+  wallets: number;
+  totalPnlUsd: number;
+  totalVolumeUsd: number;
+  avgWinRate: number;
+  topWalletId?: string;
+}
+
+export interface DashboardRankRow {
+  walletId: string;
+  normalizedAddress: string;
+  alias?: string;
+  displayName?: string;
+  watchlisted: boolean;
+  pnlUsd: number;
+  winRate: number;
+  volumeUsd: number;
+  trades: number;
+  bestMultiple: number;
+  topCity?: string;
+  aiBriefShort?: string;
+  strategyFocus?: string;
+  labels: string[];
+}
+
+export interface DashboardLibraryDigest {
+  totals: {
+    wallets: number;
+    weekNewWallets: number;
+    watchlisted: number;
+    labelAssignments: number;
+    labelValues: number;
+  };
+  metrics: DashboardLibraryMetrics;
+  labelFacets: DashboardLabelFacet[];
+  cityStats: DashboardCityStat[];
+  topByPnl: DashboardRankRow[];
+  topByWinRate: DashboardRankRow[];
+  topByVolume: DashboardRankRow[];
+  topLosers: DashboardRankRow[];
+  watchlist: DashboardRankRow[];
+  recentBatches: Array<{
+    sourceName: string | null;
+    rowCount: number;
+    createdCount: number;
+    updatedCount: number;
+    createdAt: string;
+    batchCount: number;
+  }>;
+  snapshotAsOf: string | null;
+}
+
+export interface WalletFinderCityRow {
+  city: string;
+  region?: string;
+  positionCount?: number;
+  tradeCount?: number;
+  pnlUsd?: number;
+  roi?: number;
+  winRate?: number;
+  resolvedCount?: number;
+  wonCount?: number;
+  avgEntryPrice?: number;
+  costUsd?: number;
+  payoutUsd?: number;
+  volumeUsd?: number;
+  share?: number;
+}
+
+export interface WalletFinderPortraitLabel {
+  code: string;
+  name: string;
+  share?: number;
+  sampleCount?: number;
+  group?: "portrait_style" | "husky_profile" | "core_screening" | "operational";
+  description?: string;
+}
+
+export interface WalletFinderPatternRow {
+  key?: string;
+  name?: string;
+  tradeCount?: number;
+  resolvedCount?: number;
+  wonCount?: number;
+  winRate?: number;
+  pnlUsd?: number;
+  roi?: number;
+  stakedUsd?: number;
+  share?: number;
+}
+
+export interface WalletFinderProfile {
+  runId?: string;
+  sourceName?: string;
+  snapshotAsOf?: string;
+  analysisSource?: string;
+  metrics: WalletFinderProfileMetric[];
+  portraitLabels: WalletFinderPortraitLabel[];
+  cities: WalletFinderCityRow[];
+  patterns: WalletFinderPatternRow[];
+  strategyMetrics: Record<string, number | string | boolean>;
+  overview: Record<string, unknown>;
+  coverage: Record<string, unknown>;
+  raw?: Record<string, unknown>;
+  importBatchId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface WalletAiExtractRequest {
@@ -387,8 +619,10 @@ export interface WalletAiExtractPreviewRow extends WalletImportPreviewRow {
 
 export interface WalletImportCommitRequest {
   rows: WalletImportPreviewRow[];
-  mode?: "file" | "text" | "ai";
+  mode?: "file" | "text" | "ai" | "finder";
+  sourceType?: WalletSourceType;
   sourceName?: string;
+  preserveExistingManualFields?: boolean;
 }
 
 export interface WalletManualCreateInput {
@@ -402,6 +636,10 @@ export interface WalletManualCreateInput {
 export interface WalletAdminRow {
   wallet: Wallet;
   labels: WalletLabel[];
+  finderAi?: WalletFinderAiInsight;
+  finderProfile?: WalletFinderProfile;
+  // 悬浮卡直接展示的精简关键数字
+  finderDigest?: WalletFinderMetricsDigest;
   highlights: AddressLabelBadge[];
   summaryText: string;
   statusBadges: WalletStatusBadge[];
@@ -410,6 +648,11 @@ export interface WalletAdminRow {
     label: string;
     importedAt?: string;
     importBatchId?: string;
+    sourceName?: string;
+    provider?: WalletAiProviderMeta["provider"];
+    model?: string;
+    fallbackUsed?: boolean;
+    batchCreatedAt?: string;
   };
   lastActivityAt: string;
 }
@@ -419,7 +662,9 @@ export interface WalletListQuery {
   view?: string;
   status?: WalletListStatus;
   source?: WalletSourceType | "all";
+  batch?: string;
   labels?: string[];
+  version?: string;
   sort?: WalletListSort;
   cursor?: string;
   limit?: number;
@@ -437,6 +682,8 @@ export interface WalletFacetCount {
   key: string;
   label: string;
   count: number;
+  name?: string;
+  kind?: WalletLabelKind;
 }
 
 export interface WalletFacetSummary {
@@ -447,6 +694,7 @@ export interface WalletFacetSummary {
   reviewNeededCount: number;
   sourceCounts: Record<WalletSourceType, number>;
   labelCounts: WalletFacetCount[];
+  versionCounts: WalletFacetCount[];
 }
 
 export interface WalletSavedView {
