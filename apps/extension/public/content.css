@@ -13,12 +13,42 @@
 }
 
 .wsm-holder-meta-target {
+  overflow: visible !important;
+  white-space: normal !important;
+}
+
+/*
+ * 只有在「找不到独立地址行、标签只能直接挂到挂载点」时才把挂载点改成纵向堆叠。
+ * 之前无条件加 column，导致「地址 | 金额」横排行被强行竖排，金额被挤到标签下面。
+ */
+.wsm-holder-meta-target--stack {
   display: flex !important;
   flex-direction: column !important;
   align-items: flex-start !important;
   gap: 4px !important;
   overflow: visible !important;
   white-space: normal !important;
+}
+
+/*
+ * 「地址 + 标签」纵向容器：我们自己插进页面的，不碰页面原生布局。
+ * flex: 0 1 auto + min-width:0 保证长地址能正常省略、标签换行不撑破容器。
+ */
+.wsm-name-stack {
+  display: flex !important;
+  flex-direction: column !important;
+  align-items: flex-start !important;
+  gap: 3px !important;
+  flex: 0 1 auto !important;
+  min-width: 0 !important;
+  max-width: 100% !important;
+  overflow: visible !important;
+  white-space: normal !important;
+}
+
+.wsm-name-stack > * {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .wsm-holder-meta-target > * {
@@ -43,7 +73,9 @@
   gap: 4px 6px;
   margin: 0;
   min-height: 19px;
-  max-width: min(420px, calc(100vw - 96px));
+  /* 跟着「地址 + 标签」容器走，绝不撑破页面原生行宽（长标签会溢出到金额列上）。 */
+  max-width: 100%;
+  min-width: 0;
 }
 
 .wsm-annotation-placeholder {
@@ -335,10 +367,6 @@
   .wsm-holder-row-target {
     padding-top: 6px !important;
     padding-bottom: 6px !important;
-  }
-
-  .wsm-annotation-row {
-    max-width: calc(100vw - 56px);
   }
 }
 

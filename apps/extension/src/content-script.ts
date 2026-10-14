@@ -51,164 +51,13 @@ interface CityWinRateView {
   sourceStatus: "live" | "stale";
 }
 
-const ROOT_CLASS = "wsm-city-panel";
-const OWNER_ATTR = "data-wsm-city-owner";
-const MAX_WALLETS = 8;
-
-const formatPercent = (value: number | undefined, digits = 1): string =>
-  typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
-
-const formatUsd = (value: number): string => {
-  if (!Number.isFinite(value)) {
-    return "—";
-  }
-  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
-  const abs = Math.abs(value);
-  if (abs >= 1000) {
-    return `${sign}$${(abs / 1000).toFixed(1)}k`;
-  }
-  return `${sign}$${abs.toFixed(abs < 10 ? 2 : 0)}`;
-};
-
-const shortenAddress = (address: string): string =>
-  address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
-
-/**
- * 把胜率 + 置信度翻译成展示文本。样本不足时明确说「样本不足」并给出样本数，
- * 而不是把原始百分比（可能是 2/2 的 100%）当成战绩显示。
- */
-const describeWinRate = (
-  view: { winRate?: number; winRateConfidence: "trusted" | "insufficient" | "unknown"; resolvedCount?: number },
-  minSample: number
-): { text: string; tone: "good" | "bad" | "neutral" } => {
-  if (view.winRateConfidence === "unknown") {
-    return { text: "胜率不提供", tone: "neutral" };
-  }
-  if (view.winRateConfidence === "insufficient" || view.winRate === undefined) {
-    return {
-      text: `样本不足（${view.resolvedCount ?? 0} 仓 < ${minSample}）`,
-      tone: "neutral"
-    };
-  }
-  return {
-    text: formatPercent(view.winRate),
-    tone: view.winRate >= 0.55 ? "good" : view.winRate < 0.45 ? "bad" : "neutral"
-  };
-};
-
-const describeDayWinRate = (view: {
-  dayWinRate?: number;
-  dayWinRateConfidence: "trusted" | "insufficient" | "unknown";
-  tradeDays?: number;
-}): string | null => {
-  if (view.dayWinRateConfidence === "unknown" || view.dayWinRate === undefined) {
-    return null;
-  }
-  if (view.dayWinRateConfidence === "insufficient") {
-    return `逐日 ${view.tradeDays ?? 0} 天样本不足`;
-  }
-  return `逐日 ${formatPercent(view.dayWinRate)}（${view.tradeDays ?? 0} 天）`;
-};
-
-const el = <K extends keyof HTMLElementTagNameMap>(
-  tag: K,
-  className?: string,
-  text?: string
-): HTMLElementTagNameMap[K] => {
-  const node = document.createElement(tag);
-  if (className) {
-    node.className = className;
-  }
-  if (text !== undefined) {
-    node.textContent = text;
-  }
-  return node;
-};
-
-const buildWalletRow = (wallet: CityWalletWinRateView, minSample: number): HTMLElement => {
-  const row = el("div", "wsm-city-wallet");
-
-  const head = el("div", "wsm-city-wallet-head");
-  const name = wallet.displayName || wallet.alias || shortenAddress(wallet.normalizedAddress);
-  const nameNode = el("span", "wsm-city-wallet-name", name);
-  if (wallet.watchlisted) {
-    head.append(el("span", "wsm-city-wallet-star", "★"));
-  }
-  head.append(nameNode);
-  head.append(el("span", "wsm-city-wallet-addr", shortenAddress(wallet.normalizedAddress)));
-  row.append(head);
-
-  const win = describeWinRate(wallet, minSample);
-  const stats = el("div", "wsm-city-wallet-stats");
-  stats.append(el("span", `wsm-city-metric wsm-city-tone-${win.tone}`, win.text));
-  stats.append(el("span", "wsm-city-metric", formatUsd(wallet.pnlUsd)));
-  const day = describeDayWinRate(wallet);
-  if (day) {
-    stats.append(el("span", "wsm-city-metric wsm-city-muted", day));
-  }
-  if (wallet.aiBriefShort) {
-    stats.append(el("span", "wsm-city-metric wsm-city-brief", wallet.aiBriefShort));
-  }
-  row.append(stats);
-
-  return row;
-};
-
-const buildPanel = (view: CityWinRateView, owner: string): HTMLElement => {
-  const panel = el("div", ROOT_CLASS);
-  panel.setAttribute(OWNER_ATTR, owner);
-
-  const header = el("div", "wsm-city-header");
-  header.append(el("span", "wsm-city-title", `${view.city} 战绩`));
-  if (view.sourceStatus === "stale") {
-    header.append(el("span", "wsm-city-stale", "缓存"));
-  }
-  panel.append(header);
-
-  const totalWin = describeWinRate(
-    {
-      winRate: view.total.winRate,
-      winRateConfidence: view.total.winRateConfidence,
-      resolvedCount: view.total.resolvedPositions
-    },
-    view.minSample
-  );
-
-  const summary = el("div", "wsm-city-summary");
-  summary.append(
-    el("span", `wsm-city-total-rate wsm-city-tone-${totalWin.tone}`, totalWin.text)
-  );
-  summary.append(el("span", "wsm-city-metric", `${view.walletCount} 个地址`));
-  summary.append(el("span", "wsm-city-metric", formatUsd(view.total.pnlUsd)));
-  summary.append(
-    el(
-      "span",
-      "wsm-city-muted",
-      `${view.total.wonPositions}/${view.total.resolvedPositions} 已结算仓位`
-    )
-  );
-  panel.append(summary);
-
-  if (view.wallets.length > 0) {
-    const list = el("div", "wsm-city-list");
-    view.wallets
-      .slice(0, MAX_WALLETS)
-      .forEach((wallet) => list.append(buildWalletRow(wallet, view.minSample)));
-    panel.append(list);
-
-    if (view.wallets.length > MAX_WALLETS) {
-      panel.append(
-        el("div", "wsm-city-muted wsm-city-more", `还有 ${view.wallets.length - MAX_WALLETS} 个地址`)
-      );
-    }
-  }
-
-  panel.append(
-    el("div", "wsm-city-footnote", `胜率按已结算仓位统计 · 数据 ${view.refreshedAt.slice(0, 10)}`)
-  );
-
-  return panel;
-};
+// 城市战绩浮层的运行时代码整体包在 IIFE 里。
+// content script 是 classic script，background 在 ping 失败时还会用
+// chrome.scripting.executeScript 再注入一次同一个文件；同一 frame 里两次
+// classic script 共享全局词法作用域，顶层 const/let 第二次注入会直接抛
+// "Identifier ... has already been declared"。这个错误发生在**解析期**，
+// 早于 __WSM_CONTENT_SCRIPT_READY__ 运行期守卫，所以整个 content script 会死掉，
+// 连原有标注都不再工作。类型声明留在外面（编译后消失，无副作用）。
 
 interface CityPanelController {
   /** 传入 null 表示这个城市没有数据，直接收起面板。 */
@@ -216,41 +65,208 @@ interface CityPanelController {
   destroy(): void;
 }
 
-/**
- * 挂载城市战绩浮层。挂载点固定在页面右下角，避开 Polymarket 的右侧持仓栏。
- * 重复调用只更新内容，不会叠出多个面板。
- */
-const mountCityWinRatePanel = (owner: string): CityPanelController => {
-  let current: HTMLElement | null = null;
+(() => {
+  const CITY_PANEL_ROOT_CLASS = "wsm-city-panel";
+  const CITY_PANEL_OWNER_ATTR = "data-wsm-city-owner";
+  const CITY_PANEL_MAX_WALLETS = 8;
 
-  const render = (view: CityWinRateView | null) => {
-    const existing = document.querySelector<HTMLElement>(`.${ROOT_CLASS}`);
-    if (existing && existing.getAttribute(OWNER_ATTR) !== owner) {
-      return;
+  const formatPercent = (value: number | undefined, digits = 1): string =>
+    typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
+
+  const formatUsd = (value: number): string => {
+    if (!Number.isFinite(value)) {
+      return "—";
+    }
+    const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+    const abs = Math.abs(value);
+    if (abs >= 1000) {
+      return `${sign}$${(abs / 1000).toFixed(1)}k`;
+    }
+    return `${sign}$${abs.toFixed(abs < 10 ? 2 : 0)}`;
+  };
+
+  const shortenAddress = (address: string): string =>
+    address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+
+  /**
+   * 把胜率 + 置信度翻译成展示文本。样本不足时明确说「样本不足」并给出样本数，
+   * 而不是把原始百分比（可能是 2/2 的 100%）当成战绩显示。
+   */
+  const describeWinRate = (
+    view: { winRate?: number; winRateConfidence: "trusted" | "insufficient" | "unknown"; resolvedCount?: number },
+    minSample: number
+  ): { text: string; tone: "good" | "bad" | "neutral" } => {
+    if (view.winRateConfidence === "unknown") {
+      return { text: "胜率不提供", tone: "neutral" };
+    }
+    if (view.winRateConfidence === "insufficient" || view.winRate === undefined) {
+      return {
+        text: `样本不足（${view.resolvedCount ?? 0} 仓 < ${minSample}）`,
+        tone: "neutral"
+      };
+    }
+    return {
+      text: formatPercent(view.winRate),
+      tone: view.winRate >= 0.55 ? "good" : view.winRate < 0.45 ? "bad" : "neutral"
+    };
+  };
+
+  const describeDayWinRate = (view: {
+    dayWinRate?: number;
+    dayWinRateConfidence: "trusted" | "insufficient" | "unknown";
+    tradeDays?: number;
+  }): string | null => {
+    if (view.dayWinRateConfidence === "unknown" || view.dayWinRate === undefined) {
+      return null;
+    }
+    if (view.dayWinRateConfidence === "insufficient") {
+      return `逐日 ${view.tradeDays ?? 0} 天样本不足`;
+    }
+    return `逐日 ${formatPercent(view.dayWinRate)}（${view.tradeDays ?? 0} 天）`;
+  };
+
+  const el = <K extends keyof HTMLElementTagNameMap>(
+    tag: K,
+    className?: string,
+    text?: string
+  ): HTMLElementTagNameMap[K] => {
+    const node = document.createElement(tag);
+    if (className) {
+      node.className = className;
+    }
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+    return node;
+  };
+
+  const buildWalletRow = (wallet: CityWalletWinRateView, minSample: number): HTMLElement => {
+    const row = el("div", "wsm-city-wallet");
+
+    const head = el("div", "wsm-city-wallet-head");
+    const name = wallet.displayName || wallet.alias || shortenAddress(wallet.normalizedAddress);
+    const nameNode = el("span", "wsm-city-wallet-name", name);
+    if (wallet.watchlisted) {
+      head.append(el("span", "wsm-city-wallet-star", "★"));
+    }
+    head.append(nameNode);
+    head.append(el("span", "wsm-city-wallet-addr", shortenAddress(wallet.normalizedAddress)));
+    row.append(head);
+
+    const win = describeWinRate(wallet, minSample);
+    const stats = el("div", "wsm-city-wallet-stats");
+    stats.append(el("span", `wsm-city-metric wsm-city-tone-${win.tone}`, win.text));
+    stats.append(el("span", "wsm-city-metric", formatUsd(wallet.pnlUsd)));
+    const day = describeDayWinRate(wallet);
+    if (day) {
+      stats.append(el("span", "wsm-city-metric wsm-city-muted", day));
+    }
+    if (wallet.aiBriefShort) {
+      stats.append(el("span", "wsm-city-metric wsm-city-brief", wallet.aiBriefShort));
+    }
+    row.append(stats);
+
+    return row;
+  };
+
+  const buildPanel = (view: CityWinRateView, owner: string): HTMLElement => {
+    const panel = el("div", CITY_PANEL_ROOT_CLASS);
+    panel.setAttribute(CITY_PANEL_OWNER_ATTR, owner);
+
+    const header = el("div", "wsm-city-header");
+    header.append(el("span", "wsm-city-title", `${view.city} 战绩`));
+    if (view.sourceStatus === "stale") {
+      header.append(el("span", "wsm-city-stale", "缓存"));
+    }
+    panel.append(header);
+
+    const totalWin = describeWinRate(
+      {
+        winRate: view.total.winRate,
+        winRateConfidence: view.total.winRateConfidence,
+        resolvedCount: view.total.resolvedPositions
+      },
+      view.minSample
+    );
+
+    const summary = el("div", "wsm-city-summary");
+    summary.append(
+      el("span", `wsm-city-total-rate wsm-city-tone-${totalWin.tone}`, totalWin.text)
+    );
+    summary.append(el("span", "wsm-city-metric", `${view.walletCount} 个地址`));
+    summary.append(el("span", "wsm-city-metric", formatUsd(view.total.pnlUsd)));
+    summary.append(
+      el(
+        "span",
+        "wsm-city-muted",
+        `${view.total.wonPositions}/${view.total.resolvedPositions} 已结算仓位`
+      )
+    );
+    panel.append(summary);
+
+    if (view.wallets.length > 0) {
+      const list = el("div", "wsm-city-list");
+      view.wallets
+        .slice(0, CITY_PANEL_MAX_WALLETS)
+        .forEach((wallet) => list.append(buildWalletRow(wallet, view.minSample)));
+      panel.append(list);
+
+      if (view.wallets.length > CITY_PANEL_MAX_WALLETS) {
+        panel.append(
+          el("div", "wsm-city-muted wsm-city-more", `还有 ${view.wallets.length - CITY_PANEL_MAX_WALLETS} 个地址`)
+        );
+      }
     }
 
-    if (!view) {
+    panel.append(
+      el("div", "wsm-city-footnote", `胜率按已结算仓位统计 · 数据 ${view.refreshedAt.slice(0, 10)}`)
+    );
+
+    return panel;
+  };
+
+
+  /**
+   * 挂载城市战绩浮层。挂载点固定在页面右下角，避开 Polymarket 的右侧持仓栏。
+   * 重复调用只更新内容，不会叠出多个面板。
+   */
+  const mountCityWinRatePanel = (owner: string): CityPanelController => {
+    let current: HTMLElement | null = null;
+
+    const render = (view: CityWinRateView | null) => {
+      const existing = document.querySelector<HTMLElement>(`.${CITY_PANEL_ROOT_CLASS}`);
+      if (existing && existing.getAttribute(CITY_PANEL_OWNER_ATTR) !== owner) {
+        return;
+      }
+
+      if (!view) {
+        current?.remove();
+        current = null;
+        return;
+      }
+
+      const next = buildPanel(view, owner);
+      if (current?.parentNode) {
+        current.replaceWith(next);
+      } else {
+        document.body.append(next);
+      }
+      current = next;
+    };
+
+    const destroy = () => {
       current?.remove();
       current = null;
-      return;
-    }
+    };
 
-    const next = buildPanel(view, owner);
-    if (current?.parentNode) {
-      current.replaceWith(next);
-    } else {
-      document.body.append(next);
-    }
-    current = next;
+    return { render, destroy };
   };
 
-  const destroy = () => {
-    current?.remove();
-    current = null;
-  };
-
-  return { render, destroy };
-};
+  // 挂到 window 上给下面的标注 IIFE 用：两个 IIFE 作用域彼此独立，而同一 frame
+  // 里顶层标识符只能声明一次，所以这里用显式挂载共享，而不是顶层 const。
+  (window as Window & { __WSM_MOUNT_CITY_PANEL__?: typeof mountCityWinRatePanel })
+    .__WSM_MOUNT_CITY_PANEL__ = mountCityWinRatePanel;
+})();
 
 interface ExtensionConfig {
   enabled: boolean;
@@ -471,12 +487,6 @@ type ContentRuntimeMessage =
     }
   | { type: "wsm:ping" };
 
-interface CityWinRateResponse {
-  ok: boolean;
-  payload: CityWinRateView | null;
-  cacheStatus: "live" | "stale";
-}
-
 (() => {
   const runtimeWindow = window as Window & typeof globalThis & {
     __WSM_CONTENT_SCRIPT_READY__?: boolean;
@@ -499,6 +509,8 @@ interface CityWinRateResponse {
   const HOLDER_META_CLASS = "wsm-holder-meta-target";
   const FALLBACK_CLASS = "wsm-fallback-shell";
   const PLACEHOLDER_CLASS = "wsm-annotation-placeholder";
+  // 我们自己造的「地址 + 标签」纵向容器名。
+  const STACK_CLASS = "wsm-name-stack";
   const PARSER_VERSION = "surface-adapter-v1";
   const REFRESH_TTL_MS = 90_000;
   const DIRECT_LOOKUP_TTL_MS = 60_000;
@@ -509,7 +521,13 @@ interface CityWinRateResponse {
   // 城市战绩浮层：独立的右下角面板，和标注行 DOM 完全解耦。
   // 拿到 payload=null（城市解析不出 / 库里没这个城市）时面板自动收起，
   // 不显示空的「暂无战绩」框。
-  const cityWinRatePanel = mountCityWinRatePanel(CONTENT_INSTANCE_ID);
+  // 挂载函数由文件头部那个 IIFE 通过 window 交出来（见 __WSM_MOUNT_CITY_PANEL__）。
+  const mountCityPanel = (window as Window & {
+    __WSM_MOUNT_CITY_PANEL__?: (owner: string) => CityPanelController;
+  }).__WSM_MOUNT_CITY_PANEL__;
+  const cityWinRatePanel: CityPanelController = mountCityPanel
+    ? mountCityPanel(CONTENT_INSTANCE_ID)
+    : { render: () => {}, destroy: () => {} };
   const DEFAULT_CONFIG: ExtensionConfig = {
     enabled: true,
     debugMode: false,
@@ -589,6 +607,7 @@ interface CityWinRateResponse {
       row: HTMLElement;
       mountTarget: HTMLElement;
       mainContainer?: HTMLElement | null;
+      host?: HTMLElement;
     }
   >();
   const mountedPlaceholderSlots = new Map<
@@ -598,6 +617,7 @@ interface CityWinRateResponse {
       row: HTMLElement;
       mountTarget: HTMLElement;
       mainContainer?: HTMLElement | null;
+      host?: HTMLElement;
     }
   >();
   const fallbackHoverAnnotations = new Map<string, ResolvedInlineAnnotation>();
@@ -874,7 +894,14 @@ interface CityWinRateResponse {
     return [...bestByKey.values()].sort((left, right) => right.confidence - left.confidence);
   };
 
+  // 关键：探测面板用的文本必须剔除我们自己注入的标签，否则「标签越长越容易被
+  // 判定为超长面板 → 下一帧探测失败 → 标记 stale → 清空重渲染」，直接表现为闪烁。
+  // 快路径：子树里没有注入节点时不做 clone（这些函数每帧对大量元素跑，clone 太贵）。
   const getTextWithoutInjectedAnnotations = (element: HTMLElement) => {
+    if (!element.querySelector(`.${ROOT_CLASS}`)) {
+      return compactText(element.textContent);
+    }
+
     const clone = element.cloneNode(true);
     if (!(clone instanceof HTMLElement)) {
       return compactText(element.textContent);
@@ -1554,9 +1581,17 @@ interface CityWinRateResponse {
 
   const hasExactTitle = (text: string, titles: string[]) => titles.some((title) => text === title);
 
+  // 探测用的子项必须排除「我们注入的标注节点」本身，否则标注行会被当成页面原生的列，
+  // 让行探测在「有没有标签」之间摇摆（标签一出现行就被判掉，标签一消失又判回来）。
+  // 注意只排 ROOT_CLASS（标注行/占位符），不能排 STACK_CLASS：
+  // 包装容器里装的就是页面原生的地址列，排掉它会让整行看起来只剩金额一列而探测失败。
+  const isOwnAnnotationNode = (node: Element) =>
+    node.classList.contains(ROOT_CLASS) || Boolean(node.closest(`.${ROOT_CLASS}`));
+
   const getVisibleChildren = (element: HTMLElement) =>
     Array.from(element.children).filter(
-      (child): child is HTMLElement => child instanceof HTMLElement && isVisible(child)
+      (child): child is HTMLElement =>
+        child instanceof HTMLElement && !isOwnAnnotationNode(child) && isVisible(child)
     );
 
   const matchesAmountText = (value: string) => {
@@ -1786,8 +1821,10 @@ interface CityWinRateResponse {
       addresses
     });
 
+  // sendBackgroundMessage 已经把 background 的 { ok, payload } 信封拆开了，
+  // 这里拿到的是 payload 本身，所以泛型必须是 CityWinRateView 而不是信封类型。
   const requestCityWinRate = async (slug: string, forceRefresh = false) =>
-    sendBackgroundMessage<CityWinRateResponse>({
+    sendBackgroundMessage<CityWinRateView | null>({
       type: "wsm:getCityWinRate",
       slug,
       forceRefresh
@@ -1908,7 +1945,7 @@ interface CityWinRateResponse {
       if (!isVisible(element)) {
         return false;
       }
-      const text = compactText(element.textContent);
+      const text = getTextWithoutInjectedAnnotations(element);
       return text.length > 0 && text.length <= 24 && hasExactTitle(text, titles);
     });
 
@@ -1985,7 +2022,7 @@ interface CityWinRateResponse {
       return false;
     }
 
-    const text = compactText(element.textContent);
+    const text = getTextWithoutInjectedAnnotations(element);
     const profileCount = countUniqueProfileAddresses(element);
     const allProfileCount = countAllProfileAddresses(element);
     if (!text || Math.max(profileCount, allProfileCount) < 2 || text.length > 4200) {
@@ -2034,7 +2071,9 @@ interface CityWinRateResponse {
         .forEach((element) => {
           scoredCandidates.push({
             element,
-            score: countUniqueProfileAddresses(element) * 10 - compactText(element.textContent).length / 260
+            score:
+              countUniqueProfileAddresses(element) * 10 -
+              getTextWithoutInjectedAnnotations(element).length / 260
           });
         });
     }
@@ -2102,7 +2141,7 @@ interface CityWinRateResponse {
         const rowCount = extractHolderRows(element, "feed-top-holders").length;
         const commentArticleCount = element.querySelectorAll("article.comment").length;
         const className = getElementClassName(element);
-        const text = compactText(element.textContent);
+        const text = getTextWithoutInjectedAnnotations(element);
         let score = rowCount * 40 + profileCount * 16 + allProfileCount * 6;
         score -= commentArticleCount * 300;
         score -= element.querySelectorAll("button").length * 4;
@@ -2182,7 +2221,7 @@ interface CityWinRateResponse {
         return false;
       }
 
-      const text = compactText(element.textContent);
+      const text = getTextWithoutInjectedAnnotations(element);
       if (!text || text.length > 2400 || !hasAnyTitle(text, ownTitles) || hasAnyTitle(text, otherTitles)) {
         return false;
       }
@@ -2218,7 +2257,7 @@ interface CityWinRateResponse {
       return null;
     }
 
-    const sharedText = compactText(sharedRoot.textContent);
+    const sharedText = getTextWithoutInjectedAnnotations(sharedRoot);
     if (
       !sharedText ||
       sharedText.length > 3000 ||
@@ -2231,7 +2270,7 @@ interface CityWinRateResponse {
     let root = sharedRoot;
     const parent = sharedRoot.parentElement;
     if (parent && isVisible(parent)) {
-      const parentText = compactText(parent.textContent);
+      const parentText = getTextWithoutInjectedAnnotations(parent);
       const parentProfileCount = countUniqueProfileAddresses(parent);
       const sharedProfileCount = countUniqueProfileAddresses(sharedRoot);
       const hasLocalControls = getVisibleChildren(parent).some(
@@ -2369,7 +2408,7 @@ interface CityWinRateResponse {
       return false;
     }
 
-    const text = compactText(element.textContent);
+    const text = getTextWithoutInjectedAnnotations(element);
     if (!text || text.length > 180 || containsCommentMetadata(text)) {
       return false;
     }
@@ -2841,11 +2880,103 @@ interface CityWinRateResponse {
     mount.mountTarget.classList.add(HOLDER_META_CLASS);
   };
 
+  /** 金额/份额列的子节点特征：有金额文本、且不含地址链接。 */
+  const isAmountLikeChild = (child: HTMLElement) => {
+    if (child.querySelector('a[href*="/profile/"]')) {
+      return false;
+    }
+    const text = compactText(child.textContent);
+    return Boolean(text) && matchesAmountText(text);
+  };
+
+  /**
+   * 找到/创建「地址侧 + 标签」的纵向宿主，返回标签该挂到哪。
+   *
+   * 之前只认 nameLine，找不到就直接 `nameLine.insertAdjacentElement("afterend")`
+   * 或者把 mountTarget（常常就是整行 justify-between）强行竖排：
+   * 标签一插进去就把金额列挤走/挤到下一行，正是用户看到的「持仓区标签把显示搞得非常乱」。
+   *
+   * 现在按 DOM 形状自适应，三种情况都能稳住：
+   *  1. 挂载点里没有金额列 → 整块纵向堆叠（原来唯一的正常路径）
+   *  2. 挂载点 = 整行（左列 | 右列） → 只把地址侧兄弟收进纵向容器，金额列原地不动
+   *  3. 挂载点 = 地址行本身 → 把地址行包起来，标签挂它下面
+   */
+  const ensureAnnotationHost = (mount: HolderRowMount): HTMLElement => {
+    const { mountTarget } = mount;
+
+    // 已经套过就直接复用，避免每帧再套一层。
+    if (mountTarget.classList.contains(STACK_CLASS)) {
+      return mountTarget;
+    }
+    const existingStack = mountTarget.querySelector<HTMLElement>(`:scope > .${STACK_CLASS}`);
+    if (existingStack) {
+      return existingStack;
+    }
+
+    const hasProfileAnchor = Boolean(mountTarget.querySelector('a[href*="/profile/"]'));
+    const children = Array.from(mountTarget.children).filter(
+      (child): child is HTMLElement => child instanceof HTMLElement && !isOwnAnnotationNode(child)
+    );
+    const amountChildren = hasProfileAnchor ? children.filter(isAmountLikeChild) : [];
+
+    const buildStackHost = (): HTMLElement => {
+      mountTarget.classList.add(HOLDER_META_CLASS, `${HOLDER_META_CLASS}--stack`);
+      return mountTarget;
+    };
+
+    // 情况 1：没有金额列，整块堆叠即可。
+    if (amountChildren.length === 0) {
+      return buildStackHost();
+    }
+
+    // 情况 2/3：把地址侧的兄弟节点收进纵向容器，金额列保持在原位。
+    const stackableChildren = children.filter((child) => !amountChildren.includes(child));
+    if (stackableChildren.length === 0) {
+      return buildStackHost();
+    }
+
+    const firstStackable = stackableChildren[0];
+    if (!firstStackable) {
+      return buildStackHost();
+    }
+
+    const stack = document.createElement("div");
+    stack.className = STACK_CLASS;
+    stack.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+    stack.dataset.wsmStack = "1";
+    mountTarget.insertBefore(stack, firstStackable);
+    stackableChildren.forEach((child) => stack.append(child));
+    return stack;
+  };
+
+  const cleanupAnnotationHost = (host: HTMLElement | null | undefined) => {
+    if (!host || !host.classList.contains(STACK_CLASS)) {
+      return;
+    }
+
+    // 只剩页面原生的地址行了就把包装撤掉，别在页面里留空壳影响布局。
+    if (!host.querySelector(`.${ROOT_CLASS}`)) {
+      while (host.firstElementChild) {
+        host.parentElement?.insertBefore(host.firstElementChild, host);
+      }
+      host.remove();
+    }
+  };
+
+  const insertAnnotationNode = (mount: HolderRowMount, node: HTMLElement): HTMLElement => {
+    const host = ensureAnnotationHost(mount);
+    host.append(node);
+    return host;
+  };
+
   const cleanupMountClasses = (entry: {
     row: HTMLElement;
     mountTarget: HTMLElement;
     mainContainer?: HTMLElement | null;
+    host?: HTMLElement | null;
   }) => {
+    cleanupAnnotationHost(entry.host);
+
     if (!entry.row.querySelector(`.${ROOT_CLASS}`)) {
       entry.row.classList.remove(HOLDER_ROW_CLASS);
       delete entry.row.dataset.wsmRowAddress;
@@ -2854,6 +2985,7 @@ interface CityWinRateResponse {
     }
     if (!entry.mountTarget.querySelector(`.${ROOT_CLASS}`)) {
       entry.mountTarget.classList.remove(HOLDER_META_CLASS);
+      entry.mountTarget.classList.remove(`${HOLDER_META_CLASS}--stack`);
     }
     if (entry.mainContainer && !entry.mainContainer.querySelector(`.${ROOT_CLASS}`)) {
       entry.mainContainer.classList.remove(HOLDER_MAIN_CLASS);
@@ -2922,13 +3054,24 @@ interface CityWinRateResponse {
       return;
     }
 
-    markAnnotationsStale();
+    // 刚渲染成功过就说明面板本来就在，只是这一帧没探测到（虚拟列表滚动、
+    // React 局部重排都会造成这种瞬时抖动）。这时把标签调暗 900ms 再删掉，
+    // 肉眼看到的就是「一闪一闪」。只有在稳定状态下探测失败才提示用户。
+    const renderedRecently = Date.now() - lastRenderAt < TRANSIENT_CLEAR_GRACE_MS * 2;
+    if (!renderedRecently) {
+      markAnnotationsStale();
+    }
     if (transientClearTimer) {
       return;
     }
 
     transientClearTimer = window.setTimeout(() => {
       transientClearTimer = null;
+      // 宽限期内如果已经重新渲染出标注了，就不要清。
+      if (hasMountedAnnotationDom() && Date.now() - lastRenderAt < TRANSIENT_CLEAR_GRACE_MS) {
+        markAnnotationsFresh();
+        return;
+      }
       clearAnnotations();
     }, TRANSIENT_CLEAR_GRACE_MS);
   };
@@ -3055,17 +3198,14 @@ interface CityWinRateResponse {
       row.mount.row.dataset.wsmRowSide = row.side;
       row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
       const node = buildPlaceholderSlot(row);
-      if (row.mount.nameLine) {
-        row.mount.nameLine.insertAdjacentElement("afterend", node);
-      } else {
-        row.mount.mountTarget.append(node);
-      }
+      const host = insertAnnotationNode(row.mount, node);
 
       mountedPlaceholderSlots.set(key, {
         node,
         row: row.mount.row,
         mountTarget: row.mount.mountTarget,
-        mainContainer: row.mount.mainContainer
+        mainContainer: row.mount.mainContainer,
+        host
       });
     });
   };
@@ -3207,7 +3347,9 @@ interface CityWinRateResponse {
         annotation,
         row: row.mount.row,
         mountTarget: row.mount.mountTarget,
-        mainContainer: row.mount.mainContainer
+        mainContainer: row.mount.mainContainer,
+        // replaceWith 之后节点已经落在原宿主里了，直接读实际父节点，别再猜。
+        host: (built.node.parentElement as HTMLElement | null) ?? existing.host
       });
       return;
     }
@@ -3231,11 +3373,7 @@ interface CityWinRateResponse {
     row.mount.row.dataset.wsmRowSide = row.side;
     row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
     const built = buildAnnotationNode(annotation);
-    if (row.mount.nameLine) {
-      row.mount.nameLine.insertAdjacentElement("afterend", built.node);
-    } else {
-      row.mount.mountTarget.append(built.node);
-    }
+    const host = insertAnnotationNode(row.mount, built.node);
 
     mountedAnnotations.set(annotation.key, {
       node: built.node,
@@ -3243,7 +3381,8 @@ interface CityWinRateResponse {
       annotation,
       row: row.mount.row,
       mountTarget: row.mount.mountTarget,
-      mainContainer: row.mount.mainContainer
+      mainContainer: row.mount.mainContainer,
+      host
     });
   };
 
@@ -3677,6 +3816,26 @@ interface CityWinRateResponse {
       return;
     }
 
+    // 城市战绩是纯增强信息，和标注链路没有依赖，所以放在标注 try 之外、且不 await：
+    // 1) 放在 try 里的话，标注接口一失败（未登录、网络抖动、labels 服务异常），
+    //    城市战绩就永远不会请求 —— 而它本来完全可用。
+    // 2) 放在 publishPageState 之后的话，那里的 await 一旦抛出，下面所有代码都跳过，
+    //    城市战绩同样发不出去。所以紧跟在 slug 判空之后立刻发起。
+    // 注意：requestCityWinRate 返回的是 payload 本身（background 的
+    // { ok, payload } 信封已在 sendBackgroundMessage 里拆掉），这里不能再判断
+    // result.ok，否则 CityWinRateView 上取不到 ok 字段，浮层永远不显示。
+    void requestCityWinRate(slug, options?.forceRevalidate)
+      .then((payload) => {
+        if (refreshId !== refreshGeneration) {
+          return;
+        }
+        cityWinRatePanel.render(payload ?? null);
+      })
+      .catch((error) => {
+        logDebug("failed to fetch city win rate", error);
+        cityWinRatePanel.render(null);
+      });
+
     await publishPageState(
       buildPageState({
         slug,
@@ -3701,21 +3860,12 @@ interface CityWinRateResponse {
       }
       setDebugState("Payload", String(currentPayload.holders.length));
       queueRender(options);
-      // 城市战绩独立于标注刷新：标注失败不应该连带把城市战绩也拖掉，
-      // 它只是增强信息，失败时安静地不展示。
-      void requestCityWinRate(slug, options?.forceRevalidate)
-        .then((result) => {
-          if (refreshId !== refreshGeneration) {
-            return;
-          }
-          cityWinRatePanel.render(result?.ok ? result.payload : null);
-        })
-        .catch((error) => {
-          logDebug("failed to fetch city win rate", error);
-          cityWinRatePanel.render(null);
-        });
     } catch (error) {
-      cityWinRatePanel.render(null);
+      // 这里**不能** cityWinRatePanel.render(null)。城市战绩是独立请求，可能已经
+      // 先一步拿到 payload 并把面板渲染出来了；标注失败（未登录、网络抖动、labels
+      // 服务异常）跟城市战绩无关，抹掉它等于让标注的故障牵连城市模块 —— 实测就是
+      // 这样导致浮层永远不出现：城市请求从本地缓存秒回并渲染，随后标注 401 走到
+      // 这里把面板擦掉。城市面板只由自己的请求结果和换市场时的清理逻辑控制。
       if (refreshId !== refreshGeneration) {
         return;
       }
