@@ -40,6 +40,13 @@ import {
   type WalletStatusBadge,
   type WatchlistEntry
 } from "@weather-smart-money/core";
+import { resolveCityDayWinRate, resolveCityWinRate } from "@weather-smart-money/core";
+import {
+  canonicalCityName,
+  cityNameVariants,
+  isNonCityBucket,
+  normalizeCityKey
+} from "@weather-smart-money/core";
 
 import { extensionSchemaStatements } from "./schema.js";
 import type {
@@ -1583,10 +1590,138 @@ const DASHBOARD_PROFILE_PIVOT = `
 
 export const DASHBOARD_PROFILE_PIVOT_SQL = DASHBOARD_PROFILE_PIVOT;
 
+// 城市级真实战绩聚合（D1 SQL 层）。
+//
+// 这是首页「城市战绩」板块与扩展端市场标注的唯一事实来源，胜率口径与 Finder
+// 完全一致：**按已结算仓位**（won_positions / resolved_positions），不是按天、
+// 不是按现金流。注意展开 cities_json 时同样必须用
+// json_extract(c.value,'$.win_rate')，因为 c 是 json_each 数组元素，c.key 是下标。
+//
+// 逐日胜率（day_win_rate）按可选字段处理：SUM/AVG 忽略 NULL，所以只有产出该
+// 字段的 run 才会参与平均值，老 run 自然不污染结果；covered_rows 单独统计参与
+// 的城市行数，前端用它决定是否展示逐日胜率。
+const DASHBOARD_CITY_STATS = `
+  SELECT
+    json_extract(c.value, '$.city') AS city,
+    LOWER(TRIM(json_extract(c.value, '$.city'))) AS city_key,
+    COUNT(DISTINCT p.wallet_id) AS wallets,
+    -- 钱包 id 列表：别名归一要在 TS 层合并（NYC 与 nyc 是同一城市），合并时
+    -- 必须按 id 去重，所以 SQL 不能只给计数，得把 id 带出来。
+    GROUP_CONCAT(DISTINCT p.wallet_id) AS wallet_ids,
+    SUM(CAST(json_extract(c.value, '$.resolved_positions') AS REAL)) AS resolved_positions,
+    SUM(CAST(json_extract(c.value, '$.won_positions') AS REAL)) AS won_positions,
+    SUM(CAST(json_extract(c.value, '$.positions') AS REAL)) AS positions,
+    SUM(CAST(json_extract(c.value, '$.pnl_usd') AS REAL)) AS pnl_usd,
+    SUM(CAST(json_extract(c.value, '$.volume_usd') AS REAL)) AS volume_usd,
+    AVG(json_extract(c.value, '$.win_rate')) AS avg_wallet_win_rate,
+    COUNT(json_extract(c.value, '$.day_win_rate')) AS day_covered_rows,
+    AVG(json_extract(c.value, '$.day_win_rate')) AS avg_day_win_rate,
+    SUM(CAST(json_extract(c.value, '$.days') AS REAL)) AS trade_days,
+    SUM(CAST(json_extract(c.value, '$.win_days') AS REAL)) AS win_days,
+    -- 该城市里 PnL 最高的钱包，用作城市代表
+    (
+      SELECT w3.id
+      FROM wallet_finder_profiles p3
+      JOIN wallets w3 ON w3.id = p3.wallet_id
+      JOIN json_each(p3.cities_json) c3
+      WHERE w3.deleted_at IS NULL
+        AND LOWER(TRIM(json_extract(c3.value, '$.city'))) =
+            LOWER(TRIM(json_extract(c.value, '$.city')))
+      ORDER BY CAST(json_extract(c3.value, '$.pnl_usd') AS REAL) DESC
+      LIMIT 1
+    ) AS top_wallet_id
+  FROM wallet_finder_profiles p
+  JOIN wallets w ON w.id = p.wallet_id
+  JOIN json_each(p.cities_json) c
+  WHERE w.deleted_at IS NULL
+    AND json_extract(c.value, '$.city') IS NOT NULL
+    AND TRIM(json_extract(c.value, '$.city')) <> ''
+    AND LOWER(TRIM(json_extract(c.value, '$.city'))) NOT IN (
+      'climate','aqi','air','air quality','usa','us','tech','global','world',
+      'other','unknown','未知城市','null','none','-'
+    )
+  GROUP BY LOWER(TRIM(json_extract(c.value, '$.city')))
+`;
+
+export const DASHBOARD_CITY_STATS_SQL = DASHBOARD_CITY_STATS;
+
+/**
+ * 按单个城市查所有被标注地址在该城市的真实战绩，供扩展端在 Polymarket 市场页
+ * 按当前城市查询。走 SQL 聚合而不是把整份 cities_json 拉回 Worker。
+ */
+export const getCityWalletBreakdown = async (db: D1Database, city: string) => {
+  // 同一座城市在 Finder 数据里可能是多种写法（实测 `NYC` 29 钱包/288 仓位，
+  // `New York City` 4 钱包/13 仓位），只按规范名精确匹配会漏掉绝大部分数据。
+  // 这里把规范名反向展开成所有等价写法，用 IN 一次查全，再在调用方按
+  // wallet_id 去重合并。别名表在 core 里维护，避免两处各写一份别名。
+  const variants = cityNameVariants(city);
+  const placeholders = variants.map(() => "?").join(", ");
+
+  const result = await db
+    .prepare(
+      `SELECT
+         w.id AS wallet_id,
+         w.normalized_address AS normalized_address,
+         w.display_name AS display_name,
+         w.alias AS alias,
+         w.watchlisted AS watchlisted,
+         CAST(json_extract(c.value, '$.win_rate') AS REAL) AS win_rate,
+         CAST(json_extract(c.value, '$.resolved_positions') AS REAL) AS resolved_positions,
+         CAST(json_extract(c.value, '$.won_positions') AS REAL) AS won_positions,
+         CAST(json_extract(c.value, '$.positions') AS REAL) AS positions,
+         CAST(json_extract(c.value, '$.pnl_usd') AS REAL) AS pnl_usd,
+         CAST(json_extract(c.value, '$.volume_usd') AS REAL) AS volume_usd,
+         CAST(json_extract(c.value, '$.roi') AS REAL) AS roi,
+         json_extract(c.value, '$.day_win_rate') AS day_win_rate,
+         CAST(json_extract(c.value, '$.days') AS REAL) AS trade_days,
+         CAST(json_extract(c.value, '$.win_days') AS REAL) AS win_days,
+         json_extract(c.value, '$.best_day') AS best_day,
+         json_extract(c.value, '$.worst_day') AS worst_day,
+         i.ai_brief_short AS ai_brief_short,
+         p.portrait_labels_json AS portrait_labels_json,
+         p.snapshot_as_of AS snapshot_as_of
+       FROM wallet_finder_profiles p
+       JOIN wallets w ON w.id = p.wallet_id
+       LEFT JOIN wallet_finder_ai_insights i ON i.wallet_id = w.id
+       JOIN json_each(p.cities_json) c
+       WHERE w.deleted_at IS NULL
+         AND LOWER(TRIM(json_extract(c.value, '$.city'))) IN (${placeholders})
+       ORDER BY resolved_positions DESC, pnl_usd DESC`
+    )
+    .bind(...variants)
+    .all<Record<string, unknown>>();
+
+  return result.results ?? [];
+};
+
+/** 城市名模糊匹配，给扩展端在无法精确解析 slug 时兜底。 */
+export const searchCities = async (db: D1Database, term: string, limit = 10) => {
+  const result = await db
+    .prepare(
+      `SELECT
+         LOWER(TRIM(json_extract(c.value, '$.city'))) AS city_key,
+         MAX(json_extract(c.value, '$.city')) AS city,
+         COUNT(DISTINCT p.wallet_id) AS wallets
+       FROM wallet_finder_profiles p
+       JOIN wallets w ON w.id = p.wallet_id
+       JOIN json_each(p.cities_json) c
+       WHERE w.deleted_at IS NULL
+         AND LOWER(json_extract(c.value, '$.city')) LIKE ?
+       GROUP BY LOWER(TRIM(json_extract(c.value, '$.city')))
+       ORDER BY wallets DESC, city ASC
+       LIMIT ?`
+    )
+    .bind(`%${term.toLowerCase()}%`, Math.max(1, Math.min(50, limit)))
+    .all<Record<string, unknown>>();
+
+  return result.results ?? [];
+};
+
 export const getDashboardLibraryDigest = async (db: D1Database): Promise<DashboardLibraryDigest> => {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
 
-  const [totalsRow, profileRows, labelRows, insightRow, batchRows, portraitRows] = await Promise.all([
+  const [totalsRow, profileRows, labelRows, insightRow, batchRows, portraitRows, cityRow] =
+    await Promise.all([
     db
       .prepare(
         `SELECT
@@ -1637,7 +1772,8 @@ export const getDashboardLibraryDigest = async (db: D1Database): Promise<Dashboa
          GROUP BY name
          ORDER BY count DESC, name ASC`
       )
-      .all<{ name: string; count: number }>()
+      .all<{ name: string; count: number }>(),
+    db.prepare(`${DASHBOARD_CITY_STATS}`).all<Record<string, unknown>>()
   ]);
 
   const profiles = profileRows.results ?? [];
@@ -1786,44 +1922,121 @@ export const getDashboardLibraryDigest = async (db: D1Database): Promise<Dashboa
     });
   }
 
-  const cityBuckets = new Map<
+  // 城市战绩改用 cities_json 的 SQL 聚合：这是「按已结算仓位」口径的真实数据，
+  // 而旧的 dominant_region 桶只是「每个钱包的主交易城市」，既不含该城市内其他
+  // 钱包的战绩，也把样本只有 2-3 个仓位的城市算成了有胜率。
+  //
+  // SQL 按原始写法分组（JSON 里是什么就按什么分），别名归一必须在这一层做：
+  // 实测 NYC(6 钱包/65 仓位) 与 nyc(2 钱包/7 仓位) 是同一座城市，不合并就会
+  // 在榜单上出现两行、且各自的胜率都偏了。
+  const mergedCityRows = new Map<
     string,
-    DashboardCityStat & { winSum: number; topWalletPnl: number }
+    {
+      city: string;
+      wallets: Set<string>;
+      resolvedPositions: number;
+      wonPositions: number;
+      pnlUsd: number;
+      volumeUsd: number;
+      winRateSum: number;
+      winRateCount: number;
+      dayWinRateSum: number;
+      dayCoveredRows: number;
+      tradeDays: number;
+      winDays: number;
+      topWalletId?: string;
+      topWalletPnl: number;
+    }
   >();
-  for (const row of metricRows) {
-    const city = row.topCity;
-    if (!city || city.toLowerCase() === "climate") {
+
+  for (const row of cityRow?.results ?? []) {
+    const rawCity = str(row.city);
+    if (!rawCity || isNonCityBucket(rawCity)) {
       continue;
     }
-    const bucket = cityBuckets.get(city) ?? {
+    const city = canonicalCityName(rawCity);
+    const key = normalizeCityKey(city);
+    if (!key) {
+      continue;
+    }
+    const resolvedPositions = num(row.resolved_positions);
+    const wonPositions = num(row.won_positions);
+    const avgWalletWinRate = num(row.avg_wallet_win_rate);
+    const dayCoveredRows = num(row.day_covered_rows);
+    const pnlUsd = num(row.pnl_usd);
+
+    const merged = mergedCityRows.get(key) ?? {
       city,
-      wallets: 0,
-      totalPnlUsd: 0,
-      totalVolumeUsd: 0,
-      avgWinRate: 0,
-      winSum: 0,
+      wallets: new Set<string>(),
+      resolvedPositions: 0,
+      wonPositions: 0,
+      pnlUsd: 0,
+      volumeUsd: 0,
+      winRateSum: 0,
+      winRateCount: 0,
+      dayWinRateSum: 0,
+      dayCoveredRows: 0,
+      tradeDays: 0,
+      winDays: 0,
       topWalletId: undefined,
       topWalletPnl: -Infinity
     };
-    bucket.wallets += 1;
-    bucket.totalPnlUsd += row.pnlUsd;
-    bucket.totalVolumeUsd += row.volumeUsd;
-    bucket.winSum += row.winRate;
-    if (row.pnlUsd > bucket.topWalletPnl) {
-      bucket.topWalletPnl = row.pnlUsd;
-      bucket.topWalletId = row.walletId;
+
+    // 钱包 id 去重：别名组之间（如 NYC 与 nyc）可能有重叠钱包，直接相加会虚高。
+    for (const id of String(row.wallet_ids ?? "").split(",")) {
+      const trimmed = id.trim();
+      if (trimmed) {
+        merged.wallets.add(trimmed);
+      }
     }
-    cityBuckets.set(city, bucket);
+    merged.resolvedPositions += resolvedPositions;
+    merged.wonPositions += wonPositions;
+    merged.pnlUsd += pnlUsd;
+    merged.volumeUsd += num(row.volume_usd);
+    if (avgWalletWinRate > 0) {
+      merged.winRateSum += avgWalletWinRate;
+      merged.winRateCount += 1;
+    }
+    merged.dayWinRateSum += num(row.avg_day_win_rate);
+    merged.dayCoveredRows += dayCoveredRows;
+    merged.tradeDays += num(row.trade_days);
+    merged.winDays += num(row.win_days);
+    if (pnlUsd > merged.topWalletPnl) {
+      merged.topWalletPnl = pnlUsd;
+      merged.topWalletId = str(row.top_wallet_id);
+    }
+    mergedCityRows.set(key, merged);
   }
-  const cityStats = Array.from(cityBuckets.values())
-    .map((bucket) => ({
-      city: bucket.city,
-      wallets: bucket.wallets,
-      totalPnlUsd: bucket.totalPnlUsd,
-      totalVolumeUsd: bucket.totalVolumeUsd,
-      avgWinRate: bucket.wallets > 0 ? bucket.winSum / bucket.wallets : 0,
-      topWalletId: bucket.topWalletId
-    }))
+
+  const cityStats: DashboardCityStat[] = Array.from(mergedCityRows.values())
+    .map((merged) => {
+      // 城市级真实胜率 = 胜出仓位 / 已结算仓位（与 Finder 口径一致），
+      // 而不是各地址胜率的平均——后者会让 2 仓位钱包和 600 仓位钱包等权。
+      const aggregated = resolveCityWinRate({
+        winRate:
+          merged.resolvedPositions > 0 ? merged.wonPositions / merged.resolvedPositions : undefined,
+        resolvedCount: merged.resolvedPositions
+      });
+      const dayAggregated = resolveCityDayWinRate({
+        dayWinRate: merged.dayCoveredRows > 0 ? merged.dayWinRateSum / merged.dayCoveredRows : undefined,
+        tradeDays: merged.dayCoveredRows > 0 ? merged.tradeDays : undefined
+      });
+      return {
+        city: merged.city,
+        wallets: merged.wallets.size,
+        totalPnlUsd: merged.pnlUsd,
+        totalVolumeUsd: merged.volumeUsd,
+        resolvedPositions: merged.resolvedPositions,
+        wonPositions: merged.wonPositions,
+        winRate: aggregated.winRate,
+        avgWalletWinRate: merged.winRateCount > 0 ? merged.winRateSum / merged.winRateCount : 0,
+        dayWinRate: dayAggregated.winRate,
+        dayCoveredRows: merged.dayCoveredRows,
+        tradeDays: merged.dayCoveredRows > 0 ? merged.tradeDays : undefined,
+        winDays: merged.dayCoveredRows > 0 ? merged.winDays : undefined,
+        topWalletId: merged.topWalletId
+      } satisfies DashboardCityStat;
+    })
     .sort((left, right) => right.wallets - left.wallets || right.totalPnlUsd - left.totalPnlUsd)
     .slice(0, 16);
 
