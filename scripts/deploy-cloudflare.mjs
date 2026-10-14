@@ -24,7 +24,10 @@ const REQUIRED_SCHEMA_TABLES = [
   "wallet_import_batches",
   "extension_invites",
   "extension_sessions",
-  "dataset_versions"
+  "dataset_versions",
+  "market_annotation_cache",
+  "ai_hover_note_cache",
+  "response_cache"
 ];
 const REQUIRED_WALLET_COLUMNS = [
   "source_type",
