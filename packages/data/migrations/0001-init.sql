@@ -282,3 +282,43 @@ CREATE TABLE IF NOT EXISTS dataset_versions (
   version INTEGER NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- 缓存表：市场标注 / AI hover note / 通用响应缓存全部落 D1。
+-- 不放 KV 的原因：KV 免费额度每天只有 1000 次写入，而缓存写在热路径上，
+-- 人数一增长必然打满（线上曾出现 "KV put() limit exceeded for the day."）。
+-- D1 是 100,000 行/天，且配合 etag 比对可以让写入次数等于「真实数据变化次数」，
+-- 不再随请求量或人数线性增长。
+CREATE TABLE IF NOT EXISTS market_annotation_cache (
+  slug TEXT PRIMARY KEY,
+  labels_version TEXT NOT NULL,
+  etag TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  cached_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_annotation_cache_updated
+  ON market_annotation_cache(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS ai_hover_note_cache (
+  cache_key TEXT PRIMARY KEY,
+  summary_text TEXT NOT NULL,
+  model TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_hover_note_cache_updated
+  ON ai_hover_note_cache(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS response_cache (
+  cache_key TEXT PRIMARY KEY,
+  version TEXT NOT NULL,
+  etag TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  cached_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_cache_updated
+  ON response_cache(updated_at DESC);

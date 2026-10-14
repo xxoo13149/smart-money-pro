@@ -1,11 +1,21 @@
 import { type AddressSummary } from "@weather-smart-money/core";
+import {
+  readAiFailMarker,
+  readAiHoverNoteCacheBatch,
+  writeAiFailMarker,
+  writeAiHoverNoteCacheIfChanged
+} from "@weather-smart-money/data";
 
 import type { Env } from "./env";
-import { hashValue } from "./utils";
+import { hashValue, isoNow } from "./utils";
 
 const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash";
-const AI_NOTE_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60;
+/**
+ * AI 文案在 D1 里常驻，不再靠 KV 的 expirationTtl 过期。
+ * 30 天是刻意保留的原始语义：prompt 版本变化会换 cacheKey（见 PROMPT_VERSION），
+ * 所以旧文案不会被误当成新 prompt 的产物继续用。
+ */
 const AI_NOTE_FAIL_TTL_SECONDS = 15 * 60;
 const AI_NOTE_BATCH_SIZE = 8;
 const AI_NOTE_TIMEOUT_MS = 10_000;
@@ -337,22 +347,31 @@ const loadCachedNotes = async (
   env: Env,
   preparedSummaries: PreparedSummary<SummaryWithOptionalDetails>[]
 ) => {
-  const rows = await Promise.all(
-    preparedSummaries.map(async (prepared) => {
-      const cached = await env.SMART_MONEY_CACHE.get(prepared.cacheKey, "json");
-      return [prepared.summary.normalizedAddress, (cached ?? null) as CachedHoverNote | null] as const;
-    })
-  );
+  if (preparedSummaries.length === 0) {
+    return new Map<string, CachedHoverNote>();
+  }
+
+  const keys = preparedSummaries.map((prepared) => prepared.cacheKey);
+  const rows = await readAiHoverNoteCacheBatch(env.SMART_MONEY_DB, keys);
 
   const result = new Map<string, CachedHoverNote>();
-  rows.forEach(([normalizedAddress, cached]) => {
+  preparedSummaries.forEach((prepared) => {
+    const cached = rows.get(prepared.cacheKey);
     if (cached?.summaryText) {
-      result.set(normalizedAddress, cached);
+      result.set(prepared.summary.normalizedAddress, cached);
     }
   });
   return result;
 };
 
+/**
+ * 写 AI 文案缓存。
+ *
+ * 批量读一次再决定写什么：内容没变的直接跳过。
+ * KV 时代这里每条都是一次无条件 put()，而 KV 免费额度只有 1000 次/天 ——
+ * 光是「几十个地址 × 几十个市场」就能把额度打光，这就是线上报错的另一条来源。
+ * 现在落 D1（10 万行/天）并且跳过未变化项，写入次数等于「真实新增的 AI 文案数」。
+ */
 const writeCachedNotes = async (
   env: Env,
   config: NonNullable<ReturnType<typeof getConfig>>,
@@ -360,52 +379,76 @@ const writeCachedNotes = async (
   generated: Map<string, string>
 ) => {
   const generatedAt = new Date().toISOString();
-  await Promise.all(
-    Array.from(generated.entries()).map(async ([normalizedAddress, summaryText]) => {
+  const now = isoNow();
+  const entries = Array.from(generated.entries())
+    .map(([normalizedAddress, summaryText]) => {
       const prepared = preparedByAddress.get(normalizedAddress);
       if (!prepared) {
-        return;
+        return null;
       }
-
-      await env.SMART_MONEY_CACHE.put(
-        prepared.cacheKey,
-        JSON.stringify({
-          summaryText,
-          model: config.model,
-          generatedAt
-        } satisfies CachedHoverNote),
-        {
-          expirationTtl: AI_NOTE_CACHE_TTL_SECONDS
-        }
-      );
+      return {
+        cacheKey: prepared.cacheKey,
+        summaryText,
+        model: config.model,
+        generatedAt,
+        now
+      };
     })
-  );
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+
+  if (entries.length === 0) {
+    return;
+  }
+
+  try {
+    await writeAiHoverNoteCacheIfChanged(env.SMART_MONEY_DB, entries);
+  } catch (error) {
+    // 缓存写失败不能拖垮标注链路：AI 文案只是增强，缺了不影响标注本身。
+    console.warn("hover note cache write failed", {
+      count: entries.length,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 };
 
 const loadFailedSummaries = async (
   env: Env,
   preparedSummaries: PreparedSummary<SummaryWithOptionalDetails>[]
 ) => {
-  const entries = await Promise.all(
-    preparedSummaries.map(async (prepared) => {
-      const failed = await env.SMART_MONEY_CACHE.get(prepared.failCacheKey);
-      return failed ? prepared.summary.normalizedAddress : null;
-    })
+  const now = new Date();
+  const matched = await Promise.all(
+    preparedSummaries.map(async (prepared) =>
+      (await readAiFailMarker(env.SMART_MONEY_DB, prepared.failCacheKey, AI_NOTE_FAIL_TTL_SECONDS, now))
+        ? prepared.summary.normalizedAddress
+        : null
+    )
   );
-  return new Set(entries.filter(Boolean) as string[]);
+  return new Set(matched.filter(Boolean) as string[]);
 };
 
 const writeFailedSummaries = async (
   env: Env,
   preparedSummaries: PreparedSummary<SummaryWithOptionalDetails>[]
 ) => {
-  await Promise.all(
-    preparedSummaries.map((prepared) =>
-      env.SMART_MONEY_CACHE.put(prepared.failCacheKey, "1", {
-        expirationTtl: AI_NOTE_FAIL_TTL_SECONDS
-      })
-    )
-  );
+  if (preparedSummaries.length === 0) {
+    return;
+  }
+
+  const now = isoNow();
+  try {
+    // 标记仍然新鲜时写入会被 D1 侧跳过，不会每次重试都打一行。
+    await writeAiFailMarker(
+      env.SMART_MONEY_DB,
+      preparedSummaries.map((prepared) => prepared.failCacheKey),
+      now,
+      AI_NOTE_FAIL_TTL_SECONDS
+    );
+  } catch (error) {
+    console.warn("hover note fail-marker write failed", {
+      count: preparedSummaries.length,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 };
 
 const generateMissingNotes = async (

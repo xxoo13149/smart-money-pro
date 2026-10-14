@@ -233,5 +233,43 @@ export const extensionSchemaStatements = [
     dataset TEXT PRIMARY KEY,
     version INTEGER NOT NULL,
     updated_at TEXT NOT NULL
-  )`
+  )`,
+  // 市场标注缓存落 D1 而不是 KV：KV 免费额度每天只有 1000 次写入，
+  // D1 是 100,000 行/天，差 100 倍。缓存写入从「每次请求」降到「内容真的变了才写」，
+  // 人数增长时不再线性消耗写入额度。
+  // 主键只含 slug，不含 labels_version：标签版本变化时 UPSERT 同一行，
+  // 这样版本翻不会让表无限膨胀，也不会让旧版本数据堆积。
+  // 标签维度的失效由 labels_version 字段比对完成，不需要换 key。
+  `CREATE TABLE IF NOT EXISTS market_annotation_cache (
+    slug TEXT PRIMARY KEY,
+    labels_version TEXT NOT NULL,
+    etag TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    cached_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_market_annotation_cache_updated ON market_annotation_cache(updated_at DESC)`,
+  // AI hover note 缓存同样搬离 KV：每个地址一条，30 天 TTL，
+  // 放在 KV 上一天 1000 条根本撑不住几个市场的浏览量。
+  `CREATE TABLE IF NOT EXISTS ai_hover_note_cache (
+    cache_key TEXT PRIMARY KEY,
+    summary_text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_ai_hover_note_cache_updated ON ai_hover_note_cache(updated_at DESC)`,
+  // 通用响应缓存（labels lookup / address search），同样离开 KV。
+  // 这两类的 key 空间是「地址组合」，几乎无穷，而且旧实现把 labels 版本放进 key，
+  // 改一次标签就换一批 key —— 配上 KV 一天 1000 次写入，必然打满。
+  // 这里 key 不含版本，版本作为字段比对，改标签只是同一次 UPSERT。
+  `CREATE TABLE IF NOT EXISTS response_cache (
+    cache_key TEXT PRIMARY KEY,
+    version TEXT NOT NULL,
+    etag TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    cached_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_response_cache_updated ON response_cache(updated_at DESC)`
 ] as const;

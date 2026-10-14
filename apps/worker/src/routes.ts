@@ -764,11 +764,26 @@ export const handleMarketAnnotations = async (request: Request, env: Env, ctx: W
   const bypassCache = shouldBypassCache(request, url);
   const cached = bypassCache ? null : await readMarketAnnotationCache(env, slug, labelsVersion);
 
-  if (cached && etagMatches(cached.etag, ifNoneMatch)) {
+  // stale 的缓存（标签刚更新、或超过新鲜期）依然直接返回，并后台重建。
+  // 用户总能立刻看到内容，而不是等一次 Polymarket 往返；下一次请求就是新的。
+  // 关键点：返回旧数据不等于放弃刷新，重建必须真的发出去，
+  // 否则 stale 会一直 stale，标签更新永远推不到扩展端。
+  if (cached?.stale) {
+    ctx.waitUntil(
+      getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion, ctx).catch((error: unknown) => {
+        console.warn("stale annotation background refresh failed", {
+          slug,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+    );
+  }
+
+  if (cached && etagMatches(cached.envelope.etag, ifNoneMatch)) {
     return new Response(null, {
       status: 304,
       headers: {
-        ETag: cached.etag,
+        ETag: cached.envelope.etag,
         "Cache-Control": "private, max-age=0, must-revalidate"
       }
     });
@@ -776,10 +791,10 @@ export const handleMarketAnnotations = async (request: Request, env: Env, ctx: W
 
   if (cached) {
     return buildJsonResponse(
-      cached.payload,
+      cached.envelope.payload,
       {
         headers: {
-          ETag: cached.etag,
+          ETag: cached.envelope.etag,
           "Cache-Control": "private, max-age=0, must-revalidate"
         }
       },
@@ -904,18 +919,21 @@ export const handleLabelsLookup = async (request: Request, env: Env, ctx: Worker
 
   const version = `v${await getDatasetVersion(env.SMART_MONEY_DB, "address_labels")}`;
   const lookupHash = await hashValue(normalizedAddresses.join(","));
-  const cacheKey = `labels-lookup:${version}:${lookupHash}`;
+  // key 里不放 labels 版本：版本作为字段比对，改标签时 UPSERT 同一行。
+  // 放进 key 会让每次改标签都换一批新 key，旧行永远读不到，只增不减。
+  const cacheKey = `labels-lookup:${lookupHash}`;
   const ifNoneMatch = request.headers.get("if-none-match");
   const cached = await readLabelsLookupCache<{ items: Awaited<ReturnType<typeof listAddressSummaries>>; version: string }>(
     env,
-    cacheKey
+    cacheKey,
+    version
   );
 
-  if (cached && etagMatches(cached.etag, ifNoneMatch)) {
+  if (cached && etagMatches(cached.envelope.etag, ifNoneMatch)) {
     return new Response(null, {
       status: 304,
       headers: {
-        ETag: cached.etag,
+        ETag: cached.envelope.etag,
         "Cache-Control": "private, max-age=0, must-revalidate"
       }
     });
@@ -923,10 +941,10 @@ export const handleLabelsLookup = async (request: Request, env: Env, ctx: Worker
 
   if (cached) {
     return buildJsonResponse(
-      cached.payload,
+      cached.envelope.payload,
       {
         headers: {
-          ETag: cached.etag,
+          ETag: cached.envelope.etag,
           "Cache-Control": "private, max-age=0, must-revalidate"
         }
       },
@@ -949,7 +967,7 @@ export const handleLabelsLookup = async (request: Request, env: Env, ctx: Worker
   const payload = { items, version };
   const etag = await getCacheEnvelopeEtag(payload);
 
-  await writeLabelsLookupCache(env, cacheKey, {
+  await writeLabelsLookupCache(env, cacheKey, version, {
     etag,
     payload,
     cachedAt: isoNow()
@@ -987,18 +1005,19 @@ export const handleAddressSearch = async (request: Request, env: Env, ctx: Worke
   }
 
   const version = `v${await getDatasetVersion(env.SMART_MONEY_DB, "address_labels")}`;
-  const cacheKey = `address-search:${version}:${await hashValue(`${query.toLowerCase()}:${limit}`)}`;
+  const cacheKey = `address-search:${await hashValue(`${query.toLowerCase()}:${limit}`)}`;
   const ifNoneMatch = request.headers.get("if-none-match");
   const cached = await readLabelsLookupCache<{ items: AddressSearchResult[]; version: string }>(
     env,
-    cacheKey
+    cacheKey,
+    version
   );
 
-  if (cached && etagMatches(cached.etag, ifNoneMatch)) {
+  if (cached && etagMatches(cached.envelope.etag, ifNoneMatch)) {
     return new Response(null, {
       status: 304,
       headers: {
-        ETag: cached.etag,
+        ETag: cached.envelope.etag,
         "Cache-Control": "private, max-age=0, must-revalidate"
       }
     });
@@ -1006,10 +1025,10 @@ export const handleAddressSearch = async (request: Request, env: Env, ctx: Worke
 
   if (cached) {
     return buildJsonResponse(
-      cached.payload,
+      cached.envelope.payload,
       {
         headers: {
-          ETag: cached.etag,
+          ETag: cached.envelope.etag,
           "Cache-Control": "private, max-age=0, must-revalidate"
         }
       },
@@ -1032,7 +1051,7 @@ export const handleAddressSearch = async (request: Request, env: Env, ctx: Worke
   const payload = { items, version };
   const etag = await getCacheEnvelopeEtag(payload);
 
-  await writeLabelsLookupCache(env, cacheKey, {
+  await writeLabelsLookupCache(env, cacheKey, version, {
     etag,
     payload,
     cachedAt: isoNow()
@@ -1050,7 +1069,7 @@ export const handleAddressSearch = async (request: Request, env: Env, ctx: Worke
   );
 };
 
-export const handleExtensionHealth = async (request: Request, env: Env) => {
+export const handleExtensionHealth = async (request: Request, env: Env, ctx: WorkerWaitUntilContext) => {
   await ensureSchema(env);
   const session = await authenticateRequest(request, env);
   if (!session) {
@@ -1092,7 +1111,25 @@ export const handleExtensionHealth = async (request: Request, env: Env) => {
   const slug = typeof body.slug === "string" ? body.slug.trim() : "";
   if (slug) {
     try {
-      const payload = (await getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion)).payload;
+      // health 接口以前直接 getOrBuild，完全不读缓存 —— 而扩展每次渲染、每次
+      // panel_missing / slug_missing 都会打一次 health，等于每次都是一次强制重建
+      // 加两次缓存写入。扩展侧本来就有 45s/90s 的本地缓存，health 只是探活，
+      // 不需要每次都重新构建一份。
+      // 先读缓存：命中就直接用，只有真正缺失才重建。
+      const cached = await readMarketAnnotationCache(env, slug, labelsVersion);
+      if (cached?.stale) {
+        ctx.waitUntil(
+          getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion, ctx).catch((error: unknown) => {
+            console.warn("health stale annotation refresh failed", {
+              slug,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          })
+        );
+      }
+      const payload =
+        cached?.envelope.payload ??
+        (await getOrBuildMarketAnnotationEnvelope(env, slug, labelsVersion, ctx)).payload;
       response.market = {
         ...buildMarketHealthShell(slug),
         marketSlug: payload.market.slug,

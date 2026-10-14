@@ -88,7 +88,10 @@ const REQUIRED_SCHEMA_TABLES = [
   "admin_users",
   "admin_sessions",
   "admin_registration_approvals",
-  "dataset_versions"
+  "dataset_versions",
+  "market_annotation_cache",
+  "ai_hover_note_cache",
+  "response_cache"
 ] as const;
 const REQUIRED_WALLET_COLUMNS = [
   "id",
