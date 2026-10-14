@@ -324,7 +324,7 @@ export default function HomePage() {
         <article className={styles.panel}>
           <header className={styles.panelHead}>
             <h2>城市战绩</h2>
-            <span className={styles.panelNote}>按主交易城市聚合</span>
+            <span className={styles.panelNote}>按已结算仓位的真实胜率</span>
           </header>
           {cityStats.length > 0 ? (
             <div className={styles.cityList}>
@@ -338,7 +338,20 @@ export default function HomePage() {
                     />
                   </div>
                   <span className={styles.cityMeta}>
-                    {city.wallets} 个 · 胜率 {pct(city.avgWinRate)} ·{" "}
+                    {city.wallets} 个 ·{" "}
+                    {city.winRate === undefined ? (
+                      <span className={styles.cityMuted}>
+                        胜率样本不足（{city.resolvedPositions} 仓）
+                      </span>
+                    ) : (
+                      <>
+                        胜率 {pct(city.winRate)}
+                        {city.dayWinRate !== undefined ? (
+                          <span className={styles.cityDay}> · 逐日 {pct(city.dayWinRate)}</span>
+                        ) : null}
+                      </>
+                    )}{" "}
+                    ·{" "}
                     <strong className={city.totalPnlUsd >= 0 ? styles.up : styles.down}>
                       {usd(city.totalPnlUsd)}
                     </strong>
@@ -347,7 +360,9 @@ export default function HomePage() {
               ))}
             </div>
           ) : (
-            <p className={styles.emptyText}>暂无城市数据。</p>
+            <p className={styles.emptyText}>
+              暂无城市战绩。等 Finder 下一轮同步后，这里会按已结算仓位显示每个城市的真实胜率。
+            </p>
           )}
         </article>
 

@@ -261,6 +261,16 @@
   white-space: nowrap;
 }
 
+/* 样本不足：已结算仓位少于门槛时显示，不给百分比，避免误导。 */
+.cityMuted {
+  color: var(--text-faint);
+}
+
+/* 逐日胜率是次要口径，视觉上弱于仓位口径的胜率。 */
+.cityDay {
+  color: var(--text-faint);
+}
+
 /* ---------- 导入批次 ---------- */
 
 .batchList {

@@ -10,6 +10,7 @@ import {
   type WalletAiProviderMeta,
   type WalletFinderAiInsight,
   type WalletFinderCityRow,
+  type WalletFinderCityDayExtreme,
   type WalletFinderPatternRow,
   type WalletFinderPortraitLabel,
   type WalletFinderProfile,
@@ -815,7 +816,26 @@ const buildFinderProfile = (
     });
   }
 
-  const cities: WalletFinderCityRow[] = asArray(weatherProfile.cities)
+  // 城市战绩有两个来源，按可靠性排序：
+  // 1. `detail.cities` —— Finder 侧 compact_smart_pro_city_rows 的同步契约，
+  //    字段已按白名单裁剪（见 server.py SMART_PRO_CITY_ROW_KEYS）；
+  // 2. `weatherProfile.cities` —— 老 payload 里的原始嵌套路径。
+  // Finder 2026-10-14 之前没有导出任何一种（compact_finder_detail_for_import 是
+  // 白名单式，weather_profile_v2 压根不在名单里），所以 cities_json 曾经全库为空。
+  const citySource = asArray(detail.cities).length > 0
+    ? asArray(detail.cities)
+    : asArray(weatherProfile.cities);
+
+  const dayExtreme = (value: unknown): WalletFinderCityDayExtreme | undefined => {
+    const record = asRecord(value);
+    const date = text(record.date);
+    if (!date) {
+      return undefined;
+    }
+    return { date, pnlUsd: numericValue(record.pnl_usd) ?? undefined };
+  };
+
+  const cities: WalletFinderCityRow[] = citySource
     .map(asRecord)
     .map((item) => ({
       city: text(item.city) || text(item.region) || "未知城市",
@@ -824,6 +844,7 @@ const buildFinderProfile = (
       tradeCount: numericValue(item.trades) ?? undefined,
       pnlUsd: numericValue(item.pnl_usd) ?? undefined,
       roi: numericValue(item.roi) ?? undefined,
+      // 仓位口径胜率：Finder 侧 = won_positions / resolved_positions。
       winRate: numericValue(item.win_rate) ?? undefined,
       resolvedCount: numericValue(item.resolved_positions) ?? undefined,
       wonCount: numericValue(item.won_positions) ?? undefined,
@@ -831,7 +852,14 @@ const buildFinderProfile = (
       costUsd: numericValue(item.cost_usd) ?? numericValue(item.staked_usd) ?? undefined,
       payoutUsd: numericValue(item.payout_usd) ?? undefined,
       volumeUsd: numericValue(item.volume_usd) ?? numericValue(item.observed_volume_usd) ?? undefined,
-      share: numericValue(item.share) ?? undefined
+      share: numericValue(item.share) ?? undefined,
+      // 逐日口径：Finder 侧 = win_days / days。老 run 不产出，必须留 undefined
+      // 而不是回落成 0——0% 会被读成「每天都在亏」。
+      dayWinRate: numericValue(item.day_win_rate) ?? undefined,
+      winDays: numericValue(item.win_days) ?? undefined,
+      tradeDays: numericValue(item.days) ?? undefined,
+      bestDay: dayExtreme(item.best_day),
+      worstDay: dayExtreme(item.worst_day)
     }))
     .filter((item) => item.city)
     .sort((left, right) => (right.positionCount ?? 0) - (left.positionCount ?? 0))
