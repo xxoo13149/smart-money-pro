@@ -497,7 +497,19 @@ export interface DashboardCityStat {
   wallets: number;
   totalPnlUsd: number;
   totalVolumeUsd: number;
-  avgWinRate: number;
+  /** 已结算仓位数（城市内所有地址合计）。城市胜率是否可信取决于这个数。 */
+  resolvedPositions: number;
+  wonPositions: number;
+  /** 城市级真实胜率 = wonPositions / resolvedPositions（仓位口径）。
+   *  样本不足门槛以下时为 undefined，前端改显示「样本不足」。 */
+  winRate?: number;
+  /** 各地址在该城市胜率的算术平均，仅作参考；对外展示请用 winRate。 */
+  avgWalletWinRate: number;
+  /** 逐日胜率，仅在产出 day_win_rate 的 run 上有效；无覆盖时为 undefined。 */
+  dayWinRate?: number;
+  dayCoveredRows: number;
+  tradeDays?: number;
+  winDays?: number;
   topWalletId?: string;
 }
 
@@ -545,6 +557,11 @@ export interface DashboardLibraryDigest {
   snapshotAsOf: string | null;
 }
 
+export interface WalletFinderCityDayExtreme {
+  date: string;
+  pnlUsd?: number;
+}
+
 export interface WalletFinderCityRow {
   city: string;
   region?: string;
@@ -552,6 +569,8 @@ export interface WalletFinderCityRow {
   tradeCount?: number;
   pnlUsd?: number;
   roi?: number;
+  /** Settled-position win rate: wonCount / resolvedCount. This is the only
+   *  position-level win-rate definition Smart Pro trusts as "真实胜率". */
   winRate?: number;
   resolvedCount?: number;
   wonCount?: number;
@@ -560,6 +579,14 @@ export interface WalletFinderCityRow {
   payoutUsd?: number;
   volumeUsd?: number;
   share?: number;
+  /** Daily win rate: winDays / tradeDays. Optional on purpose — older Finder
+   *  runs do not emit it, and showing 0% would read as "every day lost" instead
+   *  of "we do not have this data yet". */
+  dayWinRate?: number;
+  winDays?: number;
+  tradeDays?: number;
+  bestDay?: WalletFinderCityDayExtreme;
+  worstDay?: WalletFinderCityDayExtreme;
 }
 
 export interface WalletFinderPortraitLabel {
