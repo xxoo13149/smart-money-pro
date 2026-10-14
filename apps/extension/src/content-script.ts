@@ -1,3 +1,257 @@
+/* ===== 城市真实战绩浮层（内联：content script 是 classic script，不能跨文件 import） ===== */
+/**
+ * 扩展端「城市真实战绩」浮层。
+ *
+ * 独立模块，不依赖 content-script 的标注挂载逻辑：这个浮层挂在页面右下角，
+ * 展示当前市场的**城市整体真实胜率**和**该城市下每个被标注地址自己的胜率**。
+ *
+ * 关键约束（都是实际踩过的坑）：
+ * 1. 胜率口径是已结算仓位（won/resolved），后端已在样本 < 5 时压制百分比，
+ *    这里只负责把 `confidence` 翻译成人话，绝不自己算胜率。
+ * 2. 城市无法解析或库里没数据（payload=null）时**不渲染任何东西**。
+ *    画一个空的「暂无战绩」面板比不画更糟——用户会以为是我们没抓到。
+ * 3. 逐日胜率是可选字段，缺失时显示「不提供」，绝不能回退成 0%。
+ */
+
+interface CityWalletWinRateView {
+  walletId: string;
+  normalizedAddress: string;
+  displayName?: string;
+  alias?: string;
+  watchlisted: boolean;
+  winRate?: number;
+  rawWinRate?: number;
+  winRateConfidence: "trusted" | "insufficient" | "unknown";
+  resolvedCount?: number;
+  wonCount?: number;
+  pnlUsd: number;
+  volumeUsd: number;
+  roi: number;
+  dayWinRate?: number;
+  dayWinRateConfidence: "trusted" | "insufficient" | "unknown";
+  tradeDays?: number;
+  aiBriefShort?: string;
+  portraitLabels: string[];
+}
+
+interface CityWinRateView {
+  city: string;
+  walletCount: number;
+  total: {
+    resolvedPositions: number;
+    wonPositions: number;
+    pnlUsd: number;
+    volumeUsd: number;
+    winRate?: number;
+    winRateConfidence: "trusted" | "insufficient" | "unknown";
+  };
+  wallets: CityWalletWinRateView[];
+  minSample: number;
+  refreshedAt: string;
+  sourceStatus: "live" | "stale";
+}
+
+const ROOT_CLASS = "wsm-city-panel";
+const OWNER_ATTR = "data-wsm-city-owner";
+const MAX_WALLETS = 8;
+
+const formatPercent = (value: number | undefined, digits = 1): string =>
+  typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
+
+const formatUsd = (value: number): string => {
+  if (!Number.isFinite(value)) {
+    return "—";
+  }
+  const sign = value > 0 ? "+" : value < 0 ? "−" : "";
+  const abs = Math.abs(value);
+  if (abs >= 1000) {
+    return `${sign}$${(abs / 1000).toFixed(1)}k`;
+  }
+  return `${sign}$${abs.toFixed(abs < 10 ? 2 : 0)}`;
+};
+
+const shortenAddress = (address: string): string =>
+  address.length > 12 ? `${address.slice(0, 6)}…${address.slice(-4)}` : address;
+
+/**
+ * 把胜率 + 置信度翻译成展示文本。样本不足时明确说「样本不足」并给出样本数，
+ * 而不是把原始百分比（可能是 2/2 的 100%）当成战绩显示。
+ */
+const describeWinRate = (
+  view: { winRate?: number; winRateConfidence: "trusted" | "insufficient" | "unknown"; resolvedCount?: number },
+  minSample: number
+): { text: string; tone: "good" | "bad" | "neutral" } => {
+  if (view.winRateConfidence === "unknown") {
+    return { text: "胜率不提供", tone: "neutral" };
+  }
+  if (view.winRateConfidence === "insufficient" || view.winRate === undefined) {
+    return {
+      text: `样本不足（${view.resolvedCount ?? 0} 仓 < ${minSample}）`,
+      tone: "neutral"
+    };
+  }
+  return {
+    text: formatPercent(view.winRate),
+    tone: view.winRate >= 0.55 ? "good" : view.winRate < 0.45 ? "bad" : "neutral"
+  };
+};
+
+const describeDayWinRate = (view: {
+  dayWinRate?: number;
+  dayWinRateConfidence: "trusted" | "insufficient" | "unknown";
+  tradeDays?: number;
+}): string | null => {
+  if (view.dayWinRateConfidence === "unknown" || view.dayWinRate === undefined) {
+    return null;
+  }
+  if (view.dayWinRateConfidence === "insufficient") {
+    return `逐日 ${view.tradeDays ?? 0} 天样本不足`;
+  }
+  return `逐日 ${formatPercent(view.dayWinRate)}（${view.tradeDays ?? 0} 天）`;
+};
+
+const el = <K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className?: string,
+  text?: string
+): HTMLElementTagNameMap[K] => {
+  const node = document.createElement(tag);
+  if (className) {
+    node.className = className;
+  }
+  if (text !== undefined) {
+    node.textContent = text;
+  }
+  return node;
+};
+
+const buildWalletRow = (wallet: CityWalletWinRateView, minSample: number): HTMLElement => {
+  const row = el("div", "wsm-city-wallet");
+
+  const head = el("div", "wsm-city-wallet-head");
+  const name = wallet.displayName || wallet.alias || shortenAddress(wallet.normalizedAddress);
+  const nameNode = el("span", "wsm-city-wallet-name", name);
+  if (wallet.watchlisted) {
+    head.append(el("span", "wsm-city-wallet-star", "★"));
+  }
+  head.append(nameNode);
+  head.append(el("span", "wsm-city-wallet-addr", shortenAddress(wallet.normalizedAddress)));
+  row.append(head);
+
+  const win = describeWinRate(wallet, minSample);
+  const stats = el("div", "wsm-city-wallet-stats");
+  stats.append(el("span", `wsm-city-metric wsm-city-tone-${win.tone}`, win.text));
+  stats.append(el("span", "wsm-city-metric", formatUsd(wallet.pnlUsd)));
+  const day = describeDayWinRate(wallet);
+  if (day) {
+    stats.append(el("span", "wsm-city-metric wsm-city-muted", day));
+  }
+  if (wallet.aiBriefShort) {
+    stats.append(el("span", "wsm-city-metric wsm-city-brief", wallet.aiBriefShort));
+  }
+  row.append(stats);
+
+  return row;
+};
+
+const buildPanel = (view: CityWinRateView, owner: string): HTMLElement => {
+  const panel = el("div", ROOT_CLASS);
+  panel.setAttribute(OWNER_ATTR, owner);
+
+  const header = el("div", "wsm-city-header");
+  header.append(el("span", "wsm-city-title", `${view.city} 战绩`));
+  if (view.sourceStatus === "stale") {
+    header.append(el("span", "wsm-city-stale", "缓存"));
+  }
+  panel.append(header);
+
+  const totalWin = describeWinRate(
+    {
+      winRate: view.total.winRate,
+      winRateConfidence: view.total.winRateConfidence,
+      resolvedCount: view.total.resolvedPositions
+    },
+    view.minSample
+  );
+
+  const summary = el("div", "wsm-city-summary");
+  summary.append(
+    el("span", `wsm-city-total-rate wsm-city-tone-${totalWin.tone}`, totalWin.text)
+  );
+  summary.append(el("span", "wsm-city-metric", `${view.walletCount} 个地址`));
+  summary.append(el("span", "wsm-city-metric", formatUsd(view.total.pnlUsd)));
+  summary.append(
+    el(
+      "span",
+      "wsm-city-muted",
+      `${view.total.wonPositions}/${view.total.resolvedPositions} 已结算仓位`
+    )
+  );
+  panel.append(summary);
+
+  if (view.wallets.length > 0) {
+    const list = el("div", "wsm-city-list");
+    view.wallets
+      .slice(0, MAX_WALLETS)
+      .forEach((wallet) => list.append(buildWalletRow(wallet, view.minSample)));
+    panel.append(list);
+
+    if (view.wallets.length > MAX_WALLETS) {
+      panel.append(
+        el("div", "wsm-city-muted wsm-city-more", `还有 ${view.wallets.length - MAX_WALLETS} 个地址`)
+      );
+    }
+  }
+
+  panel.append(
+    el("div", "wsm-city-footnote", `胜率按已结算仓位统计 · 数据 ${view.refreshedAt.slice(0, 10)}`)
+  );
+
+  return panel;
+};
+
+interface CityPanelController {
+  /** 传入 null 表示这个城市没有数据，直接收起面板。 */
+  render(view: CityWinRateView | null): void;
+  destroy(): void;
+}
+
+/**
+ * 挂载城市战绩浮层。挂载点固定在页面右下角，避开 Polymarket 的右侧持仓栏。
+ * 重复调用只更新内容，不会叠出多个面板。
+ */
+const mountCityWinRatePanel = (owner: string): CityPanelController => {
+  let current: HTMLElement | null = null;
+
+  const render = (view: CityWinRateView | null) => {
+    const existing = document.querySelector<HTMLElement>(`.${ROOT_CLASS}`);
+    if (existing && existing.getAttribute(OWNER_ATTR) !== owner) {
+      return;
+    }
+
+    if (!view) {
+      current?.remove();
+      current = null;
+      return;
+    }
+
+    const next = buildPanel(view, owner);
+    if (current?.parentNode) {
+      current.replaceWith(next);
+    } else {
+      document.body.append(next);
+    }
+    current = next;
+  };
+
+  const destroy = () => {
+    current?.remove();
+    current = null;
+  };
+
+  return { render, destroy };
+};
+
 interface ExtensionConfig {
   enabled: boolean;
   debugMode: boolean;
@@ -217,6 +471,12 @@ type ContentRuntimeMessage =
     }
   | { type: "wsm:ping" };
 
+interface CityWinRateResponse {
+  ok: boolean;
+  payload: CityWinRateView | null;
+  cacheStatus: "live" | "stale";
+}
+
 (() => {
   const runtimeWindow = window as Window & typeof globalThis & {
     __WSM_CONTENT_SCRIPT_READY__?: boolean;
@@ -246,6 +506,10 @@ type ContentRuntimeMessage =
   const ROUTE_REFRESH_DEBOUNCE_MS = 140;
   const TRANSIENT_CLEAR_GRACE_MS = 900;
   const CONTENT_INSTANCE_ID = `wsm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  // 城市战绩浮层：独立的右下角面板，和标注行 DOM 完全解耦。
+  // 拿到 payload=null（城市解析不出 / 库里没这个城市）时面板自动收起，
+  // 不显示空的「暂无战绩」框。
+  const cityWinRatePanel = mountCityWinRatePanel(CONTENT_INSTANCE_ID);
   const DEFAULT_CONFIG: ExtensionConfig = {
     enabled: true,
     debugMode: false,
@@ -1520,6 +1784,13 @@ type ContentRuntimeMessage =
     sendBackgroundMessage<AddressLookupSummary[]>({
       type: "wsm:lookupAddresses",
       addresses
+    });
+
+  const requestCityWinRate = async (slug: string, forceRefresh = false) =>
+    sendBackgroundMessage<CityWinRateResponse>({
+      type: "wsm:getCityWinRate",
+      slug,
+      forceRefresh
     });
 
   const openAnnotationReader = (annotation: ResolvedInlineAnnotation, returnFocus?: HTMLElement | null) => {
@@ -3380,6 +3651,7 @@ type ContentRuntimeMessage =
     setDebugState("Slug", slug ?? "missing");
 
     if (!slug) {
+      cityWinRatePanel.render(null);
       scheduleTransientClear();
       markRuntimeStatus("wake", "Open a market page to start annotations.");
       await publishPageState(buildPageState({
@@ -3429,7 +3701,21 @@ type ContentRuntimeMessage =
       }
       setDebugState("Payload", String(currentPayload.holders.length));
       queueRender(options);
+      // 城市战绩独立于标注刷新：标注失败不应该连带把城市战绩也拖掉，
+      // 它只是增强信息，失败时安静地不展示。
+      void requestCityWinRate(slug, options?.forceRevalidate)
+        .then((result) => {
+          if (refreshId !== refreshGeneration) {
+            return;
+          }
+          cityWinRatePanel.render(result?.ok ? result.payload : null);
+        })
+        .catch((error) => {
+          logDebug("failed to fetch city win rate", error);
+          cityWinRatePanel.render(null);
+        });
     } catch (error) {
+      cityWinRatePanel.render(null);
       if (refreshId !== refreshGeneration) {
         return;
       }
@@ -3468,6 +3754,9 @@ type ContentRuntimeMessage =
 
   const scheduleRouteRefresh = () => {
     invalidatePendingRender();
+    // 换市场时先撤掉旧城市的战绩：面板在拿到新城市数据前消失，
+    // 避免用户在 A 城页面看到 B 城的胜率。
+    cityWinRatePanel.render(null);
     if (hasMountedAnnotationDom()) {
       scheduleTransientClear();
     } else {

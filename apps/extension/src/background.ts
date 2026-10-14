@@ -110,6 +110,62 @@ interface CachedMarketEntry {
   payload: MarketAnnotationResponse;
 }
 
+/** 城市战绩里单个地址在该城市的战绩。 */
+interface CityWalletWinRate {
+  walletId: string;
+  normalizedAddress: string;
+  displayName?: string;
+  alias?: string;
+  watchlisted: boolean;
+  /** 仓位口径胜率；样本不足时后端不下发百分比。 */
+  winRate?: number;
+  rawWinRate?: number;
+  winRateConfidence: "trusted" | "insufficient" | "unknown";
+  resolvedCount?: number;
+  wonCount?: number;
+  pnlUsd: number;
+  volumeUsd: number;
+  roi: number;
+  dayWinRate?: number;
+  dayWinRateConfidence: "trusted" | "insufficient" | "unknown";
+  tradeDays?: number;
+  bestDay?: { date: string; pnlUsd?: number };
+  worstDay?: { date: string; pnlUsd?: number };
+  aiBriefShort?: string;
+  portraitLabels: string[];
+  snapshotAsOf?: string;
+}
+
+/**
+ * 城市整体战绩 + 该城市下每个被标注地址自己的战绩。
+ * 胜率口径是已结算仓位（won/resolved），样本不足时不给百分比。
+ */
+interface CityWinRatePayload {
+  city: string;
+  parsedFrom?: string;
+  walletCount: number;
+  total: {
+    resolvedPositions: number;
+    wonPositions: number;
+    pnlUsd: number;
+    volumeUsd: number;
+    winRate?: number;
+    winRateConfidence: "trusted" | "insufficient" | "unknown";
+  };
+  wallets: CityWalletWinRate[];
+  minSample: number;
+  refreshedAt: string;
+  sourceStatus: "live" | "stale";
+}
+
+interface CachedCityEntry {
+  expiresAt: number;
+  updatedAt: string;
+  memberScope: string;
+  /** null 表示「这个城市我们没有数据」，也要缓存，否则每次切市场都会重查。 */
+  payload: CityWinRatePayload | null;
+}
+
 interface AddressSearchResult {
   chain: "polygon";
   address: string;
@@ -355,6 +411,7 @@ type BackgroundMessage =
   | { type: "wsm:authExchange"; inviteCode: string; deviceLabel?: string }
   | { type: "wsm:logout" }
   | { type: "wsm:getMarketAnnotations"; slug: string; forceRefresh?: boolean }
+  | { type: "wsm:getCityWinRate"; slug: string; forceRefresh?: boolean }
   | { type: "wsm:getPageSurfaceState" }
   | { type: "wsm:reportPageSurfaceState"; state?: PageSurfaceState; surface?: PageSurfaceState }
   | { type: "wsm:reportHealth"; event: RuntimeHealthEvent }
@@ -379,9 +436,12 @@ const RUNTIME_STATE_KEY = "wsm.runtimeState";
 const PAGE_SURFACE_STATE_KEY = "wsm.pageSurfaceState";
 const SIDEPANEL_FOCUS_KEY = "wsm.sidepanelFocus";
 const MARKET_CACHE_PREFIX = "wsm.marketCache.";
+const CITY_CACHE_PREFIX = "wsm.cityWinRateCache.";
 const ACCESS_TOKEN_REFRESH_BUFFER_MS = 60_000;
 const DEFAULT_REFRESH_INTERVAL_MS = 180_000;
 const MARKET_CACHE_TTL_MS = 45_000;
+// 城市战绩随 Finder run 批量更新，比标注更耐放，缓存久一点减少切市场时的请求。
+const CITY_CACHE_TTL_MS = 300_000;
 const ADDRESS_PATTERN = /0x[a-fA-F0-9]{40}/;
 const DEFAULT_RUNTIME_CONFIG: ExtensionRuntimeConfig = {
   mode: "dev",
@@ -396,6 +456,7 @@ const DEFAULT_RUNTIME_CONFIG: ExtensionRuntimeConfig = {
 };
 
 const memoryCache = new Map<string, CachedMarketEntry>();
+const cityMemoryCache = new Map<string, CachedCityEntry>();
 const pendingContentScriptEnsures = new Map<number, Promise<boolean>>();
 const pendingTabRefreshes = new Map<string, Promise<{ skipped?: true; injected?: boolean }>>();
 let runtimeConfigPromise: Promise<ExtensionRuntimeConfig> | null = null;
@@ -729,6 +790,32 @@ const getMemberScope = (session: ExtensionAuthSession | null, config: ExtensionC
 };
 
 const getCacheKey = (memberScope: string, slug: string) => `${MARKET_CACHE_PREFIX}${memberScope}.${slug}`;
+
+const getCityCacheKey = (memberScope: string, slug: string) =>
+  `${CITY_CACHE_PREFIX}${memberScope}.${slug}`;
+
+const readCityEntry = async (memberScope: string, slug: string): Promise<CachedCityEntry | null> => {
+  const cacheKey = getCityCacheKey(memberScope, slug);
+  const inMemory = cityMemoryCache.get(cacheKey);
+  if (inMemory) {
+    return inMemory;
+  }
+
+  const stored = await chrome.storage.local.get(cacheKey);
+  const entry = stored?.[cacheKey] as CachedCityEntry | undefined;
+  if (!entry) {
+    return null;
+  }
+
+  cityMemoryCache.set(cacheKey, entry);
+  return entry;
+};
+
+const writeCityEntry = async (memberScope: string, slug: string, entry: CachedCityEntry) => {
+  const cacheKey = getCityCacheKey(memberScope, slug);
+  cityMemoryCache.set(cacheKey, entry);
+  await chrome.storage.local.set({ [cacheKey]: entry });
+};
 
 const readCachedEntry = async (memberScope: string, slug: string): Promise<CachedMarketEntry | null> => {
   const cacheKey = getCacheKey(memberScope, slug);
@@ -1233,6 +1320,92 @@ const fetchMarketAnnotations = async (slug: string, forceRefresh = false): Promi
     }
 
     throw error;
+  }
+};
+
+/**
+ * 取当前市场城市的真实战绩。
+ *
+ * 与 fetchMarketAnnotations 同样的三级策略：内存/本地缓存 → 网络 → stale 兜底。
+ * 额外一点：**「这个城市没数据」（payload=null）也要缓存**，否则用户在一个
+ * 我们没覆盖的城市市场里反复切页签，每次都会打到后端。
+ *
+ * 返回 payload=null 表示城市无法解析或库里没有，不是错误；调用方应静默跳过
+ * 城市战绩模块，而不是显示一个空面板。
+ */
+const fetchCityWinRate = async (
+  slug: string,
+  forceRefresh = false
+): Promise<{ payload: CityWinRatePayload | null; cacheStatus: "live" | "stale" }> => {
+  const trimmedSlug = slug.trim();
+  if (!trimmedSlug) {
+    return { payload: null, cacheStatus: "live" };
+  }
+
+  const config = await readConfig();
+  if (!config.enabled) {
+    return { payload: null, cacheStatus: "live" };
+  }
+
+  const memberScope = getMemberScope(await readAuthSession(), config);
+  const cached = await readCityEntry(memberScope, trimmedSlug);
+  const now = Date.now();
+  if (!forceRefresh && cached && cached.expiresAt > now) {
+    return {
+      payload: cached.payload,
+      cacheStatus: "live"
+    };
+  }
+
+  const performRequest = async (retry: boolean): Promise<{ payload: CityWinRatePayload | null }> => {
+    const { response, payload, session } = await requestJson<{ data: CityWinRatePayload | null }>(
+      "/api/extension/city-win-rate",
+      {
+        auth: "required",
+        forceRefresh: retry,
+        query: {
+          slug: trimmedSlug
+        }
+      }
+    );
+
+    if (response.status === 401 && !retry) {
+      await ensureActiveSession(true);
+      return performRequest(true);
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        (payload as { error?: string } | undefined)?.error ?? `Request failed with ${response.status}`
+      );
+    }
+
+    return { payload: payload?.data ?? null };
+  };
+
+  try {
+    const { payload } = await performRequest(false);
+    await writeCityEntry(memberScope, trimmedSlug, {
+      expiresAt: Date.now() + CITY_CACHE_TTL_MS,
+      updatedAt: toIsoNow(),
+      memberScope: getMemberScope(await readAuthSession(), config),
+      payload
+    });
+    return { payload, cacheStatus: "live" };
+  } catch (error) {
+    if (cached) {
+      return {
+        payload: cached.payload
+          ? { ...cached.payload, refreshedAt: toIsoNow(), sourceStatus: "stale" }
+          : null,
+        cacheStatus: "stale"
+      };
+    }
+
+    // 城市战绩是增强信息，拿不到就降级成「不展示」，不要把错误抛给页面
+    // 打断标注主流程。
+    console.warn("[smart-money] city win rate unavailable", error);
+    return { payload: null, cacheStatus: "stale" };
   }
 };
 
@@ -1800,6 +1973,13 @@ const handleMessage = async (message: BackgroundMessage, sender?: { tab?: Browse
       };
     case "wsm:getMarketAnnotations": {
       const result = await fetchMarketAnnotations(message.slug, message.forceRefresh);
+      return {
+        ok: true,
+        ...result
+      };
+    }
+    case "wsm:getCityWinRate": {
+      const result = await fetchCityWinRate(message.slug, message.forceRefresh);
       return {
         ok: true,
         ...result

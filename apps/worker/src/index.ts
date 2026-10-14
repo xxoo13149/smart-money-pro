@@ -7,6 +7,7 @@ import {
   handleAuthRefresh,
   handleAuthRegister,
   handleAddressSearch,
+  handleCityWinRate,
   handleExtensionHealth,
   handleLabelsLookup,
   handleMarketAnnotations
@@ -22,6 +23,7 @@ const ROUTES: Record<string, (request: Request, env: Env, ctx: WorkerWaitUntilCo
   "/api/extension/auth/refresh": handleAuthRefresh,
   "/api/extension/auth/logout": handleAuthLogout,
   "/api/extension/market-annotations": handleMarketAnnotations,
+  "/api/extension/city-win-rate": handleCityWinRate,
   "/api/extension/labels/lookup": handleLabelsLookup,
   "/api/extension/health": handleExtensionHealth,
   "/api/extension/search": handleAddressSearch

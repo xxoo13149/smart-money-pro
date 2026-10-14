@@ -16,6 +16,7 @@ import {
   getExtensionSessionByRefreshHash,
   getExtensionUserByInviteCode,
   getExtensionUserByNormalizedEmail,
+  getCityWinRatePayload,
   listAddressSummaries,
   markExtensionInviteUsed,
   revokeExtensionSession,
@@ -697,6 +698,52 @@ export const handleAdminApprovalEmail = async (request: Request, env: Env) => {
   await env.ADMIN_APPROVAL_EMAIL.send(message);
 
   return buildJsonResponse({ ok: true });
+};
+
+/**
+ * 城市真实战绩（扩展端 Polymarket 城市市场页用）。
+ *
+ * 胜率口径：已结算仓位 won/resolved，来自 Finder 的城市层级战绩；
+ * 样本 < 5 个已结算仓位时后端不给百分比，只给 confidence=insufficient，
+ * 让扩展端显示「样本不足」而不是把 2/2 的 100% 当战绩。
+ *
+ * 城市解析不出或库里没这个城市时返回 `{data: null}` + 200：
+ * 「我们没这个城市的数据」不是错误，扩展端据此静默跳过城市战绩模块。
+ */
+export const handleCityWinRate = async (request: Request, env: Env) => {
+  await ensureSchema(env);
+  const session = await authenticateRequest(request, env);
+  if (!session) {
+    return unauthorized();
+  }
+
+  const url = new URL(request.url);
+  const slug = url.searchParams.get("slug")?.trim() || null;
+  const city = url.searchParams.get("city")?.trim() || null;
+
+  if (!slug && !city) {
+    return buildJsonResponse({ error: "slug or city is required" }, {}, 400);
+  }
+
+  try {
+    const payload = await getCityWinRatePayload(env.SMART_MONEY_DB, { slug, city });
+    // 城市战绩随 Finder run 批量更新，30s 缓存足够；扩展端本身还有 5 分钟本地
+    // 缓存，这里只是让浏览器/CDN 层别反复回源，不再另建 KV 缓存信封——
+    // D1 上的 json_each 聚合本来就比读 KV 重，多一层缓存反而难失效。
+    return buildJsonResponse(
+      { data: payload },
+      { headers: { "Cache-Control": "private, max-age=30" } }
+    );
+  } catch (error) {
+    return buildJsonResponse(
+      {
+        error: "city_win_rate_failed",
+        message: error instanceof Error ? error.message : String(error)
+      },
+      {},
+      500
+    );
+  }
 };
 
 export const handleMarketAnnotations = async (request: Request, env: Env, ctx: WorkerWaitUntilContext) => {

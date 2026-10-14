@@ -341,3 +341,151 @@
     max-width: calc(100vw - 56px);
   }
 }
+
+/* ---- 城市真实战绩浮层 ---- */
+/* 挂在页面右下角，避开 Polymarket 右侧持仓栏；最高 60vh，超出内部滚动。 */
+.wsm-city-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  width: 268px;
+  max-height: 60vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  border: 1px solid rgba(190, 209, 255, 0.24);
+  border-radius: 10px;
+  background: rgba(11, 17, 28, 0.94);
+  color: rgba(238, 245, 255, 0.92);
+  font-size: 11px;
+  line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(3, 7, 18, 0.45);
+  backdrop-filter: blur(6px);
+}
+
+.wsm-city-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.wsm-city-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #eaf1ff;
+}
+
+.wsm-city-stale {
+  padding: 0 5px;
+  border: 1px solid rgba(255, 205, 120, 0.4);
+  border-radius: 999px;
+  color: rgba(255, 214, 150, 0.9);
+  font-size: 10px;
+}
+
+.wsm-city-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 8px;
+  padding-bottom: 7px;
+  margin-bottom: 7px;
+  border-bottom: 1px solid rgba(190, 209, 255, 0.14);
+}
+
+.wsm-city-total-rate {
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.wsm-city-tone-good { color: #7ee0a8; }
+.wsm-city-tone-bad { color: #ff9b9b; }
+.wsm-city-tone-neutral { color: rgba(238, 245, 255, 0.82); }
+
+.wsm-city-metric {
+  color: rgba(238, 245, 255, 0.78);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 「样本不足」「逐日胜率不提供」这类弱化信息，不能和真实胜率抢注意力。 */
+.wsm-city-muted {
+  color: rgba(219, 231, 244, 0.48);
+}
+
+.wsm-city-brief {
+  color: #bed1ff;
+}
+
+.wsm-city-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.wsm-city-wallet {
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(190, 209, 255, 0.08);
+}
+
+.wsm-city-wallet:last-child {
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.wsm-city-wallet-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+.wsm-city-wallet-star {
+  color: #ffd479;
+  font-size: 10px;
+}
+
+.wsm-city-wallet-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.wsm-city-wallet-addr {
+  flex: none;
+  color: rgba(219, 231, 244, 0.4);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.wsm-city-wallet-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  margin-top: 2px;
+}
+
+.wsm-city-more {
+  padding-top: 5px;
+}
+
+.wsm-city-footnote {
+  padding-top: 6px;
+  margin-top: 6px;
+  border-top: 1px solid rgba(190, 209, 255, 0.14);
+  color: rgba(219, 231, 244, 0.38);
+  font-size: 10px;
+}
+
+@media (max-width: 768px) {
+  .wsm-city-panel {
+    right: 8px;
+    bottom: 8px;
+    width: calc(100vw - 16px);
+    max-width: 320px;
+    max-height: 46vh;
+  }
+}
