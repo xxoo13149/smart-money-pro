@@ -142,4 +142,51 @@ assert(
   "content-script.js must render the city win rate payload returned by background."
 );
 
+// The city panel is collapsible and draggable, and BOTH features depend on state
+// surviving the rebuild that every render() does. If the state is not persisted,
+// each data refresh silently snaps the panel back open at the bottom-right corner
+// and drops the user's placement — the feature looks broken at random.
+const contentCss = await readFile(path.join(distDir, "content.css"), "utf8");
+
+for (const marker of [
+  "wsm-city-panel-collapsed",
+  "wsm-city-panel-positioned",
+  "wsm-city-collapsed-line",
+  "wsm-city-toggle",
+  "pointerdown",
+  "CITY_PANEL_UI_KEY"
+]) {
+  assert(
+    contentScript.includes(marker),
+    `content-script.js must keep the collapsible/draggable panel marker: ${marker}`
+  );
+}
+assert(
+  contentScript.includes("chrome.storage.local.get(CITY_PANEL_UI_KEY)") &&
+    contentScript.includes("chrome.storage.local.set("),
+  "city panel collapsed/position state must persist through chrome.storage.local, " +
+    "otherwise a render() rebuild resets it."
+);
+// Once dragged, the panel switches to left/top. Keeping the right/bottom anchor
+// would fight the coordinates and pin the panel to the corner.
+assert(
+  /\.wsm-city-panel-positioned\s*\{[^}]*right:\s*auto[^}]*bottom:\s*auto/.test(contentCss),
+  ".wsm-city-panel-positioned must clear the right/bottom anchor before using left/top."
+);
+// Collapsed must actually hide the detail body, not just shrink the box.
+assert(
+  /\.wsm-city-panel-collapsed\s+\.wsm-city-body\s*\{[^}]*display:\s*none/.test(contentCss),
+  "collapsed city panel must hide .wsm-city-body."
+);
+assert(
+  /\.wsm-city-collapsed-line\s*\{[^}]*display:\s*none/.test(contentCss) &&
+    /\.wsm-city-panel-collapsed\s+\.wsm-city-collapsed-line\s*\{[^}]*display:\s*flex/.test(contentCss),
+  "the compact summary line must be hidden when expanded and shown when collapsed."
+);
+assert(
+  /\.wsm-city-header\s*\{[^}]*cursor:\s*grab/.test(contentCss) &&
+    /touch-action:\s*none/.test(contentCss),
+  "the city panel header must be the drag handle (cursor grab + touch-action none)."
+);
+
 console.log("Extension smoke check passed.");

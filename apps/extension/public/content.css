@@ -18,32 +18,48 @@
 }
 
 /*
- * 只有在「找不到独立地址行、标签只能直接挂到挂载点」时才把挂载点改成纵向堆叠。
- * 之前无条件加 column，导致「地址 | 金额」横排行被强行竖排，金额被挤到标签下面。
- */
-.wsm-holder-meta-target--stack {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: flex-start !important;
-  gap: 4px !important;
-  overflow: visible !important;
-  white-space: normal !important;
-}
-
-/*
- * 「地址 + 标签」纵向容器：我们自己插进页面的，不碰页面原生布局。
- * flex: 0 1 auto + min-width:0 保证长地址能正常省略、标签换行不撑破容器。
+ * 「原生内容 + 我们这行标签」的纵向容器。
+ * head 行负责把页面原生的横向排布（头像 + 地址等）原样保住，
+ * 标签行挂在 head 下面 —— 既不会把头像顶到地址上面，也不会动金额列。
  */
 .wsm-name-stack {
   display: flex !important;
   flex-direction: column !important;
   align-items: flex-start !important;
-  gap: 3px !important;
+  /* 行距收紧一点，窄列里标签换行也不至于把行撑得很高。 */
+  gap: 2px !important;
   flex: 0 1 auto !important;
   min-width: 0 !important;
   max-width: 100% !important;
   overflow: visible !important;
   white-space: normal !important;
+}
+
+/*
+ * head 行要复刻被搬进来的原生子节点的排布：
+ * 横向、居中对齐、保留原有 gap，且允许换行（长地址不能撑破容器）。
+ */
+.wsm-name-stack__head {
+  display: flex !important;
+  flex-direction: row !important;
+  align-items: center !important;
+  /*
+   * 绝不能换行：head 里装的是页面原生的头像 + 地址，一旦换行就会变成
+   * 「头像在上一行、地址在下一行」，正是用户看到的排版被打乱。
+   * 空间不够时让地址自己省略，绝不换行。
+   */
+  flex-wrap: nowrap !important;
+  gap: inherit;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  white-space: normal !important;
+}
+
+.wsm-name-stack__head > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .wsm-name-stack > * {
@@ -70,7 +86,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 6px;
+  /* 行间距收紧：窄列里标签会换行，gap 太大会把行高撑得很难看。 */
+  gap: 2px 4px;
   margin: 0;
   min-height: 19px;
   /* 跟着「地址 + 标签」容器走，绝不撑破页面原生行宽（长标签会溢出到金额列上）。 */
@@ -103,6 +120,9 @@
 
 .wsm-alias {
   appearance: none;
+  /* 别名也必须能收缩：持仓窄列里长别名会把整列撑破、把标签挤到金额列上。 */
+  max-width: 100%;
+  flex: 0 1 auto;
   padding: 2px 7px;
   border: 1px solid transparent;
   border-radius: 999px;
@@ -113,6 +133,9 @@
   line-height: 1.2;
   text-decoration: none;
   letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   transition:
     background-color 120ms ease,
@@ -163,7 +186,10 @@
 
 .wsm-chip {
   appearance: none;
-  max-width: 148px;
+  /* 窄列（持仓双列 ~100px）里 148px 的上限会直接把列撑破，标签挤出到金额列上。
+     跟着所在容器收缩，最长不超过一整行宽度，超出部分省略号。 */
+  max-width: 100%;
+  flex: 0 1 auto;
   padding: 2px 6px;
   border: 1px solid transparent;
   border-radius: 999px;
@@ -193,13 +219,14 @@
   box-shadow: 0 0 0 1px rgba(112, 159, 255, 0.18);
 }
 
+/*
+ * 标签行是「别名 + 若干 chip」排成的一行。chip 用 display:contents 直接并入
+ * 上一层的换行容器 —— 之前 chip-list 自己是个 inline-flex 嵌套容器，在持仓区
+ * 这种 ~100px 的窄列里会一个 chip 独占一行，行高从 28px 涨到 130px，
+ * 看上去就是「标签位置不够、互相挤」。
+ */
 .wsm-chip-list {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  max-width: 100%;
+  display: contents;
 }
 
 .wsmx-chip-trigger {
@@ -392,18 +419,102 @@
   backdrop-filter: blur(6px);
 }
 
+/* 被拖动过：改用 left/top 定位，右下角锚点必须清掉，否则两套定位互相拉扯。 */
+.wsm-city-panel-positioned {
+  right: auto;
+  bottom: auto;
+}
+
+.wsm-city-panel-dragging {
+  cursor: grabbing;
+  opacity: 0.96;
+  user-select: none;
+}
+
+/* 折叠态：只留标题行 + 一行摘要，不滚动、不撑高。 */
+.wsm-city-panel-collapsed {
+  width: auto;
+  min-width: 172px;
+  max-width: 268px;
+  max-height: none;
+  overflow: hidden;
+  padding: 7px 10px;
+}
+
+.wsm-city-panel-collapsed .wsm-city-body {
+  display: none;
+}
+
 .wsm-city-header {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   margin-bottom: 6px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.wsm-city-panel-dragging .wsm-city-header {
+  cursor: grabbing;
+}
+
+/* 折叠时 header 和摘要行并成一条，整体高度只剩一行。 */
+.wsm-city-panel-collapsed .wsm-city-header {
+  margin-bottom: 0;
+}
+
+.wsm-city-drag-grip {
+  flex: none;
+  color: rgba(219, 231, 244, 0.34);
+  font-size: 10px;
+  letter-spacing: -2px;
 }
 
 .wsm-city-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   font-weight: 700;
   color: #eaf1ff;
+}
+
+.wsm-city-toggle {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(190, 209, 255, 0.22);
+  border-radius: 5px;
+  background: rgba(190, 209, 255, 0.08);
+  color: rgba(238, 245, 255, 0.86);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wsm-city-toggle:hover {
+  background: rgba(190, 209, 255, 0.18);
+}
+
+.wsm-city-collapsed-line {
+  display: none;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 3px;
+}
+
+.wsm-city-panel-collapsed .wsm-city-collapsed-line {
+  display: flex;
+}
+
+.wsm-city-collapsed-rate {
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
 }
 
 .wsm-city-stale {
@@ -515,5 +626,12 @@
     width: calc(100vw - 16px);
     max-width: 320px;
     max-height: 46vh;
+  }
+
+  /* 窄屏上折叠态不要撑满整屏，否则「精炼」就白做了。 */
+  .wsm-city-panel-collapsed {
+    width: auto;
+    min-width: 0;
+    max-width: calc(100vw - 16px);
   }
 }

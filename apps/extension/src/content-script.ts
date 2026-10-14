@@ -65,10 +65,24 @@ interface CityPanelController {
   destroy(): void;
 }
 
+interface CityPanelUiState {
+  collapsed: boolean;
+  /** 绝对定位坐标；null 表示还在默认的右下角。 */
+  left: number | null;
+  top: number | null;
+}
+
 (() => {
   const CITY_PANEL_ROOT_CLASS = "wsm-city-panel";
   const CITY_PANEL_OWNER_ATTR = "data-wsm-city-owner";
   const CITY_PANEL_MAX_WALLETS = 8;
+  const CITY_PANEL_UI_KEY = "wsm.cityPanelUi";
+  const CITY_PANEL_VIEWPORT_GAP = 12;
+
+  // 折叠状态和拖动位置属于「用户对这个浮层的摆放」，必须跨 render 和跨页面存活：
+  // render 每次都会重建 DOM，不存住就会被下一次数据刷新重置掉。
+  const cityPanelUi: CityPanelUiState = { collapsed: false, left: null, top: null };
+  let cityPanelUiLoaded = false;
 
   const formatPercent = (value: number | undefined, digits = 1): string =>
     typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(digits)}%` : "—";
@@ -173,13 +187,6 @@ interface CityPanelController {
     const panel = el("div", CITY_PANEL_ROOT_CLASS);
     panel.setAttribute(CITY_PANEL_OWNER_ATTR, owner);
 
-    const header = el("div", "wsm-city-header");
-    header.append(el("span", "wsm-city-title", `${view.city} 战绩`));
-    if (view.sourceStatus === "stale") {
-      header.append(el("span", "wsm-city-stale", "缓存"));
-    }
-    panel.append(header);
-
     const totalWin = describeWinRate(
       {
         winRate: view.total.winRate,
@@ -188,6 +195,37 @@ interface CityPanelController {
       },
       view.minSample
     );
+
+    // 标题行同时是拖动手柄和折叠开关：header 整块可拖，右侧 chevron 按钮只管折叠，
+    // 两者职责分开，避免「想折叠结果把面板拖走了」。
+    const header = el("div", "wsm-city-header");
+    header.append(el("span", "wsm-city-drag-grip", "⋮⋮"));
+    header.append(el("span", "wsm-city-title", `${view.city} 战绩`));
+    if (view.sourceStatus === "stale") {
+      header.append(el("span", "wsm-city-stale", "缓存"));
+    }
+
+    const toggle = el("button", "wsm-city-toggle");
+    toggle.type = "button";
+    toggle.setAttribute("aria-expanded", cityPanelUi.collapsed ? "false" : "true");
+    toggle.setAttribute("aria-label", cityPanelUi.collapsed ? "展开城市战绩" : "折叠城市战绩");
+    toggle.title = cityPanelUi.collapsed ? "展开" : "折叠";
+    toggle.textContent = cityPanelUi.collapsed ? "▸" : "▾";
+    header.append(toggle);
+    panel.append(header);
+
+    // 折叠态一行摘要：城市 + 总胜率 + 地址数 + 总盈亏。放进 header 里，
+    // 这样折叠后 header 本身就是要展示的那一行，不需要另开一个容器。
+    const collapsedLine = el("div", "wsm-city-collapsed-line");
+    collapsedLine.append(
+      el("span", `wsm-city-collapsed-rate wsm-city-tone-${totalWin.tone}`, totalWin.text)
+    );
+    collapsedLine.append(el("span", "wsm-city-metric", `${view.walletCount} 地址`));
+    collapsedLine.append(el("span", "wsm-city-metric", formatUsd(view.total.pnlUsd)));
+    panel.append(collapsedLine);
+
+    const body = el("div", "wsm-city-body");
+    panel.append(body);
 
     const summary = el("div", "wsm-city-summary");
     summary.append(
@@ -202,23 +240,23 @@ interface CityPanelController {
         `${view.total.wonPositions}/${view.total.resolvedPositions} 已结算仓位`
       )
     );
-    panel.append(summary);
+    body.append(summary);
 
     if (view.wallets.length > 0) {
       const list = el("div", "wsm-city-list");
       view.wallets
         .slice(0, CITY_PANEL_MAX_WALLETS)
         .forEach((wallet) => list.append(buildWalletRow(wallet, view.minSample)));
-      panel.append(list);
+      body.append(list);
 
       if (view.wallets.length > CITY_PANEL_MAX_WALLETS) {
-        panel.append(
+        body.append(
           el("div", "wsm-city-muted wsm-city-more", `还有 ${view.wallets.length - CITY_PANEL_MAX_WALLETS} 个地址`)
         );
       }
     }
 
-    panel.append(
+    body.append(
       el("div", "wsm-city-footnote", `胜率按已结算仓位统计 · 数据 ${view.refreshedAt.slice(0, 10)}`)
     );
 
@@ -226,12 +264,189 @@ interface CityPanelController {
   };
 
 
+  const loadCityPanelUi = async (): Promise<void> => {
+    if (cityPanelUiLoaded) {
+      return;
+    }
+    cityPanelUiLoaded = true;
+    try {
+      const stored = await chrome.storage.local.get(CITY_PANEL_UI_KEY);
+      const raw = stored?.[CITY_PANEL_UI_KEY] as Partial<CityPanelUiState> | undefined;
+      if (!raw || typeof raw !== "object") {
+        return;
+      }
+      cityPanelUi.collapsed = raw.collapsed === true;
+      if (typeof raw.left === "number" && Number.isFinite(raw.left)) {
+        cityPanelUi.left = raw.left;
+      }
+      if (typeof raw.top === "number" && Number.isFinite(raw.top)) {
+        cityPanelUi.top = raw.top;
+      }
+    } catch {
+      // 拿不到就用默认值，面板照常工作。
+    }
+  };
+
+  const saveCityPanelUi = (): void => {
+    try {
+      void chrome.storage.local.set({ [CITY_PANEL_UI_KEY]: { ...cityPanelUi } });
+    } catch {
+      // 存不下不影响本次使用。
+    }
+  };
+
+  /** 夹回视口内：窗口缩小、翻到别的城市面板尺寸变化时都不能让面板跑出屏幕。 */
+  const clampPanelPosition = (panel: HTMLElement): void => {
+    if (cityPanelUi.left === null || cityPanelUi.top === null) {
+      return;
+    }
+    const rect = panel.getBoundingClientRect();
+    const maxLeft = Math.max(CITY_PANEL_VIEWPORT_GAP, window.innerWidth - rect.width - CITY_PANEL_VIEWPORT_GAP);
+    const maxTop = Math.max(CITY_PANEL_VIEWPORT_GAP, window.innerHeight - rect.height - CITY_PANEL_VIEWPORT_GAP);
+    cityPanelUi.left = Math.min(Math.max(CITY_PANEL_VIEWPORT_GAP, cityPanelUi.left), maxLeft);
+    cityPanelUi.top = Math.min(Math.max(CITY_PANEL_VIEWPORT_GAP, cityPanelUi.top), maxTop);
+    applyPanelPosition(panel);
+  };
+
+  const applyPanelPosition = (panel: HTMLElement): void => {
+    if (cityPanelUi.left === null || cityPanelUi.top === null) {
+      panel.classList.remove("wsm-city-panel-positioned");
+      panel.style.removeProperty("right");
+      panel.style.removeProperty("bottom");
+      panel.style.removeProperty("left");
+      panel.style.removeProperty("top");
+      return;
+    }
+    // 一旦用户拖过就走 left/top，右下角锚点必须摘掉，否则两套定位会互相拉扯。
+    panel.classList.add("wsm-city-panel-positioned");
+    panel.style.left = `${Math.round(cityPanelUi.left)}px`;
+    panel.style.top = `${Math.round(cityPanelUi.top)}px`;
+  };
+
+  const applyCollapsedState = (panel: HTMLElement): void => {
+    const collapsed = cityPanelUi.collapsed;
+    panel.classList.toggle("wsm-city-panel-collapsed", collapsed);
+    const toggle = panel.querySelector<HTMLButtonElement>(".wsm-city-toggle");
+    if (toggle) {
+      toggle.textContent = collapsed ? "▸" : "▾";
+      toggle.title = collapsed ? "展开" : "折叠";
+      toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      toggle.setAttribute("aria-label", collapsed ? "展开城市战绩" : "折叠城市战绩");
+    }
+  };
+
+  const setupPanelInteractions = (panel: HTMLElement): void => {
+    const header = panel.querySelector<HTMLElement>(".wsm-city-header");
+    const toggle = panel.querySelector<HTMLButtonElement>(".wsm-city-toggle");
+
+    toggle?.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      cityPanelUi.collapsed = !cityPanelUi.collapsed;
+      applyCollapsedState(panel);
+      saveCityPanelUi();
+    });
+
+    if (!header) {
+      return;
+    }
+
+    let dragging = false;
+    let moved = false;
+    let pointerId: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    let originLeft = 0;
+    let originTop = 0;
+
+    const onPointerMove = (event: PointerEvent): void => {
+      if (!dragging || event.pointerId !== pointerId) {
+        return;
+      }
+      const dx = event.clientX - startX;
+      const dy = event.clientY - startY;
+      // 阈值 3px：区分「点击标题」和「拖动面板」，否则松手会同时触发折叠。
+      if (!moved && Math.abs(dx) < 3 && Math.abs(dy) < 3) {
+        return;
+      }
+      moved = true;
+      event.preventDefault();
+      const rect = panel.getBoundingClientRect();
+      const maxLeft = Math.max(
+        CITY_PANEL_VIEWPORT_GAP,
+        window.innerWidth - rect.width - CITY_PANEL_VIEWPORT_GAP
+      );
+      const maxTop = Math.max(
+        CITY_PANEL_VIEWPORT_GAP,
+        window.innerHeight - rect.height - CITY_PANEL_VIEWPORT_GAP
+      );
+      cityPanelUi.left = Math.min(Math.max(CITY_PANEL_VIEWPORT_GAP, originLeft + dx), maxLeft);
+      cityPanelUi.top = Math.min(Math.max(CITY_PANEL_VIEWPORT_GAP, originTop + dy), maxTop);
+      applyPanelPosition(panel);
+    };
+
+    const endDrag = (event: PointerEvent): void => {
+      if (!dragging || event.pointerId !== pointerId) {
+        return;
+      }
+      dragging = false;
+      pointerId = null;
+      panel.classList.remove("wsm-city-panel-dragging");
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", endDrag);
+      window.removeEventListener("pointercancel", endDrag);
+      if (moved) {
+        clampPanelPosition(panel);
+        saveCityPanelUi();
+      } else {
+        // 没超过阈值 = 一次点击，收起/展开。折叠后同样能点标题拖动。
+        cityPanelUi.collapsed = !cityPanelUi.collapsed;
+        applyCollapsedState(panel);
+        saveCityPanelUi();
+      }
+    };
+
+    header.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) {
+        return;
+      }
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".wsm-city-toggle")) {
+        return;
+      }
+      const rect = panel.getBoundingClientRect();
+      dragging = true;
+      moved = false;
+      pointerId = event.pointerId;
+      startX = event.clientX;
+      startY = event.clientY;
+      originLeft = rect.left;
+      originTop = rect.top;
+      panel.classList.add("wsm-city-panel-dragging");
+      window.addEventListener("pointermove", onPointerMove);
+      window.addEventListener("pointerup", endDrag);
+      window.addEventListener("pointercancel", endDrag);
+    });
+
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        cityPanelUi.collapsed = !cityPanelUi.collapsed;
+        applyCollapsedState(panel);
+        saveCityPanelUi();
+      }
+    });
+  };
+
   /**
-   * 挂载城市战绩浮层。挂载点固定在页面右下角，避开 Polymarket 的右侧持仓栏。
-   * 重复调用只更新内容，不会叠出多个面板。
+   * 挂载城市战绩浮层。默认在右下角，可折叠、可拖动；折叠状态和位置存在
+   * chrome.storage.local 里，跨页面、跨刷新都保留。重复调用只更新内容，
+   * 不会叠出多个面板，且重建后仍沿用用户上次折叠/摆放的状态。
    */
   const mountCityWinRatePanel = (owner: string): CityPanelController => {
     let current: HTMLElement | null = null;
+
+    void loadCityPanelUi();
 
     const render = (view: CityWinRateView | null) => {
       const existing = document.querySelector<HTMLElement>(`.${CITY_PANEL_ROOT_CLASS}`);
@@ -246,18 +461,29 @@ interface CityPanelController {
       }
 
       const next = buildPanel(view, owner);
+      applyCollapsedState(next);
+      applyPanelPosition(next);
+      setupPanelInteractions(next);
       if (current?.parentNode) {
         current.replaceWith(next);
       } else {
         document.body.append(next);
       }
       current = next;
+      // 折叠/展开会改变面板尺寸，展开后要重新夹一次，折叠成窄条才不会卡在屏幕外。
+      clampPanelPosition(next);
     };
 
     const destroy = () => {
       current?.remove();
       current = null;
     };
+
+    window.addEventListener("resize", () => {
+      if (current) {
+        clampPanelPosition(current);
+      }
+    });
 
     return { render, destroy };
   };
@@ -2445,19 +2671,39 @@ type ContentRuntimeMessage =
       );
     });
 
-  const findMetaContainerInsideRow = (row: HTMLElement, address: string): HolderRowMount => {
-    const textAnchor = findBestTextAnchorInRow(row, address);
-    const nameLine = textAnchor ? findNameLineContainer(textAnchor, row) : null;
+  const isInjectedWrapper = (element: HTMLElement | null) =>
+      Boolean(
+        element &&
+          (element.classList.contains(STACK_CLASS) ||
+            element.classList.contains(`${STACK_CLASS}__head`) ||
+            element.dataset.wsmStack === "1")
+      );
 
-    if (nameLine?.parentElement instanceof HTMLElement && nameLine.parentElement !== row) {
-      return {
-        row,
-        nameLine,
-        mountTarget: nameLine.parentElement,
-        mainContainer:
-          nameLine.parentElement.parentElement instanceof HTMLElement ? nameLine.parentElement.parentElement : null
-      };
-    }
+    const findMetaContainerInsideRow = (row: HTMLElement, address: string): HolderRowMount => {
+      const textAnchor = findBestTextAnchorInRow(row, address);
+      const nameLine = textAnchor ? findNameLineContainer(textAnchor, row) : null;
+
+      if (nameLine?.parentElement instanceof HTMLElement && nameLine.parentElement !== row) {
+        // 挂标签时我们会把地址侧包进 stack/head，于是 nameLine 的直接父节点从
+        // 「页面原生的地址列」变成了「我们自己注入的 head」。如果直接用父节点当
+        // mountTarget，每一帧算出来的 mountTarget 都不一样 → sameMount 恒为 false
+        // → 每帧都把标签删掉重建，这正是「一闪一闪」的成因。
+        // 这里把注入出来的包装层跳过，mountTarget 永远落在同一个原生容器上。
+        let host = nameLine.parentElement;
+        while (isInjectedWrapper(host) && host.parentElement && host.parentElement !== row) {
+          host = host.parentElement;
+        }
+        if (host === row) {
+          host = nameLine.parentElement;
+        }
+
+        return {
+          row,
+          nameLine,
+          mountTarget: host,
+          mainContainer: host.parentElement instanceof HTMLElement ? host.parentElement : null
+        };
+      }
 
     const ml4Container = Array.from(row.querySelectorAll<HTMLElement>("div")).find(
       (element) =>
@@ -2902,52 +3148,75 @@ type ContentRuntimeMessage =
    *  3. 挂载点 = 地址行本身 → 把地址行包起来，标签挂它下面
    */
   const ensureAnnotationHost = (mount: HolderRowMount): HTMLElement => {
-    const { mountTarget } = mount;
+      const { mountTarget } = mount;
 
-    // 已经套过就直接复用，避免每帧再套一层。
-    if (mountTarget.classList.contains(STACK_CLASS)) {
-      return mountTarget;
-    }
-    const existingStack = mountTarget.querySelector<HTMLElement>(`:scope > .${STACK_CLASS}`);
-    if (existingStack) {
-      return existingStack;
-    }
+      // 已经套过就直接复用，避免每帧再套一层。
+      if (mountTarget.classList.contains(STACK_CLASS)) {
+        return mountTarget;
+      }
+      const existingStack = mountTarget.querySelector<HTMLElement>(`:scope > .${STACK_CLASS}`);
+      if (existingStack) {
+        return existingStack;
+      }
 
-    const hasProfileAnchor = Boolean(mountTarget.querySelector('a[href*="/profile/"]'));
-    const children = Array.from(mountTarget.children).filter(
-      (child): child is HTMLElement => child instanceof HTMLElement && !isOwnAnnotationNode(child)
-    );
-    const amountChildren = hasProfileAnchor ? children.filter(isAmountLikeChild) : [];
+      const hasProfileAnchor = Boolean(mountTarget.querySelector('a[href*="/profile/"]'));
+      const children = Array.from(mountTarget.children).filter(
+        (child): child is HTMLElement => child instanceof HTMLElement && !isOwnAnnotationNode(child)
+      );
+      if (children.length === 0) {
+        return mountTarget;
+      }
 
-    const buildStackHost = (): HTMLElement => {
-      mountTarget.classList.add(HOLDER_META_CLASS, `${HOLDER_META_CLASS}--stack`);
-      return mountTarget;
+      const amountChildren = hasProfileAnchor ? children.filter(isAmountLikeChild) : [];
+      // 页面原生、需要在原地保持横向排布的子节点（金额/份额列）。
+      const nativeSideChildren = amountChildren;
+
+      // 标签要放进一个纵向容器。两种做法：
+      //  A. 挂载点里有独立的金额列 → 只把「地址侧」子节点收进纵向容器，金额列原地不动
+      //  B. 挂载点里没有金额列，但有多个横向并排的原生子节点（头像 + 地址）→
+      //     绝不能直接把挂载点改成竖排（会把头像顶到地址上面），而是新建容器，
+      //     把原生子节点整体搬进一个 head 行保持原横向排布，标签挂在 head 下面
+      const addressSideChildren =
+        nativeSideChildren.length > 0 ? children.filter((child) => !nativeSideChildren.includes(child)) : children;
+      if (addressSideChildren.length === 0) {
+        return mountTarget;
+      }
+
+      const firstAddressSide = addressSideChildren[0];
+      if (!firstAddressSide) {
+        return mountTarget;
+      }
+
+      const stack = document.createElement("div");
+      stack.className = STACK_CLASS;
+      stack.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+      stack.dataset.wsmStack = "1";
+      mountTarget.insertBefore(stack, firstAddressSide);
+
+      if (nativeSideChildren.length > 0) {
+        // 情况 A：地址侧子节点保持原样横排放进 head，金额列留在 mountTarget 里不动。
+        const head = document.createElement("div");
+        head.className = `${STACK_CLASS}__head`;
+        head.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+        addressSideChildren.forEach((child) => head.append(child));
+        stack.append(head);
+        return stack;
+      }
+
+      // 情况 B：单个原生子节点（头像 + 地址通常已合并成一个）直接放进容器即可，
+      // 多于一个时也要先包一层 head 保住横向排布。
+      if (addressSideChildren.length === 1) {
+        stack.append(firstAddressSide);
+        return stack;
+      }
+
+      const head = document.createElement("div");
+      head.className = `${STACK_CLASS}__head`;
+      head.dataset.wsmOwner = CONTENT_INSTANCE_ID;
+      addressSideChildren.forEach((child) => head.append(child));
+      stack.append(head);
+      return stack;
     };
-
-    // 情况 1：没有金额列，整块堆叠即可。
-    if (amountChildren.length === 0) {
-      return buildStackHost();
-    }
-
-    // 情况 2/3：把地址侧的兄弟节点收进纵向容器，金额列保持在原位。
-    const stackableChildren = children.filter((child) => !amountChildren.includes(child));
-    if (stackableChildren.length === 0) {
-      return buildStackHost();
-    }
-
-    const firstStackable = stackableChildren[0];
-    if (!firstStackable) {
-      return buildStackHost();
-    }
-
-    const stack = document.createElement("div");
-    stack.className = STACK_CLASS;
-    stack.dataset.wsmOwner = CONTENT_INSTANCE_ID;
-    stack.dataset.wsmStack = "1";
-    mountTarget.insertBefore(stack, firstStackable);
-    stackableChildren.forEach((child) => stack.append(child));
-    return stack;
-  };
 
   const cleanupAnnotationHost = (host: HTMLElement | null | undefined) => {
     if (!host || !host.classList.contains(STACK_CLASS)) {
@@ -2985,8 +3254,7 @@ type ContentRuntimeMessage =
     }
     if (!entry.mountTarget.querySelector(`.${ROOT_CLASS}`)) {
       entry.mountTarget.classList.remove(HOLDER_META_CLASS);
-      entry.mountTarget.classList.remove(`${HOLDER_META_CLASS}--stack`);
-    }
+          }
     if (entry.mainContainer && !entry.mainContainer.querySelector(`.${ROOT_CLASS}`)) {
       entry.mainContainer.classList.remove(HOLDER_MAIN_CLASS);
     }
@@ -3286,9 +3554,11 @@ type ContentRuntimeMessage =
     let trigger: HTMLButtonElement | undefined = aliasButton;
     const visibleBadges = getVisibleAnnotationBadges(annotation);
     if (visibleBadges.length > 0) {
-      const chipList = document.createElement("div");
-      chipList.className = "wsm-chip-list";
-      const maxInlineBadges = 3;
+          const chipList = document.createElement("div");
+          chipList.className = "wsm-chip-list";
+          // 内联只放 2 个：持仓区是 ~100px 的窄列，第 3 个开始几乎必然换行，
+          // 行高会翻两三倍，看起来就是标签互相挤。多出来的收进 +N，悬停看全量。
+          const maxInlineBadges = 2;
       visibleBadges.slice(0, maxInlineBadges).forEach((badge, index) => {
         const chip = createChipNode(badge, annotation);
         if (index === 0) {
@@ -3310,6 +3580,40 @@ type ContentRuntimeMessage =
     }
 
     return { node: row, trigger };
+  };
+
+  /**
+   * 窄列自适应：按宿主实际宽度决定一行放得下几个标签。
+   *
+   * 持仓区（Yes/No 双列）每列只有 ~75-150px，固定放 2 个标签时几乎每个都独占一行，
+   * 行高能到 140px，看上去就是「位置不够、互相挤」。这里量一下宿主宽度，
+   * 窄了就只留最关键的 1 个，其余收进 +N（悬停仍看全量）。
+   */
+  const fitAnnotationChipsToWidth = (node: HTMLElement) => {
+    const chips = Array.from(node.querySelectorAll<HTMLElement>(".wsm-chip"));
+    const more = chips.find((chip) => chip.classList.contains("wsm-chip--more"));
+    const normal = chips.filter((chip) => chip !== more);
+    if (normal.length <= 1) {
+      return;
+    }
+
+    const host = node.parentElement;
+    const available = host?.getBoundingClientRect().width ?? 0;
+    if (available <= 0) {
+      return;
+    }
+
+    // 一行放不下两个标签（窄列）就只留 1 个。
+    const keep = available < 190 ? 1 : normal.length;
+    if (keep >= normal.length) {
+      return;
+    }
+
+    normal.slice(keep).forEach((chip) => chip.remove());
+    if (more) {
+      more.textContent = `+${normal.length}`;
+      more.title = `查看更多标签（共 ${normal.length} 个）`;
+    }
   };
 
   const upsertMountedAnnotation = (row: HolderRowSnapshot, annotation: ResolvedInlineAnnotation) => {
@@ -3337,10 +3641,11 @@ type ContentRuntimeMessage =
       row.mount.row.dataset.wsmRowSide = row.side;
       row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
       const built = buildAnnotationNode(annotation);
-      if (hoverOverlayManager?.getActiveKey() === annotation.key) {
-        hoverOverlayManager.close();
-      }
-      existing.node.replaceWith(built.node);
+            if (hoverOverlayManager?.getActiveKey() === annotation.key) {
+              hoverOverlayManager.close();
+            }
+            existing.node.replaceWith(built.node);
+            fitAnnotationChipsToWidth(built.node);
       mountedAnnotations.set(annotation.key, {
         node: built.node,
         trigger: built.trigger,
@@ -3373,7 +3678,8 @@ type ContentRuntimeMessage =
     row.mount.row.dataset.wsmRowSide = row.side;
     row.mount.row.dataset.wsmRowSurface = row.surfaceKind;
     const built = buildAnnotationNode(annotation);
-    const host = insertAnnotationNode(row.mount, built.node);
+          const host = insertAnnotationNode(row.mount, built.node);
+          fitAnnotationChipsToWidth(built.node);
 
     mountedAnnotations.set(annotation.key, {
       node: built.node,
@@ -3456,16 +3762,26 @@ type ContentRuntimeMessage =
   };
 
   const reconcileInlineAnnotations = (
-    panel: HolderPanelSnapshot,
-  payload: ContentMarketAnnotationResponse,
-    annotations: ResolvedInlineAnnotation[],
-    visibleAddressCount: number
-  ) => {
-    cancelTransientClear();
-    const rowsByKey = new Map(panel.rows.map((row) => [row.rowKey, row] as const));
-    const nextKeys = new Set(annotations.map((annotation) => annotation.key));
+      panel: HolderPanelSnapshot,
+      payload: ContentMarketAnnotationResponse,
+      annotations: ResolvedInlineAnnotation[],
+      visibleAddressCount: number
+    ) => {
+      cancelTransientClear();
+      const rowsByKey = new Map(panel.rows.map((row) => [row.rowKey, row] as const));
+      const nextKeys = new Set(annotations.map((annotation) => annotation.key));
 
-    [...mountedAnnotations.keys()].forEach((key) => {
+      // 探测抖动护栏：这一帧一行都没探到，但我们刚才明明还挂着一屏标签。
+      // 说明是瞬时探测失败（虚拟列表滚动、React 局部重排、我们自己的 DOM 变动触发的
+      // 重渲染与布局交错），不是页面真的空了。此时如果照常 reconcile，
+      // 下一行代码会把所有标签先删掉再重建 —— 肉眼看到的就是标签「一闪一闪」。
+      // 所以这一帧直接跳过 reconcile，保留现有节点不动，等下一帧探到行再说。
+      if (panel.rows.length === 0 && annotations.length === 0 && hasMountedAnnotationDom()) {
+        markAnnotationsFresh();
+        return false;
+      }
+
+      [...mountedAnnotations.keys()].forEach((key) => {
       const entry = mountedAnnotations.get(key);
       if (!entry || !nextKeys.has(key) || !entry.row.isConnected || !entry.mountTarget.isConnected) {
         removeMountedAnnotation(key);
